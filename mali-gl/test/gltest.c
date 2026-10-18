@@ -8,6 +8,11 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
+#include <drm_fourcc.h>
+#include <linux/dma-buf.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <fcntl.h>
 #include <gbm.h>
 #include <stdint.h>
@@ -221,6 +226,97 @@ main(void)
    printf("%d frames in %.3f s = %.1f fps (%.2f ms/frame)\n", frames, dt,
           frames / dt, dt * 1000.0 / frames);
    check(glGetError() == GL_NO_ERROR, "frame loop without GL error");
+
+   /* 4: Phase 2 - GBM buffers as dma-bufs, imported back through EGL and
+    * rendered to; then the pixels are read through a CPU mapping of the fd. */
+   printf("### phase 2: GBM / dma-buf\n");
+   printf("dma-heap: /dev/dma_heap/system %s\n",
+          access("/dev/dma_heap/system", R_OK) == 0 ? "readable" : "not accessible");
+   int has_import = exts && strstr(exts, "EGL_EXT_image_dma_buf_import") != NULL;
+   check(has_import, "EGL_EXT_image_dma_buf_import advertised");
+
+   struct gbm_bo *bo = gbm_bo_create(gbm, W, H, GBM_FORMAT_ARGB8888,
+                                     GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
+   check(bo != NULL, "gbm_bo_create ARGB8888 linear");
+   int bo_fd = bo ? gbm_bo_get_fd(bo) : -1;
+   check(bo_fd >= 0, "gbm_bo_get_fd (dma-buf export)");
+
+   if (bo && bo_fd >= 0 && has_import) {
+      uint32_t stride = gbm_bo_get_stride(bo);
+      printf("gbm bo: stride %u, modifier 0x%llx\n", stride,
+             (unsigned long long)gbm_bo_get_modifier(bo));
+
+      PFNEGLCREATEIMAGEKHRPROC create_image =
+         (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
+      PFNEGLDESTROYIMAGEKHRPROC destroy_image =
+         (PFNEGLDESTROYIMAGEKHRPROC)eglGetProcAddress("eglDestroyImageKHR");
+      PFNGLEGLIMAGETARGETRENDERBUFFERSTORAGEOESPROC rb_storage =
+         (PFNGLEGLIMAGETARGETRENDERBUFFERSTORAGEOESPROC)eglGetProcAddress(
+            "glEGLImageTargetRenderbufferStorageOES");
+      const EGLint img_attr[] = {
+         EGL_WIDTH, W, EGL_HEIGHT, H,
+         EGL_LINUX_DRM_FOURCC_EXT, DRM_FORMAT_ARGB8888,
+         EGL_DMA_BUF_PLANE0_FD_EXT, bo_fd,
+         EGL_DMA_BUF_PLANE0_OFFSET_EXT, 0,
+         EGL_DMA_BUF_PLANE0_PITCH_EXT, (EGLint)stride,
+         EGL_NONE};
+      EGLImageKHR img = create_image(dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT,
+                                     NULL, img_attr);
+      check(img != EGL_NO_IMAGE_KHR, "eglCreateImage from the dma-buf");
+      if (img == EGL_NO_IMAGE_KHR)
+         printf("eglGetError 0x%x\n", eglGetError());
+
+      if (img != EGL_NO_IMAGE_KHR && rb_storage) {
+         GLuint rb2, fb2;
+         glGenRenderbuffers(1, &rb2);
+         glBindRenderbuffer(GL_RENDERBUFFER, rb2);
+         rb_storage(GL_RENDERBUFFER, img);
+         glGenFramebuffers(1, &fb2);
+         glBindFramebuffer(GL_FRAMEBUFFER, fb2);
+         glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                   GL_RENDERBUFFER, rb2);
+         check(glCheckFramebufferStatus(GL_FRAMEBUFFER) ==
+                  GL_FRAMEBUFFER_COMPLETE,
+               "dma-buf framebuffer complete");
+         glClearColor(0, 0, 1, 1);
+         glClear(GL_COLOR_BUFFER_BIT);
+         glDrawArrays(GL_TRIANGLES, 0, 3);
+         glFinish();
+
+         glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+         centre = px + ((H / 2) * W + W / 2) * 4;
+         printf("dma-buf GL readback centre: %u %u %u %u\n", centre[0],
+                centre[1], centre[2], centre[3]);
+         check(pixel_is(centre, 0, 255, 0), "draw into the dma-buf (GL readback)");
+
+         /* What another process (Xwayland, the compositor) would see. */
+         uint8_t *map = mmap(NULL, (size_t)stride * H, PROT_READ, MAP_SHARED,
+                             bo_fd, 0);
+         if (map != MAP_FAILED) {
+            struct dma_buf_sync sync = {DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ};
+            ioctl(bo_fd, DMA_BUF_IOCTL_SYNC, &sync);
+            const uint8_t *c = map + (size_t)(H / 2) * stride + (W / 2) * 4;
+            const uint8_t *k = map + (size_t)1 * stride + 1 * 4;
+            printf("dma-buf CPU map centre BGRA: %u %u %u %u, corner: %u %u %u %u\n",
+                   c[0], c[1], c[2], c[3], k[0], k[1], k[2], k[3]);
+            check(c[0] < 3 && c[1] > 252 && c[2] < 3,
+                  "dma-buf CPU mapping shows the GPU result (centre green)");
+            check(k[0] > 252 && k[1] < 3 && k[2] < 3,
+                  "dma-buf CPU mapping shows the clear (corner blue)");
+            sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
+            ioctl(bo_fd, DMA_BUF_IOCTL_SYNC, &sync);
+            munmap(map, (size_t)stride * H);
+         } else {
+            check(0, "mmap of the dma-buf fd");
+         }
+         glBindFramebuffer(GL_FRAMEBUFFER, fb);
+         destroy_image(dpy, img);
+      }
+   }
+   if (bo_fd >= 0)
+      close(bo_fd);
+   if (bo)
+      gbm_bo_destroy(bo);
 
    eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
    eglDestroyContext(dpy, ctx);
