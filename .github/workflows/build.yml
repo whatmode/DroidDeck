@@ -235,7 +235,7 @@ jobs:
             . mali-gl/release.env
             gh release download "${MALI_GL_TAG}" -R "${MALI_GL_REPO:-${GITHUB_REPOSITORY}}" -p mali-gl-runtime-aarch64.tar.gz -O mali-gl-runtime.tar.gz
             echo "${MALI_GL_SHA256}  mali-gl-runtime.tar.gz" | sha256sum -c -
-            install -Dm644 mali-gl-runtime.tar.gz "$D/opt/mali-gl.tar.gz"
+            install -Dm644 mali-gl-runtime.tar.gz "$D/opt/mali-gl.tgz"
             rm mali-gl-runtime.tar.gz
           fi
           . tools/linuxfs/uruntime.env

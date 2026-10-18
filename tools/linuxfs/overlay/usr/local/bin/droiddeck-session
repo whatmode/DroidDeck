@@ -116,7 +116,7 @@ fi
 export GAMESCOPE_FORCE_VULKAN_REALTIME=${BL_GAMESCOPE_REALTIME:-0}
 
 # mali-gl: on a Mali phone (kbase, /dev/mali0, no DRM node) game mode runs on the
-# mali-gl stack the apk stages as /opt/mali-gl.tar.gz: Mesa's Panfrost GL/EGL/GBM
+# mali-gl stack the apk stages as /opt/mali-gl.tgz: Mesa's Panfrost GL/EGL/GBM
 # on kbase, an Xwayland whose glamor/DRI3 opens /dev/mali0, and a gamescope that
 # offers linux-dmabuf without a DRM node.  Steam's UI then draws on the GPU and
 # reaches gamescope as dma-bufs instead of software copies over the X socket.
@@ -126,7 +126,7 @@ mali_gl_setup() {
   [ -e /dev/mali0 ] && [ ! -e /dev/kgsl-3d0 ] || return 1
   [ "${BL_MALI_GL:-1}" != 0 ] && [ ! -e "$HOME/.droiddeck-mali-gl-off" ] || {
     echo "== mali-gl: off (BL_MALI_GL=0 or ~/.droiddeck-mali-gl-off)"; return 1; }
-  local tarball=/opt/mali-gl.tar.gz dir=/opt/mali-gl stamp
+  local tarball=/opt/mali-gl.tgz dir=/opt/mali-gl stamp
   if [ -f "$tarball" ]; then
     stamp=$(cksum < "$tarball" | cut -d' ' -f1)
     if [ "$(cat "$dir/.stamp" 2>/dev/null)" != "$stamp" ]; then
