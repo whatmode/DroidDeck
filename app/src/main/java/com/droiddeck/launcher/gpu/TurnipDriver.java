@@ -282,6 +282,14 @@ public final class TurnipDriver {
             if (forced.startsWith("a7")) return DRIVER_A7XX;
             if (forced.startsWith("a6")) return DRIVER_A6XX;
         }
+        // Turnip is an Adreno driver: on a Mali (or any non-Adreno) its KGSL ioctls find no GPU and
+        // the compositor enumerates nothing. Leave the compositor on the system Vulkan driver, which
+        // on a Mali is Arm's own and implements the dma-buf import the compositor needs.
+        // From SPLATPLAYS/DroidDeck (51bd995).
+        if (!com.droiddeck.launcher.core.DeviceSupport.INSTANCE.adreno()) {
+            Log.i(TAG, "not an Adreno: using the system Vulkan driver");
+            return null;
+        }
         String quest = QuestExperimental.INSTANCE.defaultAndroidDriver();
         if (quest != null) return quest;
         String model = gpuModel();
