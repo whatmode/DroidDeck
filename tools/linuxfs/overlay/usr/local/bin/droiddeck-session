@@ -144,6 +144,9 @@ mali_gl_setup() {
   export GBM_BACKENDS_PATH=$dir/lib/gbm LIBGL_DRIVERS_PATH=$dir/lib/dri
   # Zink is not part of this Mesa; GL goes to Panfrost on /dev/mali0.
   unset MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER LIBGL_ALWAYS_SOFTWARE LIBGL_KOPPER_DRI2
+  # Panfrost keeps desktop GL at 2.1 unless asked; Steam's GL composer (SDL) and CEF's
+  # ANGLE-on-GL need GL 3.x ("CreateOutputWindow: failed to acquire a gl context").
+  case ",${PAN_MESA_DEBUG:-}," in *,gl3,*) ;; *) export PAN_MESA_DEBUG=${PAN_MESA_DEBUG:+$PAN_MESA_DEBUG,}gl3 ;; esac
   BL_GAMESCOPE_BIN=$dir/bin/gamescope
   BL_MALI_GL_ACTIVE=1
   echo "== mali-gl: on ($(cat "$dir/VERSION" 2>/dev/null)): gamescope $BL_GAMESCOPE_BIN, Xwayland $WLR_XWAYLAND, Mesa $dir/lib"
