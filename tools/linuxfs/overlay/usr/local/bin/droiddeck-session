@@ -797,10 +797,13 @@ BUSCONF
     # (DISABLE_GAMESCOPE_WSI=1) for the Steam process tree. ~/.droiddeck-mali-cef-auto holds the
     # position; BL_MALI_CEF or ~/.droiddeck-mali-cef pins one (gl, vulkan, cpu, optional +nowsi).
     _bl_mali_auto=
+    _bl_mali_scale_args=()
     if [ -e /dev/mali0 ] && [ ! -e /dev/kgsl-3d0 ]; then
       _bl_mali_cef=${BL_MALI_CEF:-$(cat "$HOME/.droiddeck-mali-cef" 2>/dev/null)}
       if [ -z "$_bl_mali_cef" ]; then
-        _bl_mali_variants=(gl+nowsi vulkan+nowsi gl vulkan)
+        # gl+nowsi, vulkan+nowsi, gl and vulkan all died identically; keep one variant while the
+        # scale factor is tested (the death follows "ThreadSetForceDeviceScaleFactors 1 * 1.49").
+        _bl_mali_variants=(gl)
         _bl_mali_idx=$(cat "$HOME/.droiddeck-mali-cef-auto" 2>/dev/null || echo 0)
         case "$_bl_mali_idx" in ''|*[!0-9]*) _bl_mali_idx=0 ;; esac
         _bl_mali_idx=$((_bl_mali_idx % ${#_bl_mali_variants[@]}))
@@ -813,6 +816,14 @@ BUSCONF
           export DISABLE_GAMESCOPE_WSI=1
           echo "== steam: gamescope WSI layer off for the Steam process tree (DISABLE_GAMESCOPE_WSI=1)" ;;
       esac
+      # Every death so far comes right after Steam switches the Big Picture window to a 1.49x
+      # device scale. Pin CEF to 1x (the webhelper preload adds the flag to the browser process)
+      # and ask Steam for 1x too; BL_MALI_SCALE=auto leaves Steam's own choice alone.
+      if [ "${BL_MALI_SCALE:-1}" != auto ]; then
+        export BL_WEBHELPER_ARGS="${BL_WEBHELPER_ARGS:---no-zygote --in-process-gpu -AudioServiceOutOfProcess} --force-device-scale-factor=${BL_MALI_SCALE:-1}"
+        _bl_mali_scale_args=(-forcedesktopscaling "${BL_MALI_SCALE:-1}")
+        echo "== steam: Mali GPU, UI scale pinned to ${BL_MALI_SCALE:-1}x (webhelper: $BL_WEBHELPER_ARGS)"
+      fi
       case "${_bl_mali_cef%%+*}" in
         cpu)
           _bl_cef=(-cef-disable-gpu)
@@ -1240,7 +1251,7 @@ BUSCONF
       steam_started=$SECONDS
       _bl_html_from=$(stat -c %s "$steam_root/logs/steamui_html.txt" 2>/dev/null || echo 0)
       "${steam_client[@]}" "${_bl_ui[@]}" "${_bl_cdp[@]}" "${_bl_lang[@]}" -clientbeta "$steam_channel" \
-        -no-cef-sandbox -cef-ozone-platform=x11 "${_bl_cef[@]}" "$@"
+        -no-cef-sandbox -cef-ozone-platform=x11 "${_bl_cef[@]}" "${_bl_mali_scale_args[@]}" "$@"
       rc=$?
       steam_ran=$((SECONDS - steam_started))
       if [ -n "${boot_watch_pid:-}" ]; then
