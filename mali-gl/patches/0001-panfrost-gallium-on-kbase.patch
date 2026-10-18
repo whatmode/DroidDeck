@@ -18,7 +18,7 @@ index b5b9774..77dad25 100644
     if (render_fd >= 0 && render_fd != dri2_dpy->fd_render_gpu)
        close(render_fd);
 diff --git a/src/gallium/drivers/panfrost/pan_bo.c b/src/gallium/drivers/panfrost/pan_bo.c
-index 995224a..fd5bceb 100644
+index 995224a..0aaad27 100644
 --- a/src/gallium/drivers/panfrost/pan_bo.c
 +++ b/src/gallium/drivers/panfrost/pan_bo.c
 @@ -4,6 +4,8 @@
@@ -30,7 +30,7 @@ index 995224a..fd5bceb 100644
  #include <fcntl.h>
  #include <pthread.h>
  #include <stdio.h>
-@@ -19,6 +21,245 @@
+@@ -19,6 +21,246 @@
  
  #include "util/u_inlines.h"
  #include "util/u_math.h"
@@ -131,11 +131,12 @@ index 995224a..fd5bceb 100644
 +         volatile uint64_t *cell =
 +            (volatile uint64_t *)(dev->kbase_sync.cpu + i * PAN_KBASE_SYNC_STRIDE);
 +         pan_kbase_invalidate((const void *)cell, 16);
-+         if (*cell < dev->kbase_sync.high[i]) {
++         if (*cell < dev->kbase_sync.high[i])
 +            *cell = dev->kbase_sync.high[i];
-+            pan_kbase_invalidate((const void *)cell, 16);
-+         }
 +         cell[1] = 0; /* error word */
++         /* Push the CPU writes out (DC CIVAC) before the GPU writes this
++          * line, or a later clean could overwrite the GPU's value. */
++         pan_kbase_invalidate((const void *)cell, 16);
 +         dev->kbase_sync.used |= BITFIELD64_BIT(i);
 +         *slot = i;
 +         ret = 0;
@@ -276,7 +277,7 @@ index 995224a..fd5bceb 100644
  
  /* This file implements a userspace BO cache. Allocating and freeing
   * GPU-visible buffers is very expensive, and even the extra kernel roundtrips
-@@ -129,6 +370,11 @@ panfrost_bo_free(struct panfrost_bo *bo)
+@@ -129,6 +371,11 @@ panfrost_bo_free(struct panfrost_bo *bo)
     struct pan_kmod_vm *vm = bo->dev->kmod.vm;
     uint64_t gpu_va = bo->ptr.gpu;
  
@@ -288,7 +289,7 @@ index 995224a..fd5bceb 100644
     /* reset_bo_slot() will undo the poisoning done in simple_mtx_destroy(), but
      * we need it for the valgrind annotation.
      */
-@@ -330,7 +576,11 @@ panfrost_bo_munmap(struct panfrost_bo *bo)
+@@ -330,7 +577,11 @@ panfrost_bo_munmap(struct panfrost_bo *bo)
     if (!bo->ptr.cpu)
        return;
  
@@ -301,7 +302,7 @@ index 995224a..fd5bceb 100644
        mesa_loge("munmap failed: %s", strerror(errno));
        abort();
     }
-@@ -538,6 +788,11 @@ panfrost_bo_export(struct panfrost_bo *bo)
+@@ -538,6 +789,11 @@ panfrost_bo_export(struct panfrost_bo *bo)
  {
     PAN_TRACE_FUNC(PAN_TRACE_GL_BO);
  
