@@ -660,7 +660,8 @@ jobs:
 
   sign:
     needs: build
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    # Release signing needs the upstream project's private key; forks only get the testkey-signed APK.
+    if: github.repository == 'Droid-Deck/DroidDeck' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     permissions:
       contents: read
       actions: read
