@@ -9,9 +9,12 @@ GPU node (GAMESCOPE_DMABUF_DEVICE, default /dev/mali0) as main device and the
 renderer's sampled dma-buf formats as the one tranche.  A patched Xwayland
 (mali-gl) opens that node through GBM/Mesa-on-kbase.
 
+wlroots: let set_default_feedback() accept a main device that is not DRM
+(skip the import checks, as it already does for a device without a render
+node) instead of failing drmGetDeviceFromDevId().
+
 Only taken when the renderer has no DRM fd, so Adreno/DRM devices are
 unchanged.
-
 diff --git a/src/wlserver.cpp b/src/wlserver.cpp
 index 9655dfd..5eb237e 100644
 --- a/src/wlserver.cpp
@@ -76,3 +79,36 @@ index 9655dfd..5eb237e 100644
  	wlserver.wlr.compositor = wlr_compositor_create(wlserver.display, 5, wlserver.wlr.renderer);
  
  	wl_signal_add( &wlserver.wlr.compositor->events.new_surface, &new_surface_listener );
+diff --git a/subprojects/wlroots/types/wlr_linux_dmabuf_v1.c b/subprojects/wlroots/types/wlr_linux_dmabuf_v1.c
+index 3165e88..98272d8 100644
+--- a/subprojects/wlroots/types/wlr_linux_dmabuf_v1.c
++++ b/subprojects/wlroots/types/wlr_linux_dmabuf_v1.c
+@@ -3,6 +3,7 @@
+ #include <fcntl.h>
+ #include <stdlib.h>
+ #include <sys/mman.h>
++#include <sys/sysmacros.h>
+ #include <unistd.h>
+ #include <wlr/backend.h>
+ #include <wlr/config.h>
+@@ -892,13 +893,14 @@ static bool set_default_feedback(struct wlr_linux_dmabuf_v1 *linux_dmabuf,
+ 	}
+ 
+ 	drmDevice *device = NULL;
+-	if (drmGetDeviceFromDevId(feedback->main_device, 0, &device) != 0) {
+-		wlr_log_errno(WLR_ERROR, "drmGetDeviceFromDevId failed");
+-		goto error_compiled;
+-	}
+-
+ 	int main_device_fd = -1;
+-	if (device->available_nodes & (1 << DRM_NODE_RENDER)) {
++	if (drmGetDeviceFromDevId(feedback->main_device, 0, &device) != 0) {
++		// gamescope/mali-gl: the main device may be a GPU node that is not DRM
++		// (Mali kbase). Clients get its dev_t; import checks are skipped.
++		wlr_log(WLR_INFO, "main device %u:%u is not a DRM device, "
++			"skipping DMA-BUF import checks",
++			major(feedback->main_device), minor(feedback->main_device));
++	} else if (device->available_nodes & (1 << DRM_NODE_RENDER)) {
+ 		const char *name = device->nodes[DRM_NODE_RENDER];
+ 		main_device_fd = open(name, O_RDWR | O_CLOEXEC);
+ 		drmFreeDevice(&device);

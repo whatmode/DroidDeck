@@ -58,8 +58,10 @@ main(void)
    printf("X server: %s %d\n", ServerVendor(x), VendorRelease(x));
 
    xcb_connection_t *c = XGetXCBConnection(x);
-   xcb_dri3_query_version_reply_t *dv = xcb_dri3_query_version_reply(
-      c, xcb_dri3_query_version(c, 1, 2), NULL);
+   const xcb_query_extension_reply_t *ext = xcb_get_extension_data(c, &xcb_dri3_id);
+   xcb_dri3_query_version_reply_t *dv = NULL;
+   if (ext && ext->present)
+      dv = xcb_dri3_query_version_reply(c, xcb_dri3_query_version(c, 1, 2), NULL);
    check(dv != NULL, "X server offers DRI3");
    if (dv) {
       printf("DRI3 %u.%u\n", dv->major_version, dv->minor_version);
