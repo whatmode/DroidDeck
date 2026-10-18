@@ -788,10 +788,10 @@ BUSCONF
     # CEF's software compositor (-cef-disable-gpu) is worse: the webhelper dies silently right
     # after creating the Big Picture window, and Steam restarts it every ~10 s forever. So the
     # GL path stays the default (with the nested refresh capped, see gamescope above);
-    # BL_MALI_CEF (or ~/.droiddeck-mali-cef) picks: gl (default), vulkan (ANGLE on PanVK
-    # directly, the Adreno path) or cpu (software).
+    # BL_MALI_CEF (or ~/.droiddeck-mali-cef) picks: vulkan (default: ANGLE on PanVK directly,
+    # the Adreno path, no Zink/GLX), gl (ANGLE on Zink: dies with Fatal IO error 11) or cpu.
     if [ -e /dev/mali0 ] && [ ! -e /dev/kgsl-3d0 ]; then
-      _bl_mali_cef=${BL_MALI_CEF:-$(cat "$HOME/.droiddeck-mali-cef" 2>/dev/null || echo gl)}
+      _bl_mali_cef=${BL_MALI_CEF:-$(cat "$HOME/.droiddeck-mali-cef" 2>/dev/null || echo vulkan)}
       case "$_bl_mali_cef" in
         cpu)
           _bl_cef=(-cef-disable-gpu)
