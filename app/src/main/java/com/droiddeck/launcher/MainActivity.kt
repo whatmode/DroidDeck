@@ -1180,10 +1180,10 @@ class MainActivity : ComponentActivity() {
             savedIntent(savedInstanceState, KEY_SWITCHING_TO)?.let { awaitSessionEnd(it, savedInstanceState.getLong(KEY_SWITCH_DEADLINE)) }
         }
 
+        // Storage access is not asked for at launch: driver imports go through Android's document
+        // picker (one file at a time), and the in-app file browser asks for storage only when it
+        // is opened.
         val wanted = ArrayList<String>()
-        if (checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-            wanted.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-        }
         if (SessionPrefs.micEnabled(this) && !SessionPrefs.micAsked(this)
             && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             wanted.add(Manifest.permission.RECORD_AUDIO)
