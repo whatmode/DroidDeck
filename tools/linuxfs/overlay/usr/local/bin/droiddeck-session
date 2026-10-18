@@ -1130,11 +1130,76 @@ BUSCONF
         /usr/local/bin/droiddeck-steam-desktop-ui &
         desktop_ui_pid=$!
       fi
+      # Startup watcher: while Steam loads, report every few seconds which of its processes are
+      # alive (and their memory), which appeared or died, free memory, and the new error-looking
+      # lines from Steam's own logs - so a black screen during loading leaves a trail in
+      # session.log. Runs for BL_BOOT_WATCH_SECS (default 300); BL_BOOT_WATCH=0 turns it off.
+      boot_watch_pid=
+      if [ "${BL_BOOT_WATCH:-1}" != 0 ]; then
+        (
+          _bw_logs="$steam_root/logs"
+          declare -A _bw_off=() _bw_seen=() _bw_name=()
+          for _bw_f in cef_log.txt webhelper.txt webhelper_js.txt console_log.txt steamui_html.txt; do
+            _bw_off[$_bw_f]=$(stat -c %s "$_bw_logs/$_bw_f" 2>/dev/null || echo 0)
+          done
+          _bw_prev=""
+          _bw_t0=$SECONDS
+          _bw_end=$((SECONDS + ${BL_BOOT_WATCH_SECS:-300}))
+          while [ "$SECONDS" -lt "$_bw_end" ]; do
+            sleep "${BL_BOOT_WATCH_STEP:-5}"
+            _bw_t=$((SECONDS - _bw_t0))
+            _bw_now=""
+            _bw_desc=""
+            for _bw_d in /proc/[0-9]*; do
+              _bw_c=$(cat "$_bw_d/comm" 2>/dev/null) || continue
+              case "$_bw_c" in
+                steam|steamwebhelper|steamsysinfo|gamescope*|Xwayland|mangoapp|steam-runtime*)
+                  _bw_pid=${_bw_d#/proc/}
+                  _bw_rss=$(awk '/^VmRSS/ {printf "%d", $2/1024}' "$_bw_d/status" 2>/dev/null)
+                  _bw_type=$(tr '\0' '\n' < "$_bw_d/cmdline" 2>/dev/null | sed -n 's/^--type=//p' | head -1)
+                  _bw_now+=" $_bw_pid"
+                  _bw_name[$_bw_pid]="${_bw_c}${_bw_type:+/$_bw_type}"
+                  _bw_desc+=" ${_bw_c}${_bw_type:+/$_bw_type}:${_bw_rss:-?}M"
+                  ;;
+              esac
+            done
+            _bw_mem=$(awk '/^MemAvailable/ {printf "%d", $2/1024}' /proc/meminfo)
+            echo "== boot +${_bw_t}s: free ${_bw_mem}M |${_bw_desc:- no Steam processes}"
+            for _bw_p in $_bw_prev; do
+              case " $_bw_now " in *" $_bw_p "*) ;; *) echo "== boot +${_bw_t}s: process $_bw_p (${_bw_name[$_bw_p]:-?}) exited" ;; esac
+            done
+            _bw_prev=$_bw_now
+            for _bw_f in "${!_bw_off[@]}"; do
+              _bw_size=$(stat -c %s "$_bw_logs/$_bw_f" 2>/dev/null || echo 0)
+              [ "$_bw_size" -lt "${_bw_off[$_bw_f]}" ] && _bw_off[$_bw_f]=0
+              if [ "$_bw_size" -gt "${_bw_off[$_bw_f]}" ]; then
+                tail -c +$((${_bw_off[$_bw_f]} + 1)) "$_bw_logs/$_bw_f" 2>/dev/null \
+                  | grep -aiE 'error|fatal|fail|crash|lost|abort|gpu|context|egl|angle|vulkan|zink|timeout|exited' \
+                  | grep -avE 'crash key|Failed to connect to the bus|inotify|NETLINK|UPower|DaemonVersion|Floss' \
+                  | tail -n 15 | sed "s/^/== boot +${_bw_t}s: [$_bw_f] /"
+                _bw_off[$_bw_f]=$_bw_size
+              fi
+            done
+            for _bw_dump in /tmp/dumps/*.dmp; do
+              [ -f "$_bw_dump" ] || continue
+              [ -n "${_bw_seen[$_bw_dump]:-}" ] && continue
+              _bw_seen[$_bw_dump]=1
+              echo "== boot +${_bw_t}s: crash dump written: $_bw_dump"
+            done
+          done
+          echo "== boot: watcher done after ${BL_BOOT_WATCH_SECS:-300}s"
+        ) &
+        boot_watch_pid=$!
+      fi
       steam_started=$SECONDS
       "${steam_client[@]}" "${_bl_ui[@]}" "${_bl_cdp[@]}" "${_bl_lang[@]}" -clientbeta "$steam_channel" \
         -no-cef-sandbox -cef-ozone-platform=x11 "${_bl_cef[@]}" "$@"
       rc=$?
       steam_ran=$((SECONDS - steam_started))
+      if [ -n "${boot_watch_pid:-}" ]; then
+        kill "$boot_watch_pid" 2>/dev/null || true
+        wait "$boot_watch_pid" 2>/dev/null || true
+      fi
       if [ -n "$desktop_ui_pid" ]; then
         kill "$desktop_ui_pid" 2>/dev/null || true
         wait "$desktop_ui_pid" 2>/dev/null || true
