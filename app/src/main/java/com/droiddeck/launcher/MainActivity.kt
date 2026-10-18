@@ -208,6 +208,37 @@ class MainActivity : ComponentActivity() {
     private val pickComponent = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
         if (r.resultCode == RESULT_OK) InAppFilePicker.pickedUri(r.data)?.let { importComponent(it) }
     }
+    /**
+     * Driver zips are picked with Android's own document picker, so DroidDeck is granted
+     * access to that one file only and needs no storage permission for an import.
+     */
+    private var pendingDriverImport: Boolean? = null
+    private val pickDriverDocument = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val linux = pendingDriverImport
+        pendingDriverImport = null
+        if (uri != null) drivers.importDriver(uri, linux)
+    }
+    private fun launchDriverDocumentPicker(linux: Boolean?) {
+        pendingDriverImport = linux
+        try {
+            pickDriverDocument.launch(DRIVER_ZIP_MIME_TYPES)
+        } catch (e: android.content.ActivityNotFoundException) {
+            pendingDriverImport = null
+            val title = getString(
+                when (linux) {
+                    true -> R.string.drivers_pick_linux
+                    false -> R.string.drivers_pick_android
+                    null -> R.string.drivers_pick_any
+                },
+            )
+            val intent = InAppFilePicker.buildIntent(this, ZIP_EXT, title)
+            when (linux) {
+                true -> pickLinuxDriver.launch(intent)
+                false -> pickAndroidDriver.launch(intent)
+                null -> pickAnyDriver.launch(intent)
+            }
+        }
+    }
     private val pickLinuxDriver = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
         if (r.resultCode == RESULT_OK) InAppFilePicker.pickedUri(r.data)?.let { drivers.importDriver(it, linux = true) }
     }
@@ -1466,9 +1497,9 @@ class MainActivity : ComponentActivity() {
                 onRemoveLinux = { id -> drivers.deleteDriver(id, linux = true) },
                 onRemoveAndroid = { id -> drivers.deleteDriver(id, linux = false) },
                 onDownloadDriver = { name -> drivers.downloadReleaseDriver(name) },
-                onImportLinux = { pickLinuxDriver.launch(InAppFilePicker.buildIntent(this, ZIP_EXT, getString(R.string.drivers_pick_linux))) },
-                onImportAndroid = { pickAndroidDriver.launch(InAppFilePicker.buildIntent(this, ZIP_EXT, getString(R.string.drivers_pick_android))) },
-                onImportZip = { pickAnyDriver.launch(InAppFilePicker.buildIntent(this, ZIP_EXT, getString(R.string.drivers_pick_any))) },
+                onImportLinux = { launchDriverDocumentPicker(linux = true) },
+                onImportAndroid = { launchDriverDocumentPicker(linux = false) },
+                onImportZip = { launchDriverDocumentPicker(linux = null) },
                 onRestoreBundled = { TurnipDriver(this).restoreBundled(); drivers.refreshDrivers() },
                 onMode = { m -> drivers.chooseMode(m) },
                 onRestart = { drivers.restartApp() },
@@ -2096,6 +2127,7 @@ class MainActivity : ComponentActivity() {
         private const val KEY_SWITCH_DEADLINE = "switch_deadline"
         private val SESSION_ENDED = setOf(SessionPhase.IDLE, SessionPhase.FAILED)
         private val ZIP_EXT = listOf("zip")
+        private val DRIVER_ZIP_MIME_TYPES = arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream")
         private val WCP_EXT = listOf("wcp")
     }
 }
