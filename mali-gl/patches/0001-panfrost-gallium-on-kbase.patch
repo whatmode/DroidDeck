@@ -17,6 +17,23 @@ index b5b9774..77dad25 100644
  
     if (render_fd >= 0 && render_fd != dri2_dpy->fd_render_gpu)
        close(render_fd);
+diff --git a/src/gallium/drivers/panfrost/pan_bo.c b/src/gallium/drivers/panfrost/pan_bo.c
+index 995224a..56cdd5a 100644
+--- a/src/gallium/drivers/panfrost/pan_bo.c
++++ b/src/gallium/drivers/panfrost/pan_bo.c
+@@ -330,7 +330,11 @@ panfrost_bo_munmap(struct panfrost_bo *bo)
+    if (!bo->ptr.cpu)
+       return;
+ 
+-   if (os_munmap((void *)(uintptr_t)bo->ptr.cpu, panfrost_bo_size(bo))) {
++   /* mali-gl: go through pan_kmod: on kbase the CPU mapping of a SAME_VA BO
++    * is its GPU mapping too, and must stay until the BO is freed (the kbase
++    * backend keeps it and hands it back on the next mmap). */
++   if (pan_kmod_bo_munmap(bo->kmod_bo, (void *)(uintptr_t)bo->ptr.cpu,
++                          panfrost_bo_size(bo))) {
+       mesa_loge("munmap failed: %s", strerror(errno));
+       abort();
+    }
 diff --git a/src/gallium/drivers/panfrost/pan_context.c b/src/gallium/drivers/panfrost/pan_context.c
 index 4dbc7db..3e4c8a3 100644
 --- a/src/gallium/drivers/panfrost/pan_context.c
