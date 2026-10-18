@@ -788,16 +788,21 @@ BUSCONF
     # CEF's software compositor (-cef-disable-gpu) is worse: the webhelper dies silently right
     # after creating the Big Picture window, and Steam restarts it every ~10 s forever. So the
     # GL path stays the default (with the nested refresh capped, see gamescope above);
-    # BL_MALI_CEF=cpu (or ~/.droiddeck-mali-cef containing "cpu") selects the software one.
+    # BL_MALI_CEF (or ~/.droiddeck-mali-cef) picks: gl (default), vulkan (ANGLE on PanVK
+    # directly, the Adreno path) or cpu (software).
     if [ -e /dev/mali0 ] && [ ! -e /dev/kgsl-3d0 ]; then
       _bl_mali_cef=${BL_MALI_CEF:-$(cat "$HOME/.droiddeck-mali-cef" 2>/dev/null || echo gl)}
-      if [ "$_bl_mali_cef" != cpu ]; then
-        _bl_cef=(-cef-force-gpu -cef-use-gl=angle -cef-use-angle=gl)
-        echo "== steam: Mali GPU, CEF draws through ANGLE on GL"
-      else
-        _bl_cef=(-cef-disable-gpu)
-        echo "== steam: Mali GPU, CEF draws in software (-cef-disable-gpu)"
-      fi
+      case "$_bl_mali_cef" in
+        cpu)
+          _bl_cef=(-cef-disable-gpu)
+          echo "== steam: Mali GPU, CEF draws in software (-cef-disable-gpu)" ;;
+        vulkan)
+          _bl_cef=(-cef-force-gpu -cef-use-gl=angle -cef-use-angle=vulkan)
+          echo "== steam: Mali GPU, CEF draws through ANGLE on Vulkan (PanVK directly)" ;;
+        *)
+          _bl_cef=(-cef-force-gpu -cef-use-gl=angle -cef-use-angle=gl)
+          echo "== steam: Mali GPU, CEF draws through ANGLE on GL" ;;
+      esac
     fi
     [ "${steam_cef_gpu:-1}" = 1 ] || _bl_cef=(-cef-disable-gpu)
     if [ "${BL_DESKTOP:-}" = 1 ] && [ "${BL_STEAM_UI:-}" = desktop ]; then
