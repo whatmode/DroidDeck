@@ -17,22 +17,26 @@ jobs:
       - uses: actions/checkout@v4
       - name: Fetch sources
         run: |
-          set -euxo pipefail
+          set -x
           mkdir -p x && cd x
-          # Arch's current xorg-xwayland package (same version as the DroidDeck rootfs).
-          git clone -q --depth 1 https://gitlab.archlinux.org/archlinux/packaging/packages/xorg-xwayland.git arch-xwayland
-          ver=$(sed -n 's/^pkgver=//p' arch-xwayland/PKGBUILD)
+          exec > >(tee ../fetch.log) 2>&1
+          git clone -q --depth 1 https://gitlab.archlinux.org/archlinux/packaging/packages/xorg-xwayland.git arch-xwayland || echo "FAIL arch clone"
+          ver=$(sed -n 's/^pkgver=//p' arch-xwayland/PKGBUILD 2>/dev/null)
+          [ -n "$ver" ] || ver=24.1.8
           echo "xwayland $ver" > ../VERSIONS
-          curl -fsSL "https://xorg.freedesktop.org/archive/individual/xserver/xwayland-$ver.tar.xz" | tar xJ
-          mv "xwayland-$ver" xwayland
-          rm -rf xwayland/test xwayland/doc
-          # gamescope as patched by DroidDeck
-          . ../tools/gamescope/release.env 2>/dev/null || true
-          git clone -q --depth 1 --branch 3.16.29 --recurse-submodules --shallow-submodules https://github.com/ValveSoftware/gamescope.git gamescope || git clone -q --depth 1 --branch 3.16.29 https://github.com/ValveSoftware/gamescope.git gamescope
+          for u in "https://xorg.freedesktop.org/archive/individual/xserver/xwayland-$ver.tar.xz" \
+                   "https://www.x.org/releases/individual/xserver/xwayland-$ver.tar.xz"; do
+            curl -fsSL "$u" -o xw.tar.xz && break || echo "FAIL $u"
+          done
+          tar xJf xw.tar.xz && mv "xwayland-$ver" xwayland && rm -rf xwayland/test xwayland/doc || echo "FAIL xwayland extract"
+          git clone -q --depth 1 --branch 3.16.29 https://github.com/ValveSoftware/gamescope.git gamescope || echo "FAIL gamescope clone"
+          if [ -d gamescope ]; then
+            (cd gamescope && git submodule update --init --depth 1 subprojects/wlroots) || echo "FAIL wlroots submodule"
+            rm -rf gamescope/.git gamescope/subprojects/*/.git
+          fi
           echo "gamescope 3.16.29" >> ../VERSIONS
-          rm -rf gamescope/.git gamescope/subprojects/*/.git
-          find gamescope/subprojects -mindepth 1 -maxdepth 1 ! -name wlroots ! -name libliftoff -exec rm -rf {} + || true
           rm -rf arch-xwayland/.git
+          true
       - name: Publish to mali-gl-xsrc
         run: |
           set -euxo pipefail
@@ -42,8 +46,8 @@ jobs:
           cd ../out
           git checkout -q --orphan mali-gl-xsrc
           git rm -rfq . || true
-          cp -r "$GITHUB_WORKSPACE/x/xwayland" "$GITHUB_WORKSPACE/x/gamescope" "$GITHUB_WORKSPACE/x/arch-xwayland" .
-          cp "$GITHUB_WORKSPACE/VERSIONS" .
+          for d in xwayland gamescope arch-xwayland; do [ -d "$GITHUB_WORKSPACE/x/$d" ] && cp -r "$GITHUB_WORKSPACE/x/$d" . || true; done
+          cp "$GITHUB_WORKSPACE/VERSIONS" "$GITHUB_WORKSPACE/fetch.log" .
           find . -size +5M -type f -delete
           git add -A
           git commit -qm "Xwayland + gamescope sources for mali-gl"
