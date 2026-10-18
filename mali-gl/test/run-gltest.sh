@@ -12,13 +12,13 @@ LOG=$P/mali-gl-test.log
 export LD_LIBRARY_PATH=$P/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 export GBM_BACKENDS_PATH=$P/lib/gbm
 export LIBGL_DRIVERS_PATH=$P/lib/dri
-export MESA_LOG_LEVEL=${MESA_LOG_LEVEL:-info}
+export MESA_LOG_LEVEL=${MESA_LOG_LEVEL:-debug}
 export EGL_LOG_LEVEL=${EGL_LOG_LEVEL:-debug}
 export MESA_DEBUG=${MESA_DEBUG:-1}
 {
   echo "### mali-gl test $(date)"
   uname -a
-  ls -l /dev/mali* 2>&1
+  ls -l /dev/mali0 2>&1
   echo "### gltest"
   timeout 120 "$P/bin/gltest"
   echo "### exit code $?"

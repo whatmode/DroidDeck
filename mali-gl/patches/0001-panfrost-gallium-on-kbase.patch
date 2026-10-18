@@ -1,3 +1,22 @@
+diff --git a/src/egl/drivers/dri2/egl_dri2.c b/src/egl/drivers/dri2/egl_dri2.c
+index b5b9774..77dad25 100644
+--- a/src/egl/drivers/dri2/egl_dri2.c
++++ b/src/egl/drivers/dri2/egl_dri2.c
+@@ -868,7 +868,13 @@ dri2_setup_device(_EGLDisplay *disp, EGLBoolean software)
+          return EGL_FALSE;
+    }
+ 
+-   dev = _eglFindDevice(render_fd, software);
++   /* mali-gl: a Mali kbase node has no DRM device behind it, so there is no
++    * matching EGLDevice.  Attach the display to the software device entry
++    * (always present) instead of failing eglInitialize. */
++   if (render_fd >= 0 && loader_fd_is_kbase(render_fd))
++      dev = _eglFindDevice(-1, true);
++   else
++      dev = _eglFindDevice(render_fd, software);
+ 
+    if (render_fd >= 0 && render_fd != dri2_dpy->fd_render_gpu)
+       close(render_fd);
 diff --git a/src/gallium/drivers/panfrost/pan_context.c b/src/gallium/drivers/panfrost/pan_context.c
 index 4dbc7db..3e4c8a3 100644
 --- a/src/gallium/drivers/panfrost/pan_context.c
