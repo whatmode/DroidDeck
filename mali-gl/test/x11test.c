@@ -67,14 +67,6 @@ install_crash_handler(void)
    sigaction(SIGILL, &sa, NULL);
 }
 
-static void
-check(int ok, const char *what)
-{
-   printf("%s: %s\n", ok ? "PASS" : "FAIL", what);
-   fflush(stdout);
-   if (!ok)
-      failures++;
-}
 
 static double
 now_s(void)
