@@ -224,6 +224,13 @@ if [ -z "${BL_INSIDE:-}" ]; then
   [ "$nested" != "$width" ] && args+=(-S stretch) && export BL_STRETCHED=1
   if [ "${BL_FPS:-0}" -gt 0 ]; then
     args+=(-r "$BL_FPS")
+  elif [ -e /dev/mali0 ] && [ ! -e /dev/kgsl-3d0 ] && [ "${BL_MALI_REFRESH:-60}" -gt 0 ]; then
+    # On a Mali, Xwayland has no glamor (no GBM without a DRM node), so every frame a GL client
+    # such as Steam's UI draws is copied through the X connection in software. At the panel's
+    # 120 Hz that traffic overruns the connection (the webhelper dies with "Fatal IO error 11 on
+    # X server"). Cap the nested refresh; BL_MALI_REFRESH=0 restores the panel rate.
+    args+=(-r "${BL_MALI_REFRESH:-60}")
+    echo "== gamescope: Mali GPU, nested refresh capped at ${BL_MALI_REFRESH:-60} Hz"
   elif [ "${BL_REFRESH:-0}" -gt 0 ]; then
     args+=(-r "$BL_REFRESH")
   fi
@@ -778,11 +785,13 @@ BUSCONF
     # With ANGLE on GL, Steam's UI builds and shows a frame, then the webhelper's in-process GPU
     # thread stalls (glXGetSyncValuesOML fails on every frame: Xwayland here has no glamor/DRI3,
     # so GL presents through a software path) and Steam restarts the webhelper twice and quits.
-    # So the Mali default is CEF's software compositor; games still render on the GPU.
-    # BL_MALI_CEF=gl (or a file ~/.droiddeck-mali-cef containing "gl") brings the GL path back.
+    # CEF's software compositor (-cef-disable-gpu) is worse: the webhelper dies silently right
+    # after creating the Big Picture window, and Steam restarts it every ~10 s forever. So the
+    # GL path stays the default (with the nested refresh capped, see gamescope above);
+    # BL_MALI_CEF=cpu (or ~/.droiddeck-mali-cef containing "cpu") selects the software one.
     if [ -e /dev/mali0 ] && [ ! -e /dev/kgsl-3d0 ]; then
-      _bl_mali_cef=${BL_MALI_CEF:-$(cat "$HOME/.droiddeck-mali-cef" 2>/dev/null || echo cpu)}
-      if [ "$_bl_mali_cef" = gl ]; then
+      _bl_mali_cef=${BL_MALI_CEF:-$(cat "$HOME/.droiddeck-mali-cef" 2>/dev/null || echo gl)}
+      if [ "$_bl_mali_cef" != cpu ]; then
         _bl_cef=(-cef-force-gpu -cef-use-gl=angle -cef-use-angle=gl)
         echo "== steam: Mali GPU, CEF draws through ANGLE on GL"
       else
