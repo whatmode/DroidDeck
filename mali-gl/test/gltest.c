@@ -1,6 +1,10 @@
 /* mali-gl Phase 1 test: GLES2 through GBM + EGL on /dev/mali0, offscreen.
  * Clears an FBO, draws a triangle, reads pixels back and times a few frames.
  * Exit code 0 = all checks passed. */
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <execinfo.h>
+#include <signal.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
@@ -17,6 +21,40 @@
 #define H 256
 
 static int failures;
+
+/* Print a symbolizable backtrace (library + offset) on a crash. */
+static void
+crash_handler(int sig, siginfo_t *si, void *uc)
+{
+   void *bt[64];
+   int n = backtrace(bt, 64);
+
+   (void)uc;
+   fprintf(stderr, "CRASH: signal %d, fault address %p\n", sig, si->si_addr);
+   for (int i = 0; i < n; i++) {
+      Dl_info d;
+      if (dladdr(bt[i], &d) && d.dli_fname)
+         fprintf(stderr, "  #%d %s+0x%lx %s\n", i, d.dli_fname,
+                 (unsigned long)((char *)bt[i] - (char *)d.dli_fbase),
+                 d.dli_sname ? d.dli_sname : "");
+      else
+         fprintf(stderr, "  #%d %p\n", i, bt[i]);
+   }
+   fflush(stderr);
+   _exit(128 + sig);
+}
+
+static void
+install_crash_handler(void)
+{
+   struct sigaction sa = {0};
+   sa.sa_sigaction = crash_handler;
+   sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+   sigaction(SIGSEGV, &sa, NULL);
+   sigaction(SIGBUS, &sa, NULL);
+   sigaction(SIGABRT, &sa, NULL);
+   sigaction(SIGILL, &sa, NULL);
+}
 
 static void
 check(int ok, const char *what)
@@ -66,6 +104,7 @@ main(void)
       node = "/dev/mali0";
 
    setvbuf(stdout, NULL, _IOLBF, 0);
+   install_crash_handler();
    printf("mali-gl gltest: opening %s\n", node);
    int fd = open(node, O_RDWR | O_CLOEXEC);
    check(fd >= 0, "open GPU node");
@@ -157,7 +196,9 @@ main(void)
 
    glClearColor(0, 0, 1, 1);
    glClear(GL_COLOR_BUFFER_BIT);
+   printf("step: glDrawArrays\n");
    glDrawArrays(GL_TRIANGLES, 0, 3);
+   printf("step: glReadPixels after draw\n");
    glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
    const uint8_t *centre = px + ((H / 2) * W + W / 2) * 4;
    const uint8_t *corner = px + ((H - 2) * W + 1) * 4;

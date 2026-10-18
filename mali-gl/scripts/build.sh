@@ -69,7 +69,7 @@ log "installed: $(cd "$R" && find . -name '*.so*' -type f | sort | tr '\n' ' ')"
 
 # test binary, linked against the freshly built libraries
 mkdir -p "$R/bin"
-if gcc -O2 -Wall -o "$R/bin/gltest" "$HERE/test/gltest.c" \
+if gcc -O2 -g -funwind-tables -Wall -o "$R/bin/gltest" "$HERE/test/gltest.c" \
      -I"$R/include" -L"$R/lib" -Wl,-rpath-link,"$R/lib" -lEGL -lGLESv2 -lgbm > "$OUT/gltest-build.log" 2>&1; then
   log "gltest: built"
 else

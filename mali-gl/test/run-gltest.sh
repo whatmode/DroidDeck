@@ -9,6 +9,8 @@ if [ ! -t 1 ] && [ -z "${MALI_GL_IN_TERM:-}" ]; then
   if command -v xterm >/dev/null; then exec xterm -hold -e bash "$P/run-gltest.sh"; fi
 fi
 LOG=$P/mali-gl-test.log
+# DroidDeck's desktop forces software GL; this test wants the GPU.
+unset LIBGL_ALWAYS_SOFTWARE GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE
 export LD_LIBRARY_PATH=$P/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 export GBM_BACKENDS_PATH=$P/lib/gbm
 export LIBGL_DRIVERS_PATH=$P/lib/dri
@@ -20,7 +22,7 @@ export MESA_DEBUG=${MESA_DEBUG:-1}
   uname -a
   ls -l /dev/mali0 2>&1
   echo "### gltest"
-  timeout 120 "$P/bin/gltest"
+  "$P/bin/gltest"
   echo "### exit code $?"
 } 2>&1 | tee "$LOG"
 echo
