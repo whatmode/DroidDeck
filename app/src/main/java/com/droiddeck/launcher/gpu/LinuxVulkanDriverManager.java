@@ -107,8 +107,8 @@ public class LinuxVulkanDriverManager {
                     if (entry.isDirectory()) continue;
                     String base = new File(entry.getName()).getName();
                     if (base.isEmpty()) continue;
-                    if (isDriverLibrary(base)) {
-                        if (soName != null) Log.w(TAG, "zip has several Vulkan driver libraries; using the first (" + soName + ")");
+                    if (base.startsWith("libvulkan_freedreno") && base.endsWith(".so")) {
+                        if (soName != null) Log.w(TAG, "zip has several libvulkan_freedreno*.so; using the first (" + soName + ")");
                         else {
                             Files.copy(zis, new File(tmpDir, LIB_NAME).toPath(), StandardCopyOption.REPLACE_EXISTING);
                             soName = base;
@@ -128,17 +128,6 @@ public class LinuxVulkanDriverManager {
         } finally {
             if (!keep) FileUtils.delete(tmpDir);
         }
-    }
-
-    /**
-     * Mesa Vulkan drivers a Linux runtime driver zip may carry: Turnip (Adreno) ships
-     * libvulkan_freedreno.so, PanVK (Mali) ships libvulkan_panfrost.so. Whichever it is,
-     * it is stored as {@link #LIB_NAME}; the ICD points at it by path, so the file name
-     * does not matter to the Vulkan loader.
-     */
-    static boolean isDriverLibrary(String base) {
-        if (!base.endsWith(".so") && !base.contains(".so.")) return false;
-        return base.startsWith("libvulkan_freedreno") || base.startsWith("libvulkan_panfrost");
     }
 
     File newStagingDir() throws IOException {
