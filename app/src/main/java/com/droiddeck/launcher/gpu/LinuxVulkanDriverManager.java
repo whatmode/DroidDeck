@@ -34,7 +34,7 @@ public class LinuxVulkanDriverManager {
     /** The zip's own ICD manifests, whose api_version the generated one carries over. */
     private static final List<String> ICD_NAMES = Collections.unmodifiableList(Arrays.asList(
             "freedreno_icd.aarch64.json", "panfrost_icd.aarch64.json", "panvk_icd.aarch64.json",
-            "lvp_icd.aarch64.json"));
+            "lvp_icd.aarch64.json", ICD_NAME));
     /**
      * Driver libraries accepted as a Linux runtime driver, by the name they ship under: Turnip
      * (Adreno), PanVK (Mali, built as libvulkan_panfrost or libvulkan_panvk) and lavapipe. The
