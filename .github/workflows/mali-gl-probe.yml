@@ -1,10 +1,6 @@
 name: Mali GL probe
 
 on:
-  push:
-    paths:
-      - 'mali-gl/**'
-      - '.github/workflows/mali-gl-probe.yml'
   workflow_dispatch:
 
 permissions:
