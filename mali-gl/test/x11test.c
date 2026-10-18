@@ -3,6 +3,9 @@
  * draws a triangle in a window, presents it, and that the X server sees the
  * GPU's pixels (XGetImage).  Exit code 0 = all checks passed. */
 #define _GNU_SOURCE
+#include <dlfcn.h>
+#include <execinfo.h>
+#include <signal.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
@@ -20,6 +23,49 @@
 #define H 240
 
 static int failures;
+
+static void
+check(int ok, const char *what)
+{
+   printf("%s: %s\n", ok ? "PASS" : "FAIL", what);
+   fflush(stdout);
+   if (!ok)
+      failures++;
+}
+
+/* Print a symbolizable backtrace (library + offset) on a crash. */
+static void
+crash_handler(int sig, siginfo_t *si, void *uc)
+{
+   void *bt[64];
+   int n = backtrace(bt, 64);
+
+   (void)uc;
+   fprintf(stderr, "CRASH: signal %d, fault address %p\n", sig, si->si_addr);
+   for (int i = 0; i < n; i++) {
+      Dl_info d;
+      if (dladdr(bt[i], &d) && d.dli_fname)
+         fprintf(stderr, "  #%d %s+0x%lx %s\n", i, d.dli_fname,
+                 (unsigned long)((char *)bt[i] - (char *)d.dli_fbase),
+                 d.dli_sname ? d.dli_sname : "");
+      else
+         fprintf(stderr, "  #%d %p\n", i, bt[i]);
+   }
+   fflush(stderr);
+   _exit(128 + sig);
+}
+
+static void
+install_crash_handler(void)
+{
+   struct sigaction sa = {0};
+   sa.sa_sigaction = crash_handler;
+   sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+   sigaction(SIGSEGV, &sa, NULL);
+   sigaction(SIGBUS, &sa, NULL);
+   sigaction(SIGABRT, &sa, NULL);
+   sigaction(SIGILL, &sa, NULL);
+}
 
 static void
 check(int ok, const char *what)
@@ -51,6 +97,7 @@ int
 main(void)
 {
    setvbuf(stdout, NULL, _IOLBF, 0);
+   install_crash_handler();
    Display *x = XOpenDisplay(NULL);
    check(x != NULL, "connect to the X server");
    if (!x)
@@ -154,10 +201,15 @@ main(void)
       XDestroyImage(img);
    }
 
-   eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-   eglTerminate(dpy);
-   XCloseDisplay(x);
    printf("%s (%d failure%s)\n", failures ? "RESULT: FAIL" : "RESULT: PASS",
           failures, failures == 1 ? "" : "s");
+   printf("step: teardown\n");
+   eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+   eglDestroySurface(dpy, surf);
+   eglDestroyContext(dpy, ctx);
+   printf("step: eglTerminate\n");
+   eglTerminate(dpy);
+   XCloseDisplay(x);
+   printf("step: teardown done\n");
    return failures ? 1 : 0;
 }
