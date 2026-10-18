@@ -775,9 +775,20 @@ BUSCONF
     _bl_cef=(-cef-force-gpu -cef-use-gl=angle -cef-use-angle=vulkan)
     # On a Mali (PanVK over kbase, /dev/mali0) ANGLE's Vulkan backend never gets past "GPU
     # process started"; ANGLE over GL (Zink on PanVK) does. From SPLATPLAYS/DroidDeck (61f07ad).
+    # With ANGLE on GL, Steam's UI builds and shows a frame, then the webhelper's in-process GPU
+    # thread stalls (glXGetSyncValuesOML fails on every frame: Xwayland here has no glamor/DRI3,
+    # so GL presents through a software path) and Steam restarts the webhelper twice and quits.
+    # So the Mali default is CEF's software compositor; games still render on the GPU.
+    # BL_MALI_CEF=gl (or a file ~/.droiddeck-mali-cef containing "gl") brings the GL path back.
     if [ -e /dev/mali0 ] && [ ! -e /dev/kgsl-3d0 ]; then
-      _bl_cef=(-cef-force-gpu -cef-use-gl=angle -cef-use-angle=gl)
-      echo "== steam: Mali GPU, CEF draws through ANGLE on GL"
+      _bl_mali_cef=${BL_MALI_CEF:-$(cat "$HOME/.droiddeck-mali-cef" 2>/dev/null || echo cpu)}
+      if [ "$_bl_mali_cef" = gl ]; then
+        _bl_cef=(-cef-force-gpu -cef-use-gl=angle -cef-use-angle=gl)
+        echo "== steam: Mali GPU, CEF draws through ANGLE on GL"
+      else
+        _bl_cef=(-cef-disable-gpu)
+        echo "== steam: Mali GPU, CEF draws in software (-cef-disable-gpu)"
+      fi
     fi
     [ "${steam_cef_gpu:-1}" = 1 ] || _bl_cef=(-cef-disable-gpu)
     if [ "${BL_DESKTOP:-}" = 1 ] && [ "${BL_STEAM_UI:-}" = desktop ]; then
