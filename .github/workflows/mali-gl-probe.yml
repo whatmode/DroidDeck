@@ -69,7 +69,7 @@ jobs:
           cp out/*.txt "../results/$dest/"
           for f in configure.log apply.log; do [ -f out/$f ] && tail -c 200000 out/$f > "../results/$dest/$f"; done
           [ -f out/build.log ] && grep -nE -B3 -A6 "error:" out/build.log | head -c 1500000 > "../results/$dest/build-errors-context.log" || true
-          rm -rf ../results/latest && cp -r "../results/$dest" ../results/latest
+          rm -rf ../results/results/latest && cp -r "../results/$dest" ../results/results/latest
           git -C ../results add -A
           git -C ../results commit -qm "probe ${GITHUB_SHA::7}: $(head -c 200 out/summary.txt | tr '\n' ' ')"
           git -C ../results push -q origin mali-gl-results
