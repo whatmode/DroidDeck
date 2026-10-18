@@ -773,6 +773,12 @@ BUSCONF
     _bl_ui=(-gamepadui)
     [ "${BL_STEAM_UI:-}" = desktop ] && _bl_ui=()
     _bl_cef=(-cef-force-gpu -cef-use-gl=angle -cef-use-angle=vulkan)
+    # On a Mali (PanVK over kbase, /dev/mali0) ANGLE's Vulkan backend never gets past "GPU
+    # process started"; ANGLE over GL (Zink on PanVK) does. From SPLATPLAYS/DroidDeck (61f07ad).
+    if [ -e /dev/mali0 ] && [ ! -e /dev/kgsl-3d0 ]; then
+      _bl_cef=(-cef-force-gpu -cef-use-gl=angle -cef-use-angle=gl)
+      echo "== steam: Mali GPU, CEF draws through ANGLE on GL"
+    fi
     [ "${steam_cef_gpu:-1}" = 1 ] || _bl_cef=(-cef-disable-gpu)
     if [ "${BL_DESKTOP:-}" = 1 ] && [ "${BL_STEAM_UI:-}" = desktop ]; then
       _bl_cef=(-cef-disable-gpu)

@@ -1858,7 +1858,7 @@
     <string name="turnip_reject_library_missing">meta.json вказує %1$s, якого немає в zip-файлі</string>
     <string name="turnip_reject_not_aarch64">%1$s не є 64-бітною спільною бібліотекою ELF для AArch64</string>
     <string name="turnip_reject_glibc">%1$s пов’язаний з glibc - це Turnip «-Linux», який належить до розділу «Драйвер середовища Linux»</string>
-    <string name="lvd_no_library">У цьому zip немає libvulkan_freedreno*.so. Zip Android (AdrenoTools) або -Wayland Turnip не є драйвером середовища Linux.</string>
+    <string name="lvd_no_library">У цьому zip немає бібліотеки Vulkan-драйвера (libvulkan_freedreno, libvulkan_panvk, libvulkan_panfrost або libvulkan_lvp .so). Zip Android (AdrenoTools) або -Wayland Turnip не є драйвером середовища Linux.</string>
     <string name="lvd_not_aarch64">%1$s не є 64-бітною спільною бібліотекою ELF для AArch64.</string>
     <string name="lvd_not_glibc">%1$s не є драйвером glibc - він пов’язаний з libc Android. Середовищу Linux потрібен zip «-Linux»; звичайний Turnip або Turnip «-Wayland» клієнт Steam взагалі не може завантажити.</string>
     <string name="bundle_no_manifest">Не є набором драйверів: немає manifest.json із вказаними драйверами android і linux</string>

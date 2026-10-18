@@ -386,7 +386,12 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
                         try {
                             LinuxVulkanDriverManager(activity).installDriver(uri, name)
                         } catch (runtime: IllegalArgumentException) {
-                            throw IllegalArgumentException(activity.getString(R.string.drivers_not_a_driver))
+                            // Say why the runtime importer refused it too: that is the half a
+                            // glibc driver (Turnip -Linux, PanVK) is meant for.
+                            val why = runtime.message?.takeIf { it.isNotBlank() }
+                            throw IllegalArgumentException(
+                                activity.getString(R.string.drivers_not_a_driver) + (why?.let { "\n$it" } ?: ""),
+                            )
                         }
                     }
                 }

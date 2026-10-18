@@ -75,11 +75,14 @@ object DriverBundle {
 
             val linuxStage = lm.newStagingDir()
             val linuxId = try {
-                val library = linuxDir.listFiles()?.firstOrNull { it.isFile && it.name.startsWith("libvulkan_freedreno") && it.name.endsWith(".so") }
+                val library = linuxDir.listFiles()?.firstOrNull { it.isFile && LinuxVulkanDriverManager.isRuntimeDriverName(it.name) }
                 library?.copyTo(File(linuxStage, LinuxVulkanDriverManager.LIB_NAME))
+                val apiVersion = linuxDir.listFiles()
+                    ?.firstOrNull { it.isFile && it.name.endsWith(".json") && it.name.contains("icd") }
+                    ?.let { FileUtils.readString(it)?.let(LinuxVulkanDriverManager::apiVersionOf) }
                 val meta = File(linuxDir, LinuxVulkanDriverManager.META_NAME).takeIf { it.isFile }
                     ?.let { runCatching { JSONObject(FileUtils.readString(it)) }.getOrNull() }
-                lm.adopt(linuxStage, library?.name, meta, manifest.name)
+                lm.adopt(linuxStage, library?.name, meta, manifest.name, apiVersion)
             } catch (e: Exception) {
                 FileUtils.delete(linuxStage)
                 throw e

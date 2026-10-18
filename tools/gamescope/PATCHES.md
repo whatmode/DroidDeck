@@ -57,5 +57,11 @@ library list, before anything is published.
   time, as the VRR branch already did: its next frame goes out on the first refresh a capped interval
   after its last one, with half a refresh of tolerance so an on-time window keeps every Nth refresh.
 
+- `0120-tolerate-a-vulkan-device-without-drm-nodes.patch` - from SPLATPLAYS/DroidDeck (d64584f): a
+  driver may implement `VK_EXT_physical_device_drm` and still expose no nodes, which is what a GPU on
+  a proprietary kernel driver does (PanVK over kbase on a Tensor phone: `mali_kbase` registers
+  `/dev/mali0` as a miscellaneous char device and owns no DRM node). It now warns and carries on,
+  refusing only when a named node then fails to open.
+
 Sixteen more of Armada's patches are DRM/lease/HDR-on-KMS work for a native display, which this
 app's Wayland-hosted gamescope never reaches, or need a newer gamescope than the runtime has.

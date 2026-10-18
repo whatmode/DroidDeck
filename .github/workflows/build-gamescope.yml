@@ -40,3 +40,13 @@ jobs:
           set -euo pipefail
           gh release create "${{ inputs.tag }}" --latest=false --prerelease=false --title "${{ inputs.tag }}" --notes "gamescope 3.16.29 with tools/gamescope/patches; staged by the apk over /usr/local/bin/gamescope. sha256 $(cut -d' ' -f1 gamescope.tzst.sha256)" gamescope.tzst gamescope.tzst.sha256 || gh release upload "${{ inputs.tag }}" gamescope.tzst gamescope.tzst.sha256 --clobber
           gh release edit "${{ inputs.tag }}" --latest=false --prerelease=false
+      - name: Publish on a fork
+        # A fork has no workflow_dispatch access from the app's tooling; publish each push under a
+        # tag of its own so tools/gamescope/release.env can point at it.
+        if: github.event_name == 'push' && github.repository != 'Droid-Deck/DroidDeck'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="gamescope-3.16.29-fork-${GITHUB_SHA::7}"
+          gh release create "$tag" --latest=false --title "$tag" --notes "gamescope 3.16.29 with tools/gamescope/patches at ${GITHUB_SHA}; sha256 $(cut -d' ' -f1 gamescope.tzst.sha256)" gamescope.tzst gamescope.tzst.sha256 || gh release upload "$tag" gamescope.tzst gamescope.tzst.sha256 --clobber

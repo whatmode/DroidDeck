@@ -17,6 +17,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.zip.ZipEntry;
@@ -28,6 +29,38 @@ public class LinuxVulkanDriverManager {
     public static final String LIB_NAME = "libvulkan_freedreno.so";
     public static final String ICD_NAME = "icd.json";
     public static final String META_NAME = "meta.json";
+    /** Used when a zip's own ICD manifest states no api_version. */
+    private static final String API_DEFAULT = "1.1.274";
+    /** The zip's own ICD manifests, whose api_version the generated one carries over. */
+    private static final List<String> ICD_NAMES = Collections.unmodifiableList(Arrays.asList(
+            "freedreno_icd.aarch64.json", "panfrost_icd.aarch64.json", "panvk_icd.aarch64.json",
+            "lvp_icd.aarch64.json"));
+    /**
+     * Driver libraries accepted as a Linux runtime driver, by the name they ship under: Turnip
+     * (Adreno), PanVK (Mali, built as libvulkan_panfrost or libvulkan_panvk) and lavapipe. The
+     * library is stored as {@link #LIB_NAME} whatever it is; the ICD points at it by absolute path,
+     * so the file name does not matter to the Vulkan loader.
+     * Ported from SPLATPLAYS/DroidDeck (51bd995).
+     */
+    private static final List<String> LIB_PREFIXES = Collections.unmodifiableList(Arrays.asList(
+            "libvulkan_freedreno", "libvulkan_panvk", "libvulkan_panfrost", "libvulkan_lvp"));
+
+    public static boolean isRuntimeDriverName(String name) {
+        if (name == null || !name.endsWith(".so")) return false;
+        for (String prefix : LIB_PREFIXES) if (name.startsWith(prefix)) return true;
+        return false;
+    }
+
+    /** The api_version of an ICD manifest's JSON text, or null. */
+    static String apiVersionOf(String manifestJson) {
+        try {
+            JSONObject icd = new JSONObject(manifestJson).optJSONObject("ICD");
+            String v = icd == null ? null : icd.optString("api_version", "");
+            return v == null || v.isEmpty() ? null : v;
+        } catch (Exception e) {
+            return null;
+        }
+    }
 
     private final Context context;
     private final File rootDir;
@@ -98,6 +131,7 @@ public class LinuxVulkanDriverManager {
         boolean keep = false;
         try {
             String soName = null;
+            String apiVersion = null;
             JSONObject zipMeta = null;
             try (InputStream is = context.getContentResolver().openInputStream(zipUri);
                  ZipInputStream zis = new ZipInputStream(is)) {
@@ -107,12 +141,17 @@ public class LinuxVulkanDriverManager {
                     if (entry.isDirectory()) continue;
                     String base = new File(entry.getName()).getName();
                     if (base.isEmpty()) continue;
-                    if (base.startsWith("libvulkan_freedreno") && base.endsWith(".so")) {
-                        if (soName != null) Log.w(TAG, "zip has several libvulkan_freedreno*.so; using the first (" + soName + ")");
+                    if (isRuntimeDriverName(base)) {
+                        if (soName != null) Log.w(TAG, "zip has several Vulkan driver libraries; using the first (" + soName + ")");
                         else {
                             Files.copy(zis, new File(tmpDir, LIB_NAME).toPath(), StandardCopyOption.REPLACE_EXISTING);
                             soName = base;
                         }
+                    } else if (ICD_NAMES.contains(base)) {
+                        // Only its api_version is kept: Turnip declares 1.1, PanVK 1.4, and a
+                        // generated manifest that understates it makes the loader skip the driver.
+                        String v = apiVersionOf(new String(readAll(zis), StandardCharsets.UTF_8));
+                        if (v != null) apiVersion = v;
                     } else if (base.equals(META_NAME)) {
                         try {
                             zipMeta = new JSONObject(new String(readAll(zis), StandardCharsets.UTF_8));
@@ -122,7 +161,7 @@ public class LinuxVulkanDriverManager {
                     }
                 }
             }
-            String id = adopt(tmpDir, soName, zipMeta, displayName);
+            String id = adopt(tmpDir, soName, zipMeta, displayName, apiVersion);
             keep = true;
             return id;
         } finally {
@@ -138,7 +177,15 @@ public class LinuxVulkanDriverManager {
     }
 
     String adopt(File tmpDir, String soName, JSONObject zipMeta, String displayName) throws IOException {
+        return adopt(tmpDir, soName, zipMeta, displayName, null);
+    }
+
+    String adopt(File tmpDir, String soName, JSONObject zipMeta, String displayName, String apiVersion)
+            throws IOException {
         try {
+            // No manifest in the zip: PanVK is a Vulkan 1.4 driver, and an understated version
+            // makes the loader pass it over.
+            if (apiVersion == null && soName != null && soName.startsWith("libvulkan_pan")) apiVersion = "1.4.303";
             if (soName == null) {
                 throw new IllegalArgumentException(context.getString(R.string.lvd_no_library));
             }
@@ -168,7 +215,7 @@ public class LinuxVulkanDriverManager {
             icd.put("file_format_version", "1.0.0");
             JSONObject icdBody = new JSONObject();
             icdBody.put("library_path", new File(dir, LIB_NAME).getAbsolutePath());
-            icdBody.put("api_version", "1.1.274");
+            icdBody.put("api_version", apiVersion != null ? apiVersion : API_DEFAULT);
             icd.put("ICD", icdBody);
             if (!FileUtils.writeString(new File(tmpDir, ICD_NAME), icd.toString(2))) throw new IOException("cannot write icd.json");
 
@@ -180,6 +227,7 @@ public class LinuxVulkanDriverManager {
             meta.put("libc", "glibc");
             meta.put("minGlibc", minGlibc);
             meta.put("sourceLibraryName", soName);
+            meta.put("apiVersion", apiVersion != null ? apiVersion : API_DEFAULT);
             meta.put("importedAt", System.currentTimeMillis());
             if (!FileUtils.writeString(new File(tmpDir, META_NAME), meta.toString(2))) throw new IOException("cannot write meta.json");
 
