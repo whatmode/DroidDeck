@@ -2,6 +2,12 @@
 # Run the mali-gl offscreen GLES test.  Works from wherever the tarball was unpacked.
 # The log is written next to this script (mali-gl-test.log) and to the terminal.
 P=$(cd "$(dirname "$0")" && pwd)
+# Started by a click in the file manager: reopen in a terminal so the output is visible.
+if [ ! -t 1 ] && [ -z "${MALI_GL_IN_TERM:-}" ]; then
+  export MALI_GL_IN_TERM=1
+  if command -v konsole >/dev/null; then exec konsole --hold -e bash "$P/run-gltest.sh"; fi
+  if command -v xterm >/dev/null; then exec xterm -hold -e bash "$P/run-gltest.sh"; fi
+fi
 LOG=$P/mali-gl-test.log
 export LD_LIBRARY_PATH=$P/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 export GBM_BACKENDS_PATH=$P/lib/gbm
