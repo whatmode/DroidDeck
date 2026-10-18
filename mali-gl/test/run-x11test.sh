@@ -24,6 +24,10 @@ GS=$P/bin/gamescope
   echo "### gamescope (headless) + Xwayland + x11test"
   timeout 90 "$GS" --backend headless -W 1280 -H 720 -w 1280 -h 720 -- "$P/bin/x11test"
   echo "### exit code $?"
+  echo "### GL context probe (PAN_MESA_DEBUG=gl3, as in game mode)"
+  PAN_MESA_DEBUG=gl3 timeout 90 "$GS" --backend headless -W 1280 -H 720 -w 1280 -h 720 -- "$P/bin/glprobe" 2>&1 | grep -v "MESA: info\|scriptmgr\|^>"
+  echo "### GL context probe without gl3"
+  timeout 90 "$GS" --backend headless -W 1280 -H 720 -w 1280 -h 720 -- "$P/bin/glprobe" 2>&1 | grep -E "^ *(GLX|EGL)|PAN_MESA"
 } 2>&1 | tee "$LOG"
 echo
 echo "Log saved to $LOG"

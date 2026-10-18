@@ -83,6 +83,12 @@ else
   log "x11test: BUILD FAILED"; tail -20 "$OUT/gltest-build.log" | tee -a "$OUT/summary.txt"; exit 1
 fi
 install -m755 "$HERE/test/run-x11test.sh" "$R/run-x11test.sh"
+if gcc -O2 -g -Wall -o "$R/bin/glprobe" "$HERE/test/glprobe.c" \
+     -I"$R/include" -L"$R/lib" -Wl,-rpath-link,"$R/lib" -lEGL -lGL -lX11 >> "$OUT/gltest-build.log" 2>&1; then
+  log "glprobe: built"
+else
+  log "glprobe: BUILD FAILED"; tail -20 "$OUT/gltest-build.log" | tee -a "$OUT/summary.txt"; exit 1
+fi
 
 # patched gamescope (built in Arch Linux ARM by the gamescope job)
 if [ -n "${GAMESCOPE_BIN:-}" ] && [ -f "$GAMESCOPE_BIN" ]; then
