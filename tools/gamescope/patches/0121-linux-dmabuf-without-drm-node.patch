@@ -1,0 +1,78 @@
+gamescope: offer linux-dmabuf when the GPU has no DRM node
+
+With a Vulkan device that exposes no DRM nodes (PanVK over Mali kbase, see
+0120) the renderer has no DRM fd, and wlr_renderer_init_wl_display() then
+creates no linux-dmabuf global, so Xwayland gets neither wl_drm nor
+linux-dmabuf v4 and disables glamor and DRI3.  The Vulkan renderer imports
+dma-bufs without a DRM fd, so create linux-dmabuf v4 ourselves, naming the
+GPU node (GAMESCOPE_DMABUF_DEVICE, default /dev/mali0) as main device and the
+renderer's sampled dma-buf formats as the one tranche.  A patched Xwayland
+(mali-gl) opens that node through GBM/Mesa-on-kbase.
+
+Only taken when the renderer has no DRM fd, so Adreno/DRM devices are
+unchanged.
+
+diff --git a/src/wlserver.cpp b/src/wlserver.cpp
+index 9655dfd..5eb237e 100644
+--- a/src/wlserver.cpp
++++ b/src/wlserver.cpp
+@@ -8,6 +8,7 @@
+ #include <string.h>
+ #include <poll.h>
+ #include <fcntl.h>
++#include <sys/stat.h>
+ #include <xf86drm.h>
+ #include <sys/eventfd.h>
+ 
+@@ -39,6 +40,7 @@
+ #include <wlr/types/wlr_seat.h>
+ #include <wlr/types/wlr_touch.h>
+ #include <wlr/types/wlr_drm.h>
++#include <wlr/types/wlr_linux_dmabuf_v1.h>
+ #include <wlr/util/log.h>
+ #include <wlr/xwayland/server.h>
+ #include <wlr/types/wlr_xdg_shell.h>
+@@ -2209,6 +2211,43 @@ bool wlserver_init( void ) {
+ 
+ 	wlr_renderer_init_wl_display(wlserver.wlr.renderer, wlserver.display);
+ 
++	// A GPU behind a non-DRM kernel driver (Mali over kbase: /dev/mali0) gives the
++	// renderer no DRM fd, and wlroots then offers no linux-dmabuf at all, so Xwayland
++	// and GL clients can only hand over wl_shm copies. The Vulkan renderer imports
++	// dma-bufs without a DRM fd, so advertise linux-dmabuf v4 anyway, naming the GPU
++	// node as main device (GAMESCOPE_DMABUF_DEVICE, default /dev/mali0).
++	if ( wlr_renderer_get_drm_fd( wlserver.wlr.renderer ) < 0 )
++	{
++		const struct wlr_drm_format_set *pFormats =
++			wlr_renderer_get_texture_formats( wlserver.wlr.renderer, WLR_BUFFER_CAP_DMABUF );
++		const char *pchNode = getenv( "GAMESCOPE_DMABUF_DEVICE" );
++		if ( !pchNode || !*pchNode )
++			pchNode = "/dev/mali0";
++		struct stat nodeStat;
++		if ( pFormats && pFormats->len && stat( pchNode, &nodeStat ) == 0 && S_ISCHR( nodeStat.st_mode ) )
++		{
++			struct wlr_linux_dmabuf_feedback_v1 feedback = {};
++			feedback.main_device = nodeStat.st_rdev;
++			wl_array_init( &feedback.tranches );
++			struct wlr_linux_dmabuf_feedback_v1_tranche *pTranche =
++				wlr_linux_dmabuf_feedback_add_tranche( &feedback );
++			if ( pTranche )
++			{
++				pTranche->target_device = nodeStat.st_rdev;
++				wlr_drm_format_set_union( &pTranche->formats, pFormats, pFormats );
++				if ( wlr_linux_dmabuf_v1_create( wlserver.display, 4, &feedback ) )
++					wl_log.infof( "linux-dmabuf v4 without a DRM node: main device %s, %zu formats", pchNode, pFormats->len );
++				else
++					wl_log.errorf( "failed to create linux-dmabuf for %s", pchNode );
++			}
++			wlr_linux_dmabuf_feedback_v1_finish( &feedback );
++		}
++		else
++		{
++			wl_log.infof( "no DRM fd and no usable dma-buf node (%s): clients get wl_shm only", pchNode );
++		}
++	}
++
+ 	wlserver.wlr.compositor = wlr_compositor_create(wlserver.display, 5, wlserver.wlr.renderer);
+ 
+ 	wl_signal_add( &wlserver.wlr.compositor->events.new_surface, &new_surface_listener );

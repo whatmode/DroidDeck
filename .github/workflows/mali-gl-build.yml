@@ -5,6 +5,7 @@ on:
     branches: [mali-gl]
     paths:
       - 'mali-gl/**'
+      - 'tools/gamescope/**'
       - '.github/workflows/mali-gl-build.yml'
   workflow_dispatch:
 
@@ -16,7 +17,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  xwayland:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build patched Xwayland in Arch Linux ARM
+        run: docker run --rm -v "$PWD:/work" -w /work menci/archlinuxarm:base-devel bash mali-gl/scripts/build-xwayland-in-arch.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xwayland
+          path: |
+            out-xwayland/Xwayland
+            out-summary.txt
+
+  gamescope:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build patched gamescope in Arch Linux ARM
+        run: docker run --rm -v "$PWD:/work" -w /work menci/archlinuxarm:base-devel bash tools/gamescope/build-in-arch.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gamescope
+          path: out/usr/local/bin/gamescope
+
   build:
+    needs: [xwayland, gamescope]
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 150
     env:
@@ -45,8 +73,22 @@ jobs:
           git -C zb fetch -q --depth 1 https://github.com/zenithblue-oss/panvk-kbase-android "$ZENITHBLUE_REF"
           git -C zb checkout -q FETCH_HEAD
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: xwayland
+          path: xwayland-artifact
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: gamescope
+          path: gamescope-artifact
+
       - name: Build
         id: build
+        env:
+          GAMESCOPE_BIN: ${{ github.workspace }}/gamescope-artifact/gamescope
+          XWAYLAND_BIN: ${{ github.workspace }}/xwayland-artifact/out-xwayland/Xwayland
+          XWAYLAND_SUMMARY: ${{ github.workspace }}/xwayland-artifact/out-summary.txt
         run: bash mali-gl/scripts/build.sh zb out
 
       - name: Upload the package as a release asset

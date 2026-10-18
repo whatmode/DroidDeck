@@ -76,6 +76,30 @@ else
   log "gltest: BUILD FAILED"; cat "$OUT/gltest-build.log" | tee -a "$OUT/summary.txt"; exit 1
 fi
 install -m755 "$HERE/test/run-gltest.sh" "$R/run-gltest.sh"
+if gcc -O2 -g -funwind-tables -Wall -o "$R/bin/x11test" "$HERE/test/x11test.c" \
+     -I"$R/include" -L"$R/lib" -Wl,-rpath-link,"$R/lib" -lEGL -lGLESv2 -lX11 -lX11-xcb -lxcb -lxcb-dri3 >> "$OUT/gltest-build.log" 2>&1; then
+  log "x11test: built"
+else
+  log "x11test: BUILD FAILED"; tail -20 "$OUT/gltest-build.log" | tee -a "$OUT/summary.txt"; exit 1
+fi
+install -m755 "$HERE/test/run-x11test.sh" "$R/run-x11test.sh"
+
+# patched gamescope (built in Arch Linux ARM by the gamescope job)
+if [ -n "${GAMESCOPE_BIN:-}" ] && [ -f "$GAMESCOPE_BIN" ]; then
+  install -m755 "$GAMESCOPE_BIN" "$R/bin/gamescope"
+  log "gamescope: packaged"
+else
+  log "gamescope: not provided"
+fi
+
+# patched Xwayland (built in Arch Linux ARM by the xwayland job)
+if [ -n "${XWAYLAND_BIN:-}" ] && [ -f "$XWAYLAND_BIN" ]; then
+  install -m755 "$XWAYLAND_BIN" "$R/bin/Xwayland"
+  [ -f "${XWAYLAND_SUMMARY:-}" ] && sed 's/^/xwayland job: /' "$XWAYLAND_SUMMARY" | tee -a "$OUT/summary.txt"
+  log "Xwayland: packaged"
+else
+  log "Xwayland: not provided"
+fi
 
 # runtime dependencies other than the ones we ship (must exist in the DroidDeck rootfs)
 {

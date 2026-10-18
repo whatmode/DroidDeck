@@ -1,0 +1,133 @@
+diff --git a/hw/xwayland/xwayland-dmabuf.c b/hw/xwayland/xwayland-dmabuf.c
+index e485e5b..de89878 100644
+--- a/hw/xwayland/xwayland-dmabuf.c
++++ b/hw/xwayland/xwayland-dmabuf.c
+@@ -39,6 +39,17 @@
+ #include "drm-client-protocol.h"
+ #include "linux-dmabuf-unstable-v1-client-protocol.h"
+ 
++/* mali-gl: on a GPU without DRM nodes neither the compositor's feedback
++ * device nor our GBM device resolve to a drmDevice; treat two unresolved
++ * devices as the same one so the format tranches still match. */
++static int
++xwl_drm_devices_equal(drmDevicePtr a, drmDevicePtr b)
++{
++    if (!a || !b)
++        return !a && !b;
++    return drmDevicesEqual(a, b);
++}
++
+ void
+ xwl_device_formats_destroy(struct xwl_device_formats *dev_formats)
+ {
+@@ -200,7 +211,7 @@ xwl_dmabuf_get_formats_for_device(struct xwl_dmabuf_feedback *xwl_feedback, drmD
+ 
+     /* go through all matching sets of tranches for the window's device */
+     for (int i = 0; i < xwl_feedback->dev_formats_len; i++) {
+-        if (drmDevicesEqual(xwl_feedback->dev_formats[i].drm_dev, device)) {
++        if (xwl_drm_devices_equal(xwl_feedback->dev_formats[i].drm_dev, device)) {
+             struct xwl_device_formats *dev_formats = &xwl_feedback->dev_formats[i];
+ 
+             /* Append the formats from this tranche to the list */
+@@ -301,7 +312,7 @@ xwl_dmabuf_get_modifiers_for_device(struct xwl_dmabuf_feedback *feedback,
+     for (int i = 0; i < feedback->dev_formats_len; i++) {
+         struct xwl_device_formats *dev_formats = &feedback->dev_formats[i];
+ 
+-        if (drmDevicesEqual(dev_formats->drm_dev, device) &&
++        if (xwl_drm_devices_equal(dev_formats->drm_dev, device) &&
+             xwl_dmabuf_get_modifiers_for_format(dev_formats->formats,
+                                                 dev_formats->num_formats,
+                                                 format, num_modifiers, modifiers)) {
+@@ -581,7 +592,7 @@ xwl_dmabuf_feedback_tranche_done(void *data,
+     for (int i = 0; i < xwl_feedback->dev_formats_len; i++) {
+         tranche = &xwl_feedback->dev_formats[i];
+         if (tranche->supports_scanout == xwl_feedback->tmp_tranche.supports_scanout &&
+-            drmDevicesEqual(tranche->drm_dev, xwl_feedback->tmp_tranche.drm_dev)) {
++            xwl_drm_devices_equal(tranche->drm_dev, xwl_feedback->tmp_tranche.drm_dev)) {
+             appended = TRUE;
+ 
+             /* Add all format/mods to this tranche */
+diff --git a/hw/xwayland/xwayland-glamor-gbm.c b/hw/xwayland/xwayland-glamor-gbm.c
+index 4802148..c5b97c4 100644
+--- a/hw/xwayland/xwayland-glamor-gbm.c
++++ b/hw/xwayland/xwayland-glamor-gbm.c
+@@ -37,6 +37,7 @@
+ #include <sys/eventfd.h>
+ #endif /* DRI3 */
+ #include <sys/stat.h>
++#include <unistd.h>
+ #include <xf86drm.h>
+ #include <drm_fourcc.h>
+ #if defined(__linux__)
+@@ -1648,6 +1649,51 @@ xwl_glamor_gbm_init_main_dev(struct xwl_screen *xwl_screen)
+     return TRUE;
+ }
+ 
++/* mali-gl: a GPU reached through a non-DRM kernel driver (Arm mali_kbase:
++ * /dev/mali0) has no DRM render node for the compositor to advertise, but
++ * Mesa can still drive GBM/EGL on it.  XWAYLAND_GBM_DEVICE names such a
++ * node; without it /dev/mali0 is used when the compositor gives no usable
++ * DRM device.  The node is then also what DRI3 clients get to open. */
++static const char *
++xwl_gbm_fallback_device(void)
++{
++    const char *path = getenv("XWAYLAND_GBM_DEVICE");
++
++    if (path && *path)
++        return path;
++    if (access("/dev/mali0", R_OK | W_OK) == 0)
++        return "/dev/mali0";
++    return NULL;
++}
++
++static Bool
++xwl_glamor_gbm_init_path(struct xwl_screen *xwl_screen, const char *path)
++{
++    struct xwl_gbm_private *xwl_gbm = xwl_gbm_get(xwl_screen);
++
++    free(xwl_gbm->device_name);
++    xwl_gbm->device_name = strdup(path);
++    if (!xwl_gbm->device_name)
++        return FALSE;
++
++    xwl_gbm->drm_fd = open(xwl_gbm->device_name, O_RDWR | O_CLOEXEC);
++    if (xwl_gbm->drm_fd < 0) {
++        ErrorF("glamor: could not open GBM device %s (%s)\n",
++               xwl_gbm->device_name, strerror(errno));
++        xwl_gbm->drm_fd = 0;
++        return FALSE;
++    }
++
++    /* Not a DRM node: there is no drmDevice to compare tranches against. */
++    if (drmGetDevice2(xwl_gbm->drm_fd, 0, &xwl_gbm->device) != 0)
++        xwl_gbm->device = NULL;
++
++    xwl_gbm->fd_render_node = TRUE;
++    LogMessage(X_INFO, "glamor: using GBM device %s%s\n", xwl_gbm->device_name,
++               xwl_gbm->device ? "" : " (not a DRM node)");
++    return TRUE;
++}
++
+ Bool
+ xwl_glamor_gbm_init_egl(struct xwl_screen *xwl_screen)
+ {
+@@ -1655,9 +1701,17 @@ xwl_glamor_gbm_init_egl(struct xwl_screen *xwl_screen)
+     EGLint major, minor;
+     const GLubyte *renderer;
+     const char *gbm_backend_name, *egl_vendor;
++    const char *forced = getenv("XWAYLAND_GBM_DEVICE");
+ 
+-    if (!xwl_gbm->drm && !xwl_glamor_gbm_init_main_dev(xwl_screen))
+-        return FALSE;
++    if (forced && *forced) {
++        if (!xwl_glamor_gbm_init_path(xwl_screen, forced))
++            return FALSE;
++    } else if (!xwl_gbm->drm && !xwl_glamor_gbm_init_main_dev(xwl_screen)) {
++        const char *fallback = xwl_gbm_fallback_device();
++
++        if (!fallback || !xwl_glamor_gbm_init_path(xwl_screen, fallback))
++            return FALSE;
++    }
+ 
+     if (!xwl_gbm->fd_render_node && !xwl_gbm->drm_authenticated) {
+         ErrorF("Failed to get wl_drm, disabling Glamor and DRI3\n");
