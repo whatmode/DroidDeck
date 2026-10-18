@@ -503,8 +503,10 @@ jobs:
         if: failure() && steps.build.outcome == 'failure'
         run: |
           [ -f /tmp/build.log ] || { echo "::error::no build log (failed before gradle)"; exit 0; }
-          grep -nE "FAILURE|What went wrong|error:|e: |Error|Exception|Missing|stale|changed" /tmp/build.log | tail -25 | while IFS= read -r line; do echo "::error::${line:0:900}"; done
-          tail -15 /tmp/build.log | while IFS= read -r line; do echo "::error::tail: ${line:0:900}"; done
+          # one annotation per block (GitHub keeps 10 per step); newlines as %0A
+          enc() { sed 's/%/%25/g' | cut -c1-400 | awk '{printf "%s%%0A", $0}'; }
+          echo "::error title=tail::$(tail -40 /tmp/build.log | enc)"
+          echo "::error title=errors::$(grep -nE "^e: |What went wrong|FAILED|Exception|ValueError|Missing|stale|changed since" /tmp/build.log | tail -30 | enc)"
 
       - name: Check the store engines' library
         run: |
