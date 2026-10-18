@@ -114,6 +114,15 @@ grep -q libLLVM "$OUT/needed-external.txt" && log "WARNING: links libLLVM"
 log "max GLIBC symbol version: $(for f in $(find "$R" -type f \( -name '*.so*' -o -path '*/bin/*' \)); do objdump -T "$f" 2>/dev/null; done | grep -oE 'GLIBC_[0-9.]+' | sort -V -u | tail -1)"
 
 rm -rf "$R/include" "$R/lib/pkgconfig"
+echo "mali-gl ${GITHUB_SHA:-local} mesa $(git -C "$MESA" rev-parse --short HEAD)" > "$R/VERSION"
 tar -C "$D/opt" -czf "$OUT/mali-gl-aarch64.tar.gz" mali-gl
 log "package: mali-gl-aarch64.tar.gz $(du -h "$OUT/mali-gl-aarch64.tar.gz" | cut -f1)"
+
+# runtime package for the apk: stripped, same layout
+RT=$WORK/runtime/mali-gl
+rm -rf "$WORK/runtime" && mkdir -p "$WORK/runtime" && cp -a "$R" "$RT"
+find "$RT" -type f \( -name '*.so*' -o -path '*/bin/*' \) -exec strip --strip-unneeded {} + 2>/dev/null || true
+tar -C "$WORK/runtime" -czf "$OUT/mali-gl-runtime-aarch64.tar.gz" mali-gl
+sha256sum "$OUT/mali-gl-runtime-aarch64.tar.gz" | cut -d' ' -f1 > "$OUT/runtime.sha256"
+log "runtime package: mali-gl-runtime-aarch64.tar.gz $(du -h "$OUT/mali-gl-runtime-aarch64.tar.gz" | cut -f1) sha256 $(cat "$OUT/runtime.sha256")"
 exit 0

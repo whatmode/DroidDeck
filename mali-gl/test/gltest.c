@@ -227,6 +227,25 @@ main(void)
           frames / dt, dt * 1000.0 / frames);
    check(glGetError() == GL_NO_ERROR, "frame loop without GL error");
 
+   /* 3b: the same frames without waiting for each one (asynchronous submit) */
+   t0 = now_s();
+   for (int i = 0; i < frames; i++) {
+      glClearColor((i & 1) ? 1 : 0, 0, 0, 1);
+      glClear(GL_COLOR_BUFFER_BIT);
+      glDrawArrays(GL_TRIANGLES, 0, 3);
+      glFlush();
+   }
+   glFinish();
+   dt = now_s() - t0;
+   printf("%d frames, flushed and finished once: %.3f s = %.1f fps\n", frames, dt,
+          frames / dt);
+   glClearColor(0, 0, 1, 1);
+   glClear(GL_COLOR_BUFFER_BIT);
+   glDrawArrays(GL_TRIANGLES, 0, 3);
+   glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+   check(pixel_is(px + ((H / 2) * W + W / 2) * 4, 0, 255, 0),
+         "result correct after asynchronous frames");
+
    /* 4: Phase 2 - GBM buffers as dma-bufs, imported back through EGL and
     * rendered to; then the pixels are read through a CPU mapping of the fd. */
    printf("### phase 2: GBM / dma-buf\n");

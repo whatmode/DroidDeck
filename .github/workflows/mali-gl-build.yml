@@ -102,7 +102,12 @@ jobs:
           gh release view "$tag" >/dev/null 2>&1 \
             || gh release create "$tag" --prerelease --target "$GITHUB_SHA" --title "mali-gl test build" --notes "$notes"
           gh release edit "$tag" --notes "$notes"
-          gh release upload "$tag" out/mali-gl-aarch64.tar.gz --clobber
+          gh release upload "$tag" out/mali-gl-aarch64.tar.gz out/mali-gl-runtime-aarch64.tar.gz --clobber
+          # immutable copy for the apk (mali-gl/release.env pins tag + sha256)
+          vtag=mali-gl-${GITHUB_SHA::7}
+          gh release view "$vtag" >/dev/null 2>&1 \
+            || gh release create "$vtag" --prerelease --target "$GITHUB_SHA" --title "$vtag" --notes "mali-gl runtime for the apk, sha256 $(cat out/runtime.sha256)"
+          gh release upload "$vtag" out/mali-gl-runtime-aarch64.tar.gz --clobber
 
       - name: Publish results to the mali-gl-results branch
         if: always()
