@@ -1,0 +1,50 @@
+name: Mali GL Xwayland/gamescope source export
+
+on:
+  push:
+    branches: [ mali-gl ]
+    paths:
+      - '.github/workflows/mali-gl-xsrc.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch sources
+        run: |
+          set -euxo pipefail
+          mkdir -p x && cd x
+          # Arch's current xorg-xwayland package (same version as the DroidDeck rootfs).
+          git clone -q --depth 1 https://gitlab.archlinux.org/archlinux/packaging/packages/xorg-xwayland.git arch-xwayland
+          ver=$(sed -n 's/^pkgver=//p' arch-xwayland/PKGBUILD)
+          echo "xwayland $ver" > ../VERSIONS
+          curl -fsSL "https://xorg.freedesktop.org/archive/individual/xserver/xwayland-$ver.tar.xz" | tar xJ
+          mv "xwayland-$ver" xwayland
+          rm -rf xwayland/test xwayland/doc
+          # gamescope as patched by DroidDeck
+          . ../tools/gamescope/release.env 2>/dev/null || true
+          git clone -q --depth 1 --branch 3.16.29 --recurse-submodules --shallow-submodules https://github.com/ValveSoftware/gamescope.git gamescope || git clone -q --depth 1 --branch 3.16.29 https://github.com/ValveSoftware/gamescope.git gamescope
+          echo "gamescope 3.16.29" >> ../VERSIONS
+          rm -rf gamescope/.git gamescope/subprojects/*/.git
+          find gamescope/subprojects -mindepth 1 -maxdepth 1 ! -name wlroots ! -name libliftoff -exec rm -rf {} + || true
+          rm -rf arch-xwayland/.git
+      - name: Publish to mali-gl-xsrc
+        run: |
+          set -euxo pipefail
+          git config user.name mali-gl-xsrc
+          git config user.email mali-gl-xsrc@users.noreply.github.com
+          git worktree add -q --detach ../out
+          cd ../out
+          git checkout -q --orphan mali-gl-xsrc
+          git rm -rfq . || true
+          cp -r "$GITHUB_WORKSPACE/x/xwayland" "$GITHUB_WORKSPACE/x/gamescope" "$GITHUB_WORKSPACE/x/arch-xwayland" .
+          cp "$GITHUB_WORKSPACE/VERSIONS" .
+          find . -size +5M -type f -delete
+          git add -A
+          git commit -qm "Xwayland + gamescope sources for mali-gl"
+          git push -fq origin mali-gl-xsrc
