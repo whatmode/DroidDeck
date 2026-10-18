@@ -492,11 +492,19 @@ jobs:
           SGDB_API_KEY: ${{ secrets.SGDB_API_KEY }}
         run: |
           set -o pipefail
-          python3 tools/quest/build-driver.py "$ANDROID_HOME/ndk/$NDK_VERSION"
-          python3 tools/release/runtime_inputs.py record
-          ./gradlew assembleRelease --console=plain -PndkVersion="$NDK_VERSION" 2>&1 | tee /tmp/build.log
-          python3 tools/release/check_session_assets.py app/build/outputs/apk/release/app-release.apk
-          python3 tools/release/runtime_inputs.py apk app/build/outputs/apk/release/app-release.apk
+          : > /tmp/build.log
+          python3 tools/quest/build-driver.py "$ANDROID_HOME/ndk/$NDK_VERSION" 2>&1 | tee -a /tmp/build.log
+          python3 tools/release/runtime_inputs.py record 2>&1 | tee -a /tmp/build.log
+          ./gradlew assembleRelease --console=plain -PndkVersion="$NDK_VERSION" 2>&1 | tee -a /tmp/build.log
+          python3 tools/release/check_session_assets.py app/build/outputs/apk/release/app-release.apk 2>&1 | tee -a /tmp/build.log
+          python3 tools/release/runtime_inputs.py apk app/build/outputs/apk/release/app-release.apk 2>&1 | tee -a /tmp/build.log
+
+      - name: Report a failed build as annotations
+        if: failure() && steps.build.outcome == 'failure'
+        run: |
+          [ -f /tmp/build.log ] || { echo "::error::no build log (failed before gradle)"; exit 0; }
+          grep -nE "FAILURE|What went wrong|error:|e: |Error|Exception|Missing|stale|changed" /tmp/build.log | tail -25 | while IFS= read -r line; do echo "::error::${line:0:900}"; done
+          tail -15 /tmp/build.log | while IFS= read -r line; do echo "::error::tail: ${line:0:900}"; done
 
       - name: Check the store engines' library
         run: |
