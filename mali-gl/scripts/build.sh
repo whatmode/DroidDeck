@@ -86,6 +86,9 @@ install -m755 "$HERE/test/run-x11test.sh" "$R/run-x11test.sh"
 if gcc -O2 -g -Wall -o "$R/bin/glprobe" "$HERE/test/glprobe.c" \
      -I"$R/include" -L"$R/lib" -Wl,-rpath-link,"$R/lib" -lEGL -lGL -lX11 >> "$OUT/gltest-build.log" 2>&1; then
   log "glprobe: built"
+  gcc -O2 -g -Wall -o "$R/bin/tfptest" "$HERE/test/tfptest.c" -I"$R/include" -L"$R/lib" \
+      -Wl,-rpath-link,"$R/lib" -lGL -lX11 -lXcomposite >> "$OUT/gltest-build.log" 2>&1 \
+    && log "tfptest: built" || { log "tfptest: BUILD FAILED"; tail -20 "$OUT/gltest-build.log" | tee -a "$OUT/summary.txt"; exit 1; }
 else
   log "glprobe: BUILD FAILED"; tail -20 "$OUT/gltest-build.log" | tee -a "$OUT/summary.txt"; exit 1
 fi
