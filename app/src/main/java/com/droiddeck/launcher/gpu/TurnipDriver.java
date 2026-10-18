@@ -34,6 +34,7 @@ public final class TurnipDriver {
             DRIVER_A7XX, DRIVER_A8XX, com.droiddeck.launcher.session.QuestExperimental.DRIVER,
             DRIVER_A6XX, com.droiddeck.launcher.session.QuestExperimental.DRIVER_A6XX));
     private static final String OVERRIDE_FILE = "Download/droiddeck-driver";
+    private static final String MALI_KBASE_NODE = "/dev/mali0";
     private static final String PREFS = "graphics_driver";
     private static final String KEY_HIDDEN = "hiddenBundled";
     public static final String AUTO = "";
@@ -282,16 +283,17 @@ public final class TurnipDriver {
             if (forced.startsWith("a7")) return DRIVER_A7XX;
             if (forced.startsWith("a6")) return DRIVER_A6XX;
         }
-        // Turnip is an Adreno driver: on a Mali (or any non-Adreno) its KGSL ioctls find no GPU and
-        // the compositor enumerates nothing. Leave the compositor on the system Vulkan driver, which
-        // on a Mali is Arm's own and implements the dma-buf import the compositor needs.
-        // From SPLATPLAYS/DroidDeck (51bd995).
-        if (!com.droiddeck.launcher.core.DeviceSupport.INSTANCE.adreno()) {
-            Log.i(TAG, "not an Adreno: using the system Vulkan driver");
-            return null;
-        }
         String quest = QuestExperimental.INSTANCE.defaultAndroidDriver();
         if (quest != null) return quest;
+        // Turnip is an Adreno driver: on a Mali its KGSL ioctls find no GPU and the compositor
+        // enumerates nothing. Leave the compositor on the system Vulkan driver there, which is
+        // Arm's own and implements the dma-buf import the compositor needs. Only a GPU that is
+        // positively a Mali (Arm's kbase node) takes this path; an Adreno whose KGSL model cannot
+        // be read keeps the Turnip fallback below. After SPLATPLAYS/DroidDeck (51bd995).
+        if (new File(MALI_KBASE_NODE).exists() && !com.droiddeck.launcher.core.DeviceSupport.INSTANCE.adreno()) {
+            Log.i(TAG, "Mali GPU: using the system Vulkan driver");
+            return null;
+        }
         String model = gpuModel();
         Log.i(TAG, "gpu model: " + (model == null ? "unknown" : model));
         if (model != null) {
