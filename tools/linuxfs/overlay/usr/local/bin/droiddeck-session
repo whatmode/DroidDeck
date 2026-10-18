@@ -837,6 +837,15 @@ BUSCONF
     _bl_mali_auto=
     _bl_mali_scale_args=()
     if [ -e /dev/mali0 ] && [ ! -e /dev/kgsl-3d0 ]; then
+      # mali-gl: GL 3.3 core and compat contexts on 24- and 32-bit (transparent) X windows
+      # all work (mali-gl glprobe); only 4.x is refused, and Steam's GL composer still
+      # fails to get a context.  For the Steam process tree only (not Xwayland's glamor),
+      # report 4.6 for core contexts; BL_MALI_GL_VERSION= keeps the real version.
+      if [ -n "${WLR_XWAYLAND:-}" ] && [ -n "${BL_MALI_GL_VERSION-4.6}" ]; then
+        export MESA_GL_VERSION_OVERRIDE=${MESA_GL_VERSION_OVERRIDE:-${BL_MALI_GL_VERSION:-4.6}}
+        export MESA_GLSL_VERSION_OVERRIDE=${MESA_GLSL_VERSION_OVERRIDE:-460}
+        echo "== steam: mali-gl reports GL $MESA_GL_VERSION_OVERRIDE (GLSL $MESA_GLSL_VERSION_OVERRIDE) to the Steam client"
+      fi
       _bl_mali_cef=${BL_MALI_CEF:-$(cat "$HOME/.droiddeck-mali-cef" 2>/dev/null)}
       if [ -z "$_bl_mali_cef" ]; then
         # gl+nowsi, vulkan+nowsi, gl and vulkan all died identically; keep one variant while the
@@ -1233,7 +1242,7 @@ BUSCONF
       if [ "${BL_BOOT_WATCH:-1}" != 0 ]; then
         (
           _bw_logs="$steam_root/logs"
-          declare -A _bw_off=() _bw_seen=() _bw_name=()
+          declare -A _bw_off=() _bw_seen=() _bw_name=() _bw_gl=()
           for _bw_f in cef_log.txt webhelper.txt webhelper_js.txt console_log.txt steamui_html.txt; do
             _bw_off[$_bw_f]=$(stat -c %s "$_bw_logs/$_bw_f" 2>/dev/null || echo 0)
           done
@@ -1264,6 +1273,16 @@ BUSCONF
               case " $_bw_now " in *" $_bw_p "*) ;; *) echo "== boot +${_bw_t}s: process $_bw_p (${_bw_name[$_bw_p]:-?}) exited" ;; esac
             done
             _bw_prev=$_bw_now
+            # Which GL/EGL/Mesa libraries each Steam process really mapped (mali-gl: is
+            # it ours from /opt/mali-gl or the rootfs' glvnd/Mesa?), and its GL env.
+            for _bw_p in $_bw_now; do
+              _bw_libs=$(awk '$6 ~ /lib(GL|GLX|EGL|GLES|gallium|gbm|vulkan)|_dri\.so|dri_gbm/ {print $6}' "/proc/$_bw_p/maps" 2>/dev/null | sort -u | tr '\n' ' ')
+              [ -n "$_bw_libs" ] && [ "$_bw_libs" != "${_bw_gl[$_bw_p]:-}" ] || continue
+              _bw_gl[$_bw_p]=$_bw_libs
+              _bw_env=$(tr '\0' '\n' < "/proc/$_bw_p/environ" 2>/dev/null | grep -E '^(LD_LIBRARY_PATH|PAN_MESA_DEBUG|MESA_|LIBGL_|GALLIUM_DRIVER|__GLX|__EGL)' | tr '\n' ' ')
+              echo "== boot +${_bw_t}s: gl $_bw_p (${_bw_name[$_bw_p]:-?}): $_bw_libs"
+              echo "== boot +${_bw_t}s: gl-env $_bw_p: ${_bw_env:0:1500}"
+            done
             for _bw_f in "${!_bw_off[@]}"; do
               _bw_size=$(stat -c %s "$_bw_logs/$_bw_f" 2>/dev/null || echo 0)
               [ "$_bw_size" -lt "${_bw_off[$_bw_f]}" ] && _bw_off[$_bw_f]=0
