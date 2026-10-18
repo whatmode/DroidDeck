@@ -790,9 +790,30 @@ BUSCONF
     # GL path stays the default (with the nested refresh capped, see gamescope above);
     # BL_MALI_CEF (or ~/.droiddeck-mali-cef) picks: vulkan (default: ANGLE on PanVK directly,
     # the Adreno path, no Zink/GLX), gl (ANGLE on Zink: dies with Fatal IO error 11) or cpu.
+    # Every ANGLE backend tried so far (gl, vulkan) ends with the webhelper's "Fatal IO error 11
+    # on X server :0" as Steam's own GL composer opens its windows, so without an explicit choice
+    # a Mali rotates through variants, one per Steam start, moving on whenever Steam had to
+    # restart its webhelper: "+nowsi" also turns off the gamescope WSI layer
+    # (DISABLE_GAMESCOPE_WSI=1) for the Steam process tree. ~/.droiddeck-mali-cef-auto holds the
+    # position; BL_MALI_CEF or ~/.droiddeck-mali-cef pins one (gl, vulkan, cpu, optional +nowsi).
+    _bl_mali_auto=
     if [ -e /dev/mali0 ] && [ ! -e /dev/kgsl-3d0 ]; then
-      _bl_mali_cef=${BL_MALI_CEF:-$(cat "$HOME/.droiddeck-mali-cef" 2>/dev/null || echo vulkan)}
+      _bl_mali_cef=${BL_MALI_CEF:-$(cat "$HOME/.droiddeck-mali-cef" 2>/dev/null)}
+      if [ -z "$_bl_mali_cef" ]; then
+        _bl_mali_variants=(gl+nowsi vulkan+nowsi gl vulkan)
+        _bl_mali_idx=$(cat "$HOME/.droiddeck-mali-cef-auto" 2>/dev/null || echo 0)
+        case "$_bl_mali_idx" in ''|*[!0-9]*) _bl_mali_idx=0 ;; esac
+        _bl_mali_idx=$((_bl_mali_idx % ${#_bl_mali_variants[@]}))
+        _bl_mali_cef=${_bl_mali_variants[$_bl_mali_idx]}
+        _bl_mali_auto=1
+        echo "== steam: Mali UI variant $((_bl_mali_idx + 1))/${#_bl_mali_variants[@]}: $_bl_mali_cef (automatic)"
+      fi
       case "$_bl_mali_cef" in
+        *+nowsi*)
+          export DISABLE_GAMESCOPE_WSI=1
+          echo "== steam: gamescope WSI layer off for the Steam process tree (DISABLE_GAMESCOPE_WSI=1)" ;;
+      esac
+      case "${_bl_mali_cef%%+*}" in
         cpu)
           _bl_cef=(-cef-disable-gpu)
           echo "== steam: Mali GPU, CEF draws in software (-cef-disable-gpu)" ;;
@@ -1217,6 +1238,7 @@ BUSCONF
         boot_watch_pid=$!
       fi
       steam_started=$SECONDS
+      _bl_html_from=$(stat -c %s "$steam_root/logs/steamui_html.txt" 2>/dev/null || echo 0)
       "${steam_client[@]}" "${_bl_ui[@]}" "${_bl_cdp[@]}" "${_bl_lang[@]}" -clientbeta "$steam_channel" \
         -no-cef-sandbox -cef-ozone-platform=x11 "${_bl_cef[@]}" "$@"
       rc=$?
@@ -1230,6 +1252,17 @@ BUSCONF
         wait "$desktop_ui_pid" 2>/dev/null || true
       fi
       echo "== steam exited rc=$rc"
+      if [ -n "${_bl_mali_auto:-}" ]; then
+        _bl_html="$steam_root/logs/steamui_html.txt"
+        [ "$(stat -c %s "$_bl_html" 2>/dev/null || echo 0)" -lt "${_bl_html_from:-0}" ] && _bl_html_from=0
+        if tail -c +$((${_bl_html_from:-0} + 1)) "$_bl_html" 2>/dev/null | grep -aq "Restart webhelper process"; then
+          _bl_next=$(((_bl_mali_idx + 1) % ${#_bl_mali_variants[@]}))
+          echo "$_bl_next" > "$HOME/.droiddeck-mali-cef-auto"
+          echo "== steam: Mali UI variant $_bl_mali_cef failed (Steam restarted its webhelper); next start tries ${_bl_mali_variants[$_bl_next]}"
+        else
+          echo "== steam: Mali UI variant $_bl_mali_cef: no webhelper restart this run; keeping it"
+        fi
+      fi
       collect_steam_logs
       if [ -f "$HOME/.config/droiddeck/fex-wanted" ] && [ -x /usr/local/bin/droiddeck-fex ]; then
         /usr/local/bin/droiddeck-fex status >/dev/null 2>&1 || true
