@@ -1,0 +1,50 @@
+--- a/src/wlserver.cpp
++++ b/src/wlserver.cpp
+@@ -227,6 +227,14 @@
+ 	// so let the commit go through. It will be duplication-eliminated later.
+ 
+ 	VulkanWlrTexture_t *tex = (VulkanWlrTexture_t *) wlr_surface_get_texture( wlr_surface );
++	{
++		// mali-gl: trace the first surface commits from clients (Xwayland).
++		static int s_nCommits = 0;
++		if ( s_nCommits++ < 8 )
++			wl_log.infof( "mali-gl: commit #%d on surface %p: buffer %p, texture %p, x11 window %u, xdg %d",
++				s_nCommits, (void *)wlr_surface, (void *)wlr_surface->buffer, (void *)tex,
++				wlserver_x11_surface_info ? wlserver_x11_surface_info->x11_id : 0u, wlserver_xdg_surface_info ? 1 : 0 );
++	}
+ 	if ( tex == NULL )
+ 	{
+ 		return;
+--- a/src/steamcompmgr.cpp
++++ b/src/steamcompmgr.cpp
+@@ -8393,6 +8393,13 @@
+ 	// If we have an override surface, make sure this commit is for the current surface
+ 	// or if the commit is probably bogus.
+ 	bool bOnlyCurrentSurface = w->bHasHadNonSRGBColorSpace || bPossiblyBogus || !bHasDamage || cv_surface_update_force_only_current_surface;
++	{
++		static int s_nRes = 0;
++		if ( s_nRes++ < 8 )
++			xwm_log.infof( "mali-gl: commit for window 0x%lx: buffer %dx%d, damage %d, override %d",
++				w->type == steamcompmgr_win_type_t::XWAYLAND ? w->xwayland().id : 0ul,
++				reslistentry.buf->width, reslistentry.buf->height, (int)bHasDamage, w->override_surface() ? 1 : 0 );
++	}
+ 
+ 	bool for_current_surface = !w->override_surface() || w->current_surface() == reslistentry.surf;
+ 
+--- a/src/rendervulkan.cpp
++++ b/src/rendervulkan.cpp
+@@ -4708,6 +4708,14 @@
+ 
+ static struct wlr_texture *renderer_texture_from_buffer( struct wlr_renderer *wlr_renderer, struct wlr_buffer *buf )
+ {
++	{
++		static int s_nTex = 0;
++		struct wlr_dmabuf_attributes dmabuf = {0};
++		bool bDmabuf = wlr_buffer_get_dmabuf( buf, &dmabuf );
++		if ( s_nTex++ < 8 )
++			vk_log.infof( "mali-gl: texture_from_buffer %dx%d dmabuf %d format 0x%x modifier 0x%lx planes %d",
++				buf->width, buf->height, (int)bDmabuf, dmabuf.format, (unsigned long)dmabuf.modifier, dmabuf.n_planes );
++	}
+ 	VulkanWlrTexture_t *tex = new VulkanWlrTexture_t();
+ 	wlr_texture_init( &tex->base, wlr_renderer, &texture_impl, buf->width, buf->height );
+ 	tex->buf = wlr_buffer_lock( buf );
