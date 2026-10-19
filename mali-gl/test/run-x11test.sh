@@ -26,14 +26,18 @@ GS=$P/bin/gamescope
   echo "### exit code $?"
   echo "### gamescope --backend wayland (as in game mode): a blue window with a green triangle should show for 15 s"
   echo "WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-} DISPLAY=${DISPLAY:-}"
-  if [ -n "${WAYLAND_DISPLAY:-}" ] || [ -S "${XDG_RUNTIME_DIR:-/nonexistent}/wayland-0" ]; then
-    X11TEST_SECONDS=15 timeout 60 env WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
+  ls -la "${XDG_RUNTIME_DIR:-/run/droiddeck}" 2>&1 | grep -i wayland
+  # Game mode's gamescope talks to DroidDeck's own compositor (wayland-0); the
+  # desktop's compositor lacks protocols gamescope needs.  Try wayland-0 first.
+  for sock in wayland-0 ${WAYLAND_DISPLAY:-}; do
+    [ -S "${XDG_RUNTIME_DIR:-/run/droiddeck}/$sock" ] || { echo "no socket $sock"; continue; }
+    echo "## WAYLAND_DISPLAY=$sock"
+    X11TEST_SECONDS=15 timeout 60 env WAYLAND_DISPLAY="$sock" \
       "$GS" --backend wayland --debug-focus -W 1280 -H 720 -w 1280 -h 720 -- "$P/bin/x11test" 2>&1 \
-      | grep -v "MESA: info\|scriptmgr\|^>"
+      | grep -v "MESA: info\|scriptmgr\|^>\|xwininfo"
     echo "### exit code $?"
-  else
-    echo "no Wayland compositor socket here; skipped"
-  fi
+    break
+  done
   echo "### texture from pixmap (Steam's GL composer path)"
   PAN_MESA_DEBUG=gl3 timeout 180 "$GS" --backend headless -W 1280 -H 720 -w 1280 -h 720 -- "$P/bin/tfptest" 2>&1 | grep -v "MESA: info\|scriptmgr\|^>\|gamescope\]"
   echo "### GL context probe (PAN_MESA_DEBUG=gl3, as in game mode)"
