@@ -13,7 +13,36 @@ object EaNative {
     const val ENGINE_MISSING = "EA app: the EA client is not in this build"
     private const val PREFIX = "@ea "
 
-    fun ready(context: Context): Boolean = File(LinuxRuntime.rootDir(context.applicationContext), PROGRAM.removePrefix("/")).exists()
+    private val FILES = listOf("droiddeck-ea", "maxima-bootstrap", "droiddeck-ea-wine")
+
+    /**
+     * True when the client is in the Linux system. The session normally copies it there when it
+     * starts; the store tab can be opened before any session ran on this version, so it copies
+     * the client over itself when the copy is missing or differs from the one in the app.
+     */
+    @Synchronized
+    fun ready(context: Context): Boolean {
+        val app = context.applicationContext
+        val root = LinuxRuntime.rootDir(app)
+        if (!root.isDirectory) return false
+        for (name in FILES) {
+            val asset = "linuxfs${DIR}/$name"
+            val target = File(root, "${DIR.removePrefix("/")}/$name")
+            val size = runCatching { app.assets.openFd(asset).use { it.length } }.getOrNull()
+            if (size != null && target.isFile && target.length() == size) continue
+            if (size == null && target.isFile) continue
+            val staged = File(target.parentFile, "${target.name}.staged")
+            try {
+                target.parentFile?.mkdirs()
+                app.assets.open(asset).use { input -> staged.outputStream().use { input.copyTo(it) } }
+                if (!(staged.setExecutable(true, false) && staged.renameTo(target))) staged.delete()
+            } catch (e: Exception) {
+                android.util.Log.w("EaNative", "could not copy $name", e)
+                staged.delete()
+            }
+        }
+        return File(root, PROGRAM.removePrefix("/")).isFile
+    }
 
     fun parse(line: String): JSONObject? =
         if (line.startsWith(PREFIX)) runCatching { JSONObject(line.substring(PREFIX.length)) }.getOrNull() else null
