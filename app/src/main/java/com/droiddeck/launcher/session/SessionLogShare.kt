@@ -46,10 +46,11 @@ object SessionLogShare {
         val zip = File(out, "DroidDeck-${folder.name}.zip")
         LogRedactor.learnFromRuntime(LinuxRuntime.rootDir(context))
         val live = liveSteamLogs(context, folder)
+        val proton = if (File(folder, "proton").isDirectory) emptyList() else protonLogs(context, out)
         val logs = LinuxRuntime.logDir(context)
         val stores = recent(File(logs, STORES_DIR))
         val tools = recent(File(logs, SessionPaths.TOOLS_DIR))
-        val total = (files + live + stores + tools).sumOf { it.length() }.coerceAtLeast(1L)
+        val total = (files + live + proton + stores + tools).sumOf { it.length() }.coerceAtLeast(1L)
         var done = 0L
         var shown = -1
         fun advance(f: File) {
@@ -60,6 +61,7 @@ object SessionLogShare {
         ZipOutputStream(zip.outputStream().buffered()).use { z ->
             files.forEach { f -> addEntry(z, folder.name + "/" + f.relativeTo(folder).invariantSeparatorsPath, f); advance(f) }
             live.forEach { f -> addEntry(z, folder.name + "/steam/" + f.name, f); advance(f) }
+            proton.forEach { f -> addEntry(z, folder.name + "/proton/" + f.name, f); advance(f) }
             stores.forEach { f -> addEntry(z, "$STORES_DIR/" + f.name, f); advance(f) }
             tools.forEach { f -> addEntry(z, SessionPaths.TOOLS_DIR + "/" + f.name, f); advance(f) }
         }
@@ -82,6 +84,33 @@ object SessionLogShare {
         if (folder != SessionPaths.current() || File(folder, "steam").exists()) return emptyList()
         val logs = File(SessionPrefs.activeSteamRoot(context), "logs")
         return logs.listFiles()?.filter { it.isFile && it.length() <= STEAM_LOG_MAX_BYTES }.orEmpty()
+    }
+
+    /**
+     * Proton's own logs (PROTON_LOG=1: steam-<appid>.log in the guest's home) from the last hours,
+     * plus the game environment they ran with. A long log is cut to its end.
+     */
+    private fun protonLogs(context: Context, out: File): List<File> {
+        val home = File(LinuxRuntime.rootDir(context), "root")
+        val since = System.currentTimeMillis() - 6L * 60 * 60 * 1000
+        val found = home.listFiles { f -> f.isFile && f.name.matches(Regex("steam-\\d+\\.log")) && f.lastModified() >= since }.orEmpty().toMutableList()
+        File(home, ".config/droiddeck/game-environment.json").takeIf { it.isFile }?.let { found += it }
+        val keep = 8L * 1024 * 1024
+        return found.mapNotNull { src ->
+            if (src.length() <= keep) return@mapNotNull src
+            runCatching {
+                val tail = File(out, src.name)
+                java.io.RandomAccessFile(src, "r").use { raf ->
+                    raf.seek(raf.length() - keep)
+                    tail.outputStream().use { o ->
+                        o.write("[... first ${raf.length() - keep} bytes left out ...]\n".toByteArray())
+                        val buf = ByteArray(65536)
+                        while (true) { val n = raf.read(buf); if (n < 0) break; o.write(buf, 0, n) }
+                    }
+                }
+                tail
+            }.getOrNull()
+        }
     }
 
     private const val STEAM_LOG_MAX_BYTES = 8L * 1024 * 1024
