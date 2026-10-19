@@ -159,9 +159,10 @@ main(void)
    glEnableVertexAttribArray(0);
    glViewport(0, 0, W, H);
 
+   double secs = getenv("X11TEST_SECONDS") ? atof(getenv("X11TEST_SECONDS")) : 5.0;
    double t0 = now_s();
    int frames = 0;
-   for (; frames < 300 && now_s() - t0 < 5.0; frames++) {
+   for (; (secs > 5.0 || frames < 300) && now_s() - t0 < secs; frames++) {
       glClearColor(0, 0, 1, 1);
       glClear(GL_COLOR_BUFFER_BIT);
       glDrawArrays(GL_TRIANGLES, 0, 3);

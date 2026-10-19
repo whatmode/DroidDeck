@@ -24,6 +24,16 @@ GS=$P/bin/gamescope
   echo "### gamescope (headless) + Xwayland + x11test"
   timeout 90 "$GS" --backend headless -W 1280 -H 720 -w 1280 -h 720 -- "$P/bin/x11test"
   echo "### exit code $?"
+  echo "### gamescope --backend wayland (as in game mode): a blue window with a green triangle should show for 15 s"
+  echo "WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-} DISPLAY=${DISPLAY:-}"
+  if [ -n "${WAYLAND_DISPLAY:-}" ] || [ -S "${XDG_RUNTIME_DIR:-/nonexistent}/wayland-0" ]; then
+    X11TEST_SECONDS=15 timeout 60 env WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
+      "$GS" --backend wayland --debug-focus -W 1280 -H 720 -w 1280 -h 720 -- "$P/bin/x11test" 2>&1 \
+      | grep -v "MESA: info\|scriptmgr\|^>"
+    echo "### exit code $?"
+  else
+    echo "no Wayland compositor socket here; skipped"
+  fi
   echo "### texture from pixmap (Steam's GL composer path)"
   PAN_MESA_DEBUG=gl3 timeout 180 "$GS" --backend headless -W 1280 -H 720 -w 1280 -h 720 -- "$P/bin/tfptest" 2>&1 | grep -v "MESA: info\|scriptmgr\|^>\|gamescope\]"
   echo "### GL context probe (PAN_MESA_DEBUG=gl3, as in game mode)"
