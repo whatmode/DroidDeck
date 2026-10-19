@@ -1,0 +1,68 @@
+--- a/src/Backends/WaylandBackend.cpp
++++ b/src/Backends/WaylandBackend.cpp
+@@ -1078,6 +1078,25 @@
+     {
+         UpdateFullscreenState();
+ 
++        {
++            // mali-gl: say what gamescope hands the host compositor (first frames, then every 10 s).
++            static uint64_t s_ulPresents = 0;
++            static uint64_t s_ulLastLog = 0;
++            uint64_t ulNow = get_time_in_nanos();
++            if ( s_ulPresents < 5 || ulNow - s_ulLastLog > 10'000'000'000ull )
++            {
++                s_ulLastLog = ulNow;
++                const FrameInfo_t::Layer_t *pL0 = pFrameInfo->layers.count() ? &pFrameInfo->layers.get( 0 ) : nullptr;
++                IBackendFb *pFb0 = pL0 && pL0->tex ? pL0->tex->GetBackendFb() : nullptr;
++                xdg_log.infof( "present #%lu: visible %d, %d layers, layer0 %dx%d tex %p backend fb %p, fsr %d nis %d blur %d fade %d",
++                    (unsigned long)s_ulPresents, (int)m_bVisible, (int)pFrameInfo->layers.count(),
++                    pL0 && pL0->tex ? (int)pL0->tex->width() : 0, pL0 && pL0->tex ? (int)pL0->tex->height() : 0,
++                    pL0 ? (void *)pL0->tex.get() : nullptr, (void *)pFb0,
++                    (int)pFrameInfo->useFSRLayer0, (int)pFrameInfo->useNISLayer0, (int)pFrameInfo->blurLayer0, (int)pFrameInfo->bFadingOut );
++            }
++            s_ulPresents++;
++        }
++
+         bool bNeedsFullComposite = false;
+ 
+         if ( !m_bVisible )
+@@ -1666,8 +1685,15 @@
+ 
+     void CWaylandPlane::Present( const FrameInfo_t::Layer_t *pLayer )
+     {
+-        CWaylandFb *pWaylandFb = pLayer && pLayer->tex != nullptr ? static_cast<CWaylandFb*>( pLayer->tex->GetBackendFb()->EnsureImported() ) : nullptr;
++        CWaylandFb *pWaylandFb = pLayer && pLayer->tex != nullptr && pLayer->tex->GetBackendFb() ? static_cast<CWaylandFb*>( pLayer->tex->GetBackendFb()->EnsureImported() ) : nullptr;
+         wl_buffer *pBuffer = pWaylandFb ? pWaylandFb->GetHostBuffer() : nullptr;
++        if ( pLayer && pLayer->tex != nullptr && !pBuffer )
++        {
++            static int s_nNoBuffer = 0;
++            if ( s_nNoBuffer++ < 5 )
++                xdg_log.errorf( "layer %dx%d has no host buffer (backend fb %p): nothing to show for it",
++                    (int)pLayer->tex->width(), (int)pLayer->tex->height(), (void *)pLayer->tex->GetBackendFb() );
++        }
+ 
+         if ( pBuffer )
+         {
+--- a/src/steamcompmgr.cpp
++++ b/src/steamcompmgr.cpp
+@@ -1869,8 +1869,20 @@
+ 
+ 	if ( pOwnedTexture == nullptr ) {
+ 		// Failed to create Vulkan texture from Wayland buffer for some reason.
++		static int s_nFailed = 0;
++		if ( s_nFailed++ < 5 )
++			xwm_log.errorf( "mali-gl: could not make a Vulkan texture from window 0x%lx's buffer (%dx%d, dmabuf %d format 0x%x modifier 0x%lx)",
++				w->type == steamcompmgr_win_type_t::XWAYLAND ? w->xwayland().id : 0ul, buf->width, buf->height,
++				dmabuf.n_planes, dmabuf.format, (unsigned long)dmabuf.modifier );
+ 		return nullptr;
+ 	}
++	{
++		static int s_nImported = 0;
++		if ( s_nImported++ < 3 )
++			xwm_log.infof( "mali-gl: window buffer %dx%d imported (dmabuf planes %d format 0x%x modifier 0x%lx, host fb %p)",
++				buf->width, buf->height, dmabuf.n_planes, dmabuf.format, (unsigned long)dmabuf.modifier,
++				(void *)pOwnedTexture->GetBackendFb() );
++	}
+ 
+ 	commit->vulkanTex = pOwnedTexture;
+ 
