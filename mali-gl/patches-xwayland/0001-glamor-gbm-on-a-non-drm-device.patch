@@ -1,5 +1,5 @@
 diff --git a/hw/xwayland/xwayland-dmabuf.c b/hw/xwayland/xwayland-dmabuf.c
-index e485e5b..de89878 100644
+index e485e5b..2a21d92 100644
 --- a/hw/xwayland/xwayland-dmabuf.c
 +++ b/hw/xwayland/xwayland-dmabuf.c
 @@ -39,6 +39,17 @@
@@ -38,7 +38,20 @@ index e485e5b..de89878 100644
              xwl_dmabuf_get_modifiers_for_format(dev_formats->formats,
                                                  dev_formats->num_formats,
                                                  format, num_modifiers, modifiers)) {
-@@ -581,7 +592,7 @@ xwl_dmabuf_feedback_tranche_done(void *data,
+@@ -567,7 +578,11 @@ xwl_dmabuf_feedback_tranche_done(void *data,
+      * triggered first
+      */
+ 
+-    if (xwl_feedback->tmp_tranche.drm_dev == NULL) {
++    /* mali-gl: a compositor whose device has no DRM node still sends usable
++     * tranches (drm_dev stays NULL); keep them, or no format is ever
++     * supported and no window gets a wl_buffer. */
++    if (xwl_feedback->tmp_tranche.drm_dev == NULL &&
++        xwl_feedback->tmp_tranche.num_formats == 0) {
+         xwl_device_formats_destroy(&xwl_feedback->tmp_tranche);
+         goto out;
+     }
+@@ -581,7 +596,7 @@ xwl_dmabuf_feedback_tranche_done(void *data,
      for (int i = 0; i < xwl_feedback->dev_formats_len; i++) {
          tranche = &xwl_feedback->dev_formats[i];
          if (tranche->supports_scanout == xwl_feedback->tmp_tranche.supports_scanout &&
