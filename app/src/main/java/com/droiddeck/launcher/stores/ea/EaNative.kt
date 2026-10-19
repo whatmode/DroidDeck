@@ -53,9 +53,9 @@ object EaNative {
         fun first(key: String): JSONObject? = results.firstOrNull { it.has(key) }
     }
 
-    fun run(context: Context, args: List<String>, onResult: (JSONObject) -> Unit = {}): Outcome {
+    fun run(context: Context, args: List<String>, onStart: (Process) -> Unit = {}, onResult: (JSONObject) -> Unit = {}): Outcome {
         val results = ArrayList<JSONObject>()
-        val code = GuestCommand.run(context.applicationContext, listOf(PROGRAM) + args, logName = "ea") { line ->
+        val code = GuestCommand.run(context.applicationContext, listOf(PROGRAM) + args, logName = "ea", onStart = onStart) { line ->
             parse(line)?.let { results += it; onResult(it) }
         }
         return Outcome(code, results)

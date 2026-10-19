@@ -20,6 +20,7 @@ internal class EaInstaller(
     private val folder: File,
 ) : DownloadQueue.DownloadJob {
     private val cancelled = AtomicBoolean(false)
+    @Volatile private var process: Process? = null
 
     override fun run(handle: DownloadQueue.JobHandle): String? {
         if (!EaNative.ready(app)) throw IllegalStateException(EaNative.ENGINE_MISSING)
@@ -28,7 +29,10 @@ internal class EaInstaller(
         StoreInstalls.begin(folder, Store.EA, item.id, item.title, cover, item.imageUrl)
         val guest = AddedGames.guestPath(app, folder) ?: throw IllegalStateException("The install folder is not visible to the Linux system: ${folder.path}")
         var downloading = false
-        val outcome = EaNative.run(app, listOf("install", item.id, guest)) { o ->
+        val outcome = EaNative.run(app, listOf("install", item.id, guest), onStart = { p ->
+            process = p
+            if (cancelled.get()) p.destroy()
+        }) { o ->
             if (o.has("progress")) {
                 if (!downloading) { downloading = true; handle.stage(DownloadStage.DOWNLOAD) }
                 handle.progress(o.optLong("done"), o.optLong("total"), "Downloading from EA")
@@ -58,6 +62,10 @@ internal class EaInstaller(
 
     override fun cancel(deleteFiles: Boolean) {
         cancelled.set(true)
+        process?.let { p ->
+            p.destroy()
+            Thread({ if (!p.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) p.destroyForcibly() }, "ea-cancel").start()
+        }
         if (deleteFiles) StoreInstalls.discard(app, folder, emptyList())
     }
 

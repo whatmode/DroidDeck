@@ -11,7 +11,7 @@ import java.io.File
 
 object GuestCommand {
     fun run(context: Context, argv: List<String>, fakeRoot: Boolean = false, logName: String? = null,
-            linkDir: File? = null, onLine: (String) -> Unit): Int {
+            linkDir: File? = null, onStart: (Process) -> Unit = {}, onLine: (String) -> Unit): Int {
         val log = logName?.let {
             try {
                 File(File(LinuxRuntime.logDir(context), SessionPaths.TOOLS_DIR).apply { mkdirs() }, "$it.log").printWriter()
@@ -19,13 +19,13 @@ object GuestCommand {
         }
         log?.println("== ${java.util.Date()} ${argv.joinToString(" ")}")
         try {
-            return runLogged(context, argv, fakeRoot, linkDir) { line -> log?.println(line); log?.flush(); onLine(line) }
+            return runLogged(context, argv, fakeRoot, linkDir, onStart) { line -> log?.println(line); log?.flush(); onLine(line) }
         } finally {
             log?.close()
         }
     }
 
-    private fun runLogged(context: Context, argv: List<String>, fakeRoot: Boolean, linkDir: File?, onLine: (String) -> Unit): Int {
+    private fun runLogged(context: Context, argv: List<String>, fakeRoot: Boolean, linkDir: File?, onStart: (Process) -> Unit, onLine: (String) -> Unit): Int {
         val root = LinuxRuntime.rootDir(context)
         LinuxRuntime.writeAccounts(context)
         SessionFiles.stage(context, root)
@@ -55,6 +55,7 @@ object GuestCommand {
         val pid = HostProcess.pidOf(process)
         OrphanReaper.keep(pid)
         try {
+            onStart(process)
             process.inputStream.bufferedReader().useLines { lines -> lines.forEach(onLine) }
             return process.waitFor()
         } finally {
