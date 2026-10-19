@@ -24,18 +24,20 @@ GS=$P/bin/gamescope
   echo "### gamescope (headless) + Xwayland + x11test"
   timeout 90 "$GS" --backend headless -W 1280 -H 720 -w 1280 -h 720 -- "$P/bin/x11test"
   echo "### exit code $?"
-  echo "### gamescope --backend wayland (as in game mode): a blue window with a green triangle should show for 15 s"
+  echo "### gamescope --backend wayland (as in game mode): two 15 s runs; a blue window with a green triangle should show"
   echo "WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-} DISPLAY=${DISPLAY:-}"
   ls -la "${XDG_RUNTIME_DIR:-/run/droiddeck}" 2>&1 | grep -i wayland
   # Game mode's gamescope talks to DroidDeck's own compositor (wayland-0); the
   # desktop's compositor lacks protocols gamescope needs.  Try wayland-0 first.
   for sock in wayland-0 ${WAYLAND_DISPLAY:-}; do
     [ -S "${XDG_RUNTIME_DIR:-/run/droiddeck}/$sock" ] || { echo "no socket $sock"; continue; }
-    echo "## WAYLAND_DISPLAY=$sock"
-    X11TEST_SECONDS=15 timeout 60 env WAYLAND_DISPLAY="$sock" \
-      "$GS" --backend wayland --debug-focus -W 1280 -H 720 -w 1280 -h 720 -- "$P/bin/x11test" 2>&1 \
-      | grep -v "MESA: info\|scriptmgr\|^>\|xwininfo"
-    echo "### exit code $?"
+    for sw in 0 1; do
+      echo "## WAYLAND_DISPLAY=$sock PAN_KBASE_SHARED_WAIT=$sw (window $((sw + 1)) of 2)"
+      X11TEST_SECONDS=15 timeout 60 env WAYLAND_DISPLAY="$sock" PAN_KBASE_SHARED_WAIT=$sw \
+        "$GS" --backend wayland --debug-focus -W 1280 -H 720 -w 1280 -h 720 -- "$P/bin/x11test" 2>&1 \
+        | grep -v "MESA: info\|scriptmgr\|^>\|xwininfo"
+      echo "### exit code $?"
+    done
     break
   done
   echo "### texture from pixmap (Steam's GL composer path)"

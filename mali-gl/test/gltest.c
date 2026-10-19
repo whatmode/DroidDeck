@@ -14,6 +14,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <gbm.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -328,6 +329,33 @@ main(void)
          } else {
             check(0, "mmap of the dma-buf fd");
          }
+         /* Implicit sync, as gamescope uses it: after a flush (no finish) the
+          * dma-buf carries our GPU fence; it has to signal on its own. */
+#ifdef DMA_BUF_IOCTL_EXPORT_SYNC_FILE
+         for (int round = 0; round < 3; round++) {
+            glClear(GL_COLOR_BUFFER_BIT);
+            for (int k = 0; k < 20; k++)
+               glDrawArrays(GL_TRIANGLES, 0, 3);
+            glFlush();
+            struct dma_buf_export_sync_file exp = {.flags = DMA_BUF_SYNC_READ, .fd = -1};
+            int r = ioctl(bo_fd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &exp);
+            if (r != 0 || exp.fd < 0) {
+               printf("implicit fence: EXPORT_SYNC_FILE failed (%d)\n", r);
+               check(0, "export the dma-buf's implicit fence");
+               break;
+            }
+            struct pollfd pf = {.fd = exp.fd, .events = POLLIN};
+            int now = poll(&pf, 1, 0);
+            double t0 = now_s();
+            int sig = poll(&pf, 1, 3000);
+            printf("implicit fence round %d: %s right after flush, %s after %.1f ms\n", round,
+                   now > 0 ? "already signalled" : "pending",
+                   sig > 0 ? "signalled" : "NOT signalled", (now_s() - t0) * 1000.0);
+            check(sig > 0, "the dma-buf's implicit fence signals (gamescope waits on it)");
+            close(exp.fd);
+         }
+         glFinish();
+#endif
          glBindFramebuffer(GL_FRAMEBUFFER, fb);
          destroy_image(dpy, img);
       }

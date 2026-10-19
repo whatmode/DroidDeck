@@ -424,7 +424,7 @@ index 4dbc7db..bcb9710 100644
     ctx->printf.bo =
        panfrost_bo_create(dev, PAN_PRINTF_BUFFER_SIZE, 0, "Printf Buffer");
 diff --git a/src/gallium/drivers/panfrost/pan_csf.c b/src/gallium/drivers/panfrost/pan_csf.c
-index b2ed250..bfe2317 100644
+index b2ed250..30df6c5 100644
 --- a/src/gallium/drivers/panfrost/pan_csf.c
 +++ b/src/gallium/drivers/panfrost/pan_csf.c
 @@ -24,6 +24,28 @@
@@ -487,7 +487,7 @@ index b2ed250..bfe2317 100644
     ret = pan_kmod_ioctl(panfrost_device_fd(dev),
                          DRM_IOCTL_PANTHOR_GROUP_GET_STATE, &state);
     if (ret) {
-@@ -895,6 +919,623 @@ csf_submit_wait_and_dump(struct panfrost_batch *batch,
+@@ -895,6 +919,629 @@ csf_submit_wait_and_dump(struct panfrost_batch *batch,
     }
  }
  
@@ -1054,7 +1054,13 @@ index b2ed250..bfe2317 100644
 +                            : kbase_sync_submit() ||
 +                                 (dev->debug & (PAN_DBG_TRACE | PAN_DBG_SYNC));
 +
-+   /* Shared BOs: publish our fence on them; if that fails, wait instead. */
++   /* Shared BOs: publish our fence on them; if that fails, wait instead.
++    * PAN_KBASE_SHARED_WAIT=1 always waits (no fence is attached). */
++   static int shared_wait = -1;
++   if (shared_wait < 0)
++      shared_wait = debug_get_bool_option("PAN_KBASE_SHARED_WAIT", false);
++   if (shared && shared_wait && !ctx->is_noop)
++      wait = true;
 +   if (shared && !wait && !ctx->is_noop) {
 +      uint64_t va = ctx->csf.kbase.seqno_va;
 +      uint64_t target_minus_one = seqno - 1;
@@ -1111,7 +1117,7 @@ index b2ed250..bfe2317 100644
  int
  GENX(csf_submit_batch)(struct panfrost_batch *batch)
  {
-@@ -907,6 +1548,11 @@ GENX(csf_submit_batch)(struct panfrost_batch *batch)
+@@ -907,6 +1554,11 @@ GENX(csf_submit_batch)(struct panfrost_batch *batch)
     if (ret)
        return ret;
  
@@ -1123,7 +1129,7 @@ index b2ed250..bfe2317 100644
     uint64_t cs_start = cs_root_chunk_gpu_addr(batch->csf.cs.builder);
     uint32_t cs_size = cs_root_chunk_size(batch->csf.cs.builder);
     struct panfrost_context *ctx = batch->ctx;
-@@ -1165,7 +1811,13 @@ GENX(csf_emit_fragment_job)(struct panfrost_batch *batch,
+@@ -1165,7 +1817,13 @@ GENX(csf_emit_fragment_job)(struct panfrost_batch *batch,
        /* Finish tiling and wait for IDVS and tiling */
        cs_finish_tiling(b);
        cs_wait_slot(b, PANFROST_SB_RENDER);
@@ -1138,7 +1144,7 @@ index b2ed250..bfe2317 100644
     }
  
     struct cs_index fbd_pointer = cs_sr_reg64(b, FRAGMENT, FBD_POINTER);
-@@ -1205,7 +1857,8 @@ GENX(csf_emit_fragment_job)(struct panfrost_batch *batch,
+@@ -1205,7 +1863,8 @@ GENX(csf_emit_fragment_job)(struct panfrost_batch *batch,
      * That's what cs_finish_fragment() is all about. The list of freed
      * chunks is in the tiler context descriptor
      * (completed_{top,bottom fields}). */
@@ -1148,7 +1154,7 @@ index b2ed250..bfe2317 100644
        assert(batch->tiler_ctx.valhall.desc);
        cs_move64_to(b, cs_reg64(b, 90), batch->tiler_ctx.valhall.desc);
        cs_load_to(b, cs_reg_tuple(b, 86, 4), cs_reg64(b, 90), BITFIELD_MASK(4),
-@@ -1946,6 +2599,149 @@ get_device_reset_status(struct pipe_context *pctx)
+@@ -1946,6 +2605,149 @@ get_device_reset_status(struct pipe_context *pctx)
     return reset_status;
  }
  
@@ -1298,7 +1304,7 @@ index b2ed250..bfe2317 100644
  int
  GENX(csf_init_context)(struct panfrost_context *ctx)
  {
-@@ -1953,6 +2749,11 @@ GENX(csf_init_context)(struct panfrost_context *ctx)
+@@ -1953,6 +2755,11 @@ GENX(csf_init_context)(struct panfrost_context *ctx)
  
     struct panfrost_screen *screen = pan_screen(ctx->base.screen);
     struct panfrost_device *dev = pan_device(ctx->base.screen);
@@ -1310,7 +1316,7 @@ index b2ed250..bfe2317 100644
     struct drm_panthor_queue_create qc[] = {{
        .priority = 1,
        .ringbuf_size = 64 * 1024,
-@@ -2038,8 +2839,7 @@ GENX(csf_init_context)(struct panfrost_context *ctx)
+@@ -2038,8 +2845,7 @@ GENX(csf_init_context)(struct panfrost_context *ctx)
        .gpu = cs_bo->ptr.gpu,
        .capacity = panfrost_bo_size(cs_bo) / sizeof(uint64_t),
     };
@@ -1320,7 +1326,7 @@ index b2ed250..bfe2317 100644
     const struct cs_builder_conf bconf = {
        .nr_registers = csif_info->cs_reg_count,
        .nr_kernel_registers = MAX2(csif_info->unpreserved_cs_reg_count, 4),
-@@ -2124,6 +2924,14 @@ GENX(csf_cleanup_context)(struct panfrost_context *ctx)
+@@ -2124,6 +2930,14 @@ GENX(csf_cleanup_context)(struct panfrost_context *ctx)
        return;
  
     struct panfrost_device *dev = pan_device(ctx->base.screen);
