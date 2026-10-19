@@ -22,8 +22,11 @@ PY
 (cd "$WORK/maxima" && cargo build --release -p droiddeck-ea)
 rm -rf "$OUT" && mkdir -p "$OUT/droiddeck-ea/bin"
 install -m755 "$WORK/maxima/target/release/droiddeck-ea" "$OUT/droiddeck-ea/bin/droiddeck-ea"
-ln -s droiddeck-ea "$OUT/droiddeck-ea/bin/droiddeck-ea-wine"
-ln -s droiddeck-ea "$OUT/droiddeck-ea/bin/maxima-bootstrap"
+# maxima-lib starts "maxima-bootstrap" next to the program; the app stages plain files, so these
+# are small scripts rather than links.
+printf '#!/bin/sh\nexec "$(dirname "$(readlink -f "$0")")/droiddeck-ea" __bootstrap "$@"\n' > "$OUT/droiddeck-ea/bin/maxima-bootstrap"
+printf '#!/bin/sh\nexec "$(dirname "$(readlink -f "$0")")/droiddeck-ea" __wine "$@"\n' > "$OUT/droiddeck-ea/bin/droiddeck-ea-wine"
+chmod 755 "$OUT/droiddeck-ea/bin/maxima-bootstrap" "$OUT/droiddeck-ea/bin/droiddeck-ea-wine"
 install -m755 "$HERE/test/run-eatest.sh" "$OUT/droiddeck-ea/run-eatest.sh"
 echo "droiddeck-ea built from ${GITHUB_SHA:-local}, Maxima $MAXIMA_REV" > "$OUT/droiddeck-ea/VERSION"
 (cd "$OUT" && tar czf droiddeck-ea-aarch64.tar.gz droiddeck-ea && sha256sum droiddeck-ea-aarch64.tar.gz | cut -d' ' -f1 > droiddeck-ea.sha256)

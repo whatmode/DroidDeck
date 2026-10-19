@@ -74,11 +74,15 @@ fn main() -> ExitCode {
     let _ = log::set_logger(&LOGGER).map(|()| log::set_max_level(LevelFilter::Info));
     let args: Vec<String> = env::args().collect();
     let argv0 = args.first().map(|a| Path::new(a).file_name().unwrap_or_default().to_string_lossy().to_string()).unwrap_or_default();
-    if argv0 == "maxima-bootstrap" {
+    let first = args.get(1).map(String::as_str).unwrap_or("");
+    if argv0 == "maxima-bootstrap" || first == "__bootstrap" {
         return bootstrap();
     }
     if argv0 == "droiddeck-ea-wine" {
         return wine(&args[1..]);
+    }
+    if first == "__wine" {
+        return wine(&args[2..]);
     }
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio");
