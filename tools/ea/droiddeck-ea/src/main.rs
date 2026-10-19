@@ -234,43 +234,55 @@ async fn install(offer_id: &str, dir: &Path) -> Result<()> {
     env::set_var("MAXIMA_SKIP_TOUCHUP", "1");
 
     let maxima_arc = open_maxima(true).await?;
-    {
-        let mut maxima = maxima_arc.lock().await;
-        let builds = maxima.content_manager().service().available_builds(offer_id).await?;
-        let build = builds.live_build().ok_or_else(|| anyhow!("EA offers no build of this game to download"))?;
-        info!("installing build {}", build.to_string());
-        let game = QueuedGameBuilder::default()
-            .offer_id(offer_id.to_owned())
-            .build_id(build.build_id().to_owned())
-            .path(dir.to_path_buf())
-            .build()?;
-        maxima.content_manager().install_now(game).await?;
-    }
+    // Files that fail are deleted, and finished files are skipped on the next pass, so another
+    // pass only fetches what is missing.
+    let passes = 3;
+    for pass in 1..=passes {
+        {
+            let mut maxima = maxima_arc.lock().await;
+            let builds = maxima.content_manager().service().available_builds(offer_id).await?;
+            let build = builds.live_build().ok_or_else(|| anyhow!("EA offers no build of this game to download"))?;
+            info!("installing build {} (pass {}/{})", build.to_string(), pass, passes);
+            let game = QueuedGameBuilder::default()
+                .offer_id(offer_id.to_owned())
+                .build_id(build.build_id().to_owned())
+                .path(dir.to_path_buf())
+                .build()?;
+            maxima.content_manager().install_now(game).await?;
+        }
 
-    let mut last = Instant::now() - Duration::from_secs(10);
-    loop {
-        let mut maxima = maxima_arc.lock().await;
-        let mut finished = false;
-        for event in maxima.consume_pending_events() {
-            if let MaximaEvent::InstallFinished(_) = event {
-                finished = true;
-            }
-        }
-        maxima.update().await;
-        match maxima.content_manager().current() {
-            Some(d) => {
-                if last.elapsed() >= Duration::from_secs(1) {
-                    emit(json!({ "progress": d.percentage_done(), "done": d.bytes_downloaded(), "total": d.bytes_total() }));
-                    last = Instant::now();
+        let mut failed = 0usize;
+        let mut last = Instant::now() - Duration::from_secs(10);
+        loop {
+            let mut maxima = maxima_arc.lock().await;
+            let _ = maxima.consume_pending_events();
+            let finished = match maxima.content_manager().current() {
+                Some(d) => {
+                    failed = d.failed_files();
+                    if last.elapsed() >= Duration::from_secs(1) || d.is_done() {
+                        emit(json!({ "progress": d.percentage_done(), "done": d.bytes_downloaded(), "total": d.bytes_total() }));
+                        last = Instant::now();
+                    }
+                    d.is_done()
                 }
+                None => true,
+            };
+            if finished {
+                // Let maxima retire the download (it saves its queue) before the next pass.
+                maxima.update().await;
+                break;
             }
-            None => finished = true,
+            maxima.update().await;
+            drop(maxima);
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
-        drop(maxima);
-        if finished {
+        if failed == 0 {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        warn!("{} file(s) did not download on pass {}", failed, pass);
+        if pass == passes {
+            bail!("{} file(s) could not be downloaded from EA; start the install again to fetch just those", failed);
+        }
     }
 
     let manifest = manifest::read(dir.join(MANIFEST_RELATIVE_PATH)).await.context("the downloaded game has no installer manifest")?;
