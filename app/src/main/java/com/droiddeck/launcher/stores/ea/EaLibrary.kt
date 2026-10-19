@@ -58,10 +58,12 @@ object EaLibrary {
         )
     }
 
-    private fun publish(items: List<CatalogItem>) = StoresState.post {
-        StoresState.library[store] = mergeItems(StoresState.library[store], items)
-        val installed = StoresState.installed.filter { it.sidecar.store == store }.map { it.sidecar.id }.toSet()
-        StoresState.shelves[store] = StoreShelves(trending = items.filterNot { it.id in installed }, art = StoresState.shelves[store]?.art.orEmpty())
+    private fun publish(items: List<CatalogItem>) {
+        StoresState.post {
+            StoresState.library[store] = mergeItems(StoresState.library[store], items)
+            val installed = StoresState.installed.filter { it.sidecar.store == store }.map { it.sidecar.id }.toSet()
+            StoresState.shelves[store] = StoreShelves(trending = items.filterNot { it.id in installed }, art = StoresState.shelves[store]?.art.orEmpty())
+        }
     }
 
     private fun parse(text: String?): List<CatalogItem> {
@@ -72,9 +74,11 @@ object EaLibrary {
     fun sync(context: Context) {
         if (!running.compareAndSet(false, true)) return
         val app = context.applicationContext
-        fun problem(text: String?) = StoresState.post {
-            StoresState.status.remove(store)
-            if (text == null) StoresState.problems.remove(store) else StoresState.problems[store] = text
+        fun problem(text: String?) {
+            StoresState.post {
+                StoresState.status.remove(store)
+                if (text == null) StoresState.problems.remove(store) else StoresState.problems[store] = text
+            }
         }
         try {
             val cached = prefs(app).getString(KEY_CACHE, null)
