@@ -43,7 +43,7 @@ class StoreGameSidecar(
         if (exe.isNotEmpty()) put("exe", exe)
         if (state != STATE_INSTALLED) put("state", state)
         if (store == Store.EPIC) put("epic", JSONObject().put("eos", epic.eos).put("offline", epic.offline))
-        if (store != Store.AMAZON) put("cloud", cloud)
+        if (store != Store.AMAZON && store != Store.EA) put("cloud", cloud)
         if (store == Store.GOG) put("achievements", achievements)
         if (!launcher.isNullOrEmpty()) put("launcher", launcher)
         if (args.isNotEmpty()) put("args", JSONArray(args))

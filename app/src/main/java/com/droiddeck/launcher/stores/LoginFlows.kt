@@ -12,10 +12,12 @@ internal object LoginFlows {
         Store.GOG -> GogFlow(state)
         Store.EPIC -> epicFlow()
         Store.AMAZON -> amazonFlow()
+        Store.EA -> eaFlow()
     }
 
     @Volatile var epicFlow: () -> StoreLoginActivity.Flow? = { null }
     @Volatile var amazonFlow: () -> StoreLoginActivity.Flow? = { null }
+    @Volatile var eaFlow: () -> StoreLoginActivity.Flow? = { null }
 
     private class GogFlow(private val state: String) : StoreLoginActivity.Flow {
         override val startUrl: String get() = GogAuth.authUrl(state)

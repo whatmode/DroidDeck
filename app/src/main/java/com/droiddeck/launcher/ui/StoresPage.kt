@@ -150,7 +150,7 @@ private const val DOWNLOADS = "downloads"
 
 private val TABS = listOf("store", "library", "installed")
 
-internal fun tabsFor(store: Store?): List<String> = if (store == Store.AMAZON) TABS.drop(1) else TABS
+internal fun tabsFor(store: Store?): List<String> = if (store == Store.AMAZON || store == Store.EA) TABS.drop(1) else TABS
 
 internal fun tabFor(store: Store?, tab: String): String = if (tab in tabsFor(store)) tab else "library"
 
@@ -998,6 +998,7 @@ internal fun storePalette(base: Palette, store: Store?): Palette {
         Store.GOG -> Color(0xFFC25BC8) to Color(0xFF9A3FA1)
         Store.EPIC -> Color(0xFFE6E6E6) to Color(0xFFBDBDBD)
         Store.AMAZON -> Color(0xFFFF9900) to Color(0xFFE07800)
+        Store.EA -> Color(0xFFFF4747) to Color(0xFFD62F2F)
         null -> return base
     }
     val on = if (accent.luminance() > 0.18f) Color(0xFF0B0B0D) else Color.White

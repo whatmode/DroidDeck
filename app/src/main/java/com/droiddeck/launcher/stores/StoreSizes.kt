@@ -54,7 +54,7 @@ object StoreSizes {
                     when (item.store) {
                         Store.EPIC -> EpicPrefs.get(app).edit().putLong("size_${item.id}", it).apply()
                         Store.AMAZON -> AmazonPrefs.get(app).edit().putLong("size_${item.id}", it).apply()
-                        Store.GOG -> {}
+                        Store.GOG, Store.EA -> {}
                     }
                 }
             }, pool).exceptionally { error ->
@@ -107,6 +107,6 @@ object StoreSizes {
             val bytes = AmazonApiClient.getBytes(AmazonApiClient.appendPath(spec.downloadUrl, "manifest.proto"), token) ?: return 0L
             AmazonManifest.parse(bytes).totalInstallSize
         }
-        Store.GOG -> 0L
+        Store.GOG, Store.EA -> 0L
     } }
 }

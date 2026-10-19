@@ -132,6 +132,10 @@ object SessionFiles {
             "usr/local/bin/gamescope" to "usr/local/bin/gamescope",
             // mali-gl stack for Mali (kbase) phones; droiddeck-session unpacks it on Mali only.
             "opt/mali-gl.tgz" to "opt/mali-gl.tgz",
+            // EA client (Maxima) for the EA store tab.
+            "usr/local/lib/droiddeck-ea/droiddeck-ea" to "usr/local/lib/droiddeck-ea/droiddeck-ea",
+            "usr/local/lib/droiddeck-ea/maxima-bootstrap" to "usr/local/lib/droiddeck-ea/maxima-bootstrap",
+            "usr/local/lib/droiddeck-ea/droiddeck-ea-wine" to "usr/local/lib/droiddeck-ea/droiddeck-ea-wine",
             "usr/local/lib/droiddeck/uruntime" to "usr/local/lib/droiddeck/uruntime",
             "usr/local/share/licenses/uruntime/LICENSE" to "usr/local/share/licenses/uruntime/LICENSE",
         ) + mangoapp + listOf("comet", "GalaxyCommunication.exe", "update-permissions.exe", "LICENSE", "version").map { "usr/local/lib/droiddeck-comet/$it" to "usr/local/lib/droiddeck-comet/$it" } + msitools.map { it to it } + vr + fexPreloads).filter { (asset, _) ->

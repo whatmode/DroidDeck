@@ -57,7 +57,7 @@ object CloudSaves {
                 val item = sidecar.extra["catalogItemId"].orEmpty()
                 if (ns.isEmpty() || item.isEmpty()) "" else EpicApiClient.getCustomAttribute(token, ns, item, "CloudSaveFolder")
             }
-            Store.AMAZON -> ""
+            Store.AMAZON, Store.EA -> ""
         } ?: return null
         p.edit().putString("cloud_template_$id", fetched).apply()
         Log.i(TAG, "cloud ${store.id} $id template ${if (fetched.isEmpty()) "none" else "found"}")
@@ -95,7 +95,7 @@ object CloudSaves {
         val dir = when (store) {
             Store.GOG -> CloudSavePaths.gog(template, pfx, folder)
             Store.EPIC -> CloudSavePaths.epic(template, pfx, folder, EpicCredentialStore.load(context)?.accountId.orEmpty(), id)
-            Store.AMAZON -> null
+            Store.AMAZON, Store.EA -> null
         }
         return dir to (if (dir == null) "unresolved" else "ok")
     }
@@ -120,7 +120,7 @@ object CloudSaves {
             val account = EpicCredentialStore.load(context)?.accountId.orEmpty()
             if (token == null || account.isEmpty()) null else EpicCloud(account, id, token)
         }
-        Store.AMAZON -> null
+        Store.AMAZON, Store.EA -> null
     }
 
     private fun gogScopedToken(context: Context, id: String, clientId: String): String? {
