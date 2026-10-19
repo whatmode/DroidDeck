@@ -26,6 +26,28 @@ index f16116d..2e87420 100644
          info!("Installation finished!");
  
          completed_bytes.fetch_add(1, Ordering::SeqCst);
+diff --git a/maxima-lib/src/content/zlib.rs b/maxima-lib/src/content/zlib.rs
+index 10e5c9c..24bdb45 100644
+--- a/maxima-lib/src/content/zlib.rs
++++ b/maxima-lib/src/content/zlib.rs
+@@ -119,7 +119,7 @@ pub(crate) fn write_zlib_state(buf: &mut BytesMut, stream: &mut mz_stream) {
+         }
+ 
+         for byte in window_buffer {
+-            buf.put_i8(byte);
++            buf.put_u8(byte as u8);
+         }
+     }
+ 
+@@ -181,7 +181,7 @@ pub(crate) fn restore_zlib_state(buf: &mut Bytes, stream: &mut mz_stream) {
+ 
+         let streamp = stream as z_streamp;
+         state_ref.window =
+-            unsafe { (stream.zalloc)(streamp as *mut c_void, 1, window_size) } as *mut i8;
++            unsafe { (stream.zalloc)(streamp as *mut c_void, 1, window_size) } as *mut c_char;
+ 
+         for i in 0..window_size {
+             let byte = buf.get_u8();
 diff --git a/maxima-lib/src/core/auth/hardware.rs b/maxima-lib/src/core/auth/hardware.rs
 index c11df25..2c044fd 100644
 --- a/maxima-lib/src/core/auth/hardware.rs
