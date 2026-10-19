@@ -70,6 +70,7 @@ object SessionArtifacts {
             LogRedactor.learnFromRuntime(LinuxRuntime.rootDir(context))
             val record = Record(dir)
             copySteamLogs(context, dir, record, steamArch)
+            copyProtonLogs(context, dir, record)
             VacDiagnostics.collect(context, dir)
             SessionLogCapture.dumpCrashBuffer(File(dir, "crash.log"))
             markScrubbed(scrubTree(record))
@@ -214,6 +215,34 @@ object SessionArtifacts {
             }
         }
         Log.i(TAG, "collected ${out.listFiles()?.size ?: 0} Steam log(s), scrubbed, into $out")
+    }
+
+    /**
+     * Proton's own logs (PROTON_LOG=1 writes steam-<appid>.log to the guest's home). Only recent
+     * ones, and only the end of a long one, where a failing game's last words are.
+     */
+    private fun copyProtonLogs(context: Context, dir: File, record: Record) {
+        val home = File(LinuxRuntime.rootDir(context), "root")
+        val since = System.currentTimeMillis() - 6L * 60 * 60 * 1000
+        val logs = home.listFiles { f -> f.isFile && f.name.matches(Regex("steam-\\d+\\.log")) && f.lastModified() >= since }
+            ?.takeIf { it.isNotEmpty() } ?: return
+        val out = File(dir, "proton").apply { mkdirs() }
+        val keep = 6L * 1024 * 1024
+        for (src in logs) try {
+            val dst = File(out, src.name)
+            java.io.RandomAccessFile(src, "r").use { raf ->
+                val skip = (raf.length() - keep).coerceAtLeast(0)
+                raf.seek(skip)
+                val reader = java.io.BufferedReader(java.io.InputStreamReader(java.io.FileInputStream(raf.fd), Charsets.UTF_8))
+                dst.bufferedWriter().use { w ->
+                    if (skip > 0) { reader.readLine(); w.write("[... first $skip bytes left out ...]"); w.newLine() }
+                    reader.forEachLine { line -> w.write(LogRedactor.redact(line)); w.newLine() }
+                }
+            }
+            record.files[dst] = Scrubbed(dst.length(), dst.lastModified())
+        } catch (e: Exception) {
+            Log.w(TAG, "could not copy ${src.name}", e)
+        }
     }
 
     @Synchronized
