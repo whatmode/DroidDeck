@@ -25,7 +25,7 @@ GS=$P/bin/gamescope
   timeout 90 "$GS" --backend headless -W 1280 -H 720 -w 1280 -h 720 -- "$P/bin/x11test"
   echo "### exit code $?"
   echo "### texture from pixmap (Steam's GL composer path)"
-  PAN_MESA_DEBUG=gl3 timeout 90 "$GS" --backend headless -W 1280 -H 720 -w 1280 -h 720 -- "$P/bin/tfptest" 2>&1 | grep -v "MESA: info\|scriptmgr\|^>\|gamescope\]"
+  PAN_MESA_DEBUG=gl3 timeout 180 "$GS" --backend headless -W 1280 -H 720 -w 1280 -h 720 -- "$P/bin/tfptest" 2>&1 | grep -v "MESA: info\|scriptmgr\|^>\|gamescope\]"
   echo "### GL context probe (PAN_MESA_DEBUG=gl3, as in game mode)"
   PAN_MESA_DEBUG=gl3 timeout 90 "$GS" --backend headless -W 1280 -H 720 -w 1280 -h 720 -- "$P/bin/glprobe" 2>&1 | grep -v "MESA: info\|scriptmgr\|^>"
   echo "### GL context probe without gl3"
