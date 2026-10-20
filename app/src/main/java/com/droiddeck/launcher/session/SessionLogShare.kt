@@ -46,7 +46,8 @@ object SessionLogShare {
         val zip = File(out, "DroidDeck-${folder.name}.zip")
         LogRedactor.learnFromRuntime(LinuxRuntime.rootDir(context))
         val live = liveSteamLogs(context, folder)
-        val games = GameLogs.collect(context, out).filterNot { File(folder, it.path).exists() }
+        val games = GameLogs.collect(context, out).filterNot { File(folder, it.path).exists() } +
+            listOfNotNull(DiskUsage.report(context, out)?.let { GameLogs.Entry("disk-usage.txt", it) })
         val logs = LinuxRuntime.logDir(context)
         val stores = recent(File(logs, STORES_DIR))
         val tools = recent(File(logs, SessionPaths.TOOLS_DIR))
