@@ -296,6 +296,15 @@ def with_ffmpeg(env):
 PROTON_DEFAULT_DEBUG = "+timestamp,+pid,+tid,+seh,+unwind,+threadname,+debugstr,+loaddll,+mscoree"
 
 
+def with_mali_video(env):
+    """PanVK (Mali over kbase) draws D3D11 NV12 textures white, which blanks Unity's video player
+    (Lake's menu). VK_LAYER_DROIDDECK_noycbcr reports YCbCr formats as unsupported, so games use
+    their ordinary texture path for video. DROIDDECK_HIDE_YCBCR=0 keeps them."""
+    if os.path.exists("/dev/mali0") and not os.path.exists("/dev/kgsl-3d0"):
+        env.setdefault("DROIDDECK_HIDE_YCBCR", "1")
+    return env
+
+
 def with_media_debug(env):
     """With PROTON_LOG=1, also log what the video stack does: GStreamer warnings and Wine's
     Media Foundation / winedmo / GStreamer-glue warnings. A WINEDEBUG or GST_DEBUG the user set
@@ -347,6 +356,7 @@ def main():
     env = force_ssbs(command, env)
     env = with_ffmpeg(env)
     env = with_media_debug(env)
+    env = with_mali_video(env)
     sync = load_sync()
     launch, launch_env = select_sync(command, env, sync)
     if launch[0] != command[0]:

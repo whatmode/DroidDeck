@@ -1,0 +1,20 @@
+{
+    "file_format_version": "1.2.0",
+    "layer": {
+        "name": "VK_LAYER_DROIDDECK_noycbcr",
+        "type": "GLOBAL",
+        "library_path": "/usr/local/lib/droiddeck-vklayers/libVkLayer_droiddeck_noycbcr.so",
+        "api_version": "1.3.0",
+        "implementation_version": "1",
+        "description": "Reports YCbCr / multi-planar formats (NV12) as unsupported; PanVK draws D3D11 NV12 video textures white",
+        "functions": {
+            "vkNegotiateLoaderLayerInterfaceVersion": "DroidDeckNoYcbcr_NegotiateLoaderLayerInterfaceVersion"
+        },
+        "enable_environment": {
+            "DROIDDECK_HIDE_YCBCR": "1"
+        },
+        "disable_environment": {
+            "DROIDDECK_HIDE_YCBCR_DISABLE": "1"
+        }
+    }
+}
