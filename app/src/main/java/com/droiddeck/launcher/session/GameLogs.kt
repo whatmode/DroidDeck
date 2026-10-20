@@ -40,6 +40,7 @@ object GameLogs {
                 .orEmpty().sortedByDescending { it.lastModified() }
                 .forEach { add("proton/${it.name}", it) }
             add("proton/game-environment.json", File(home, ".config/droiddeck/game-environment.json"))
+            protonMedia(context, out)?.let { add("proton/media-stack.txt", it) }
 
             val steamapps = File(SessionPrefs.activeSteamRoot(context), "steamapps")
             val prefixes = File(steamapps, "compatdata").listFiles { f -> f.isDirectory }.orEmpty()
@@ -75,6 +76,65 @@ object GameLogs {
         } catch (e: Exception) {
             Log.w(TAG, "collecting game logs", e)
         }
+        return result
+    }
+
+    /**
+     * What each installed Proton decodes video with: its FFmpeg and GStreamer libav libraries, the
+     * FFmpeg configure line and codec names found in them, and what Wine's winedmo links against.
+     */
+    private fun protonMedia(context: Context, out: File): File? = runCatching {
+        val steam = SessionPrefs.activeSteamRoot(context)
+        val tools = (File(steam, "steamapps/common").listFiles { f -> f.isDirectory && f.name.startsWith("Proton") }.orEmpty() +
+            File(steam, "compatibilitytools.d").listFiles { f -> f.isDirectory }.orEmpty()).distinct()
+        val text = StringBuilder("Proton media stack\n")
+        val wanted = Regex("lib(avcodec|avformat|avutil|swresample|swscale|avfilter|dav1d|vpx|openh264|x264)\\.so.*|winedmo\\.so|libgstlibav\\.so|libgst(videoparsersbad|isomp4|vpx|dav1d|openh264|v4l2codecs|video4linux2)\\.so")
+        for (tool in tools) {
+            text.append("\n== ${tool.name}\n")
+            val files = tool.walkTopDown().maxDepth(7).filter { it.name.matches(wanted) }.toList()
+            if (files.isEmpty()) text.append("  (no media libraries found)\n")
+            for (f in files.sortedBy { it.path }) {
+                val rel = f.relativeTo(tool).invariantSeparatorsPath
+                val link = runCatching { java.nio.file.Files.readSymbolicLink(f.toPath()).toString() }.getOrNull()
+                text.append("  $rel  ${if (link != null) "-> $link" else "${f.length()} bytes"}\n")
+                if (link != null || !f.isFile || f.length() > 64L * 1024 * 1024) continue
+                val strings = printable(f)
+                when {
+                    f.name.startsWith("libavcodec") -> {
+                        strings.filter { "--" in it && ("enable" in it || "disable" in it) }.distinct().take(3)
+                            .forEach { text.append("    configure: $it\n") }
+                        val codecs = strings.filter { it.matches(CODEC_NAME) }.distinct().sorted()
+                        text.append("    codec names: ${codecs.joinToString(" ")}\n")
+                    }
+                    f.name.startsWith("libavformat") -> {
+                        strings.filter { "--" in it && ("enable" in it || "disable" in it) }.distinct().take(1)
+                            .forEach { text.append("    configure: $it\n") }
+                    }
+                    else -> {
+                        val needed = strings.filter { it.matches(Regex("lib[A-Za-z0-9_+.-]+\\.so(\\.[0-9]+)*")) }.distinct()
+                        text.append("    libraries named: ${needed.joinToString(" ")}\n")
+                    }
+                }
+            }
+        }
+        File(out, "proton-media-stack.txt").apply { writeText(text.toString()) }
+    }.getOrNull()
+
+    private val CODEC_NAME = Regex("(h264|hevc|vp8|vp9|av1|aac|mp3|opus|vorbis|theora|mpeg4|mpeg2video|wmv[0-9]|wmav[0-9]|libdav1d|libvpx[a-z0-9-]*|libopenh264)(_[a-z0-9]+)?")
+
+    /** Runs of printable ASCII at least 4 long, like strings(1). */
+    private fun printable(f: File): List<String> {
+        val result = ArrayList<String>()
+        val run = StringBuilder()
+        f.inputStream().buffered(1 shl 16).use { input ->
+            while (true) {
+                val b = input.read()
+                if (b < 0) break
+                if (b in 0x20..0x7e) { if (run.length < 4096) run.append(b.toChar()) }
+                else { if (run.length >= 4) result += run.toString(); run.setLength(0) }
+            }
+        }
+        if (run.length >= 4) result += run.toString()
         return result
     }
 
