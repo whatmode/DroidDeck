@@ -975,3 +975,21 @@ class ForceSsbsTest(unittest.TestCase):
                 self.assertEqual(MODULE["force_ssbs"]([str(x86 / "proton")], on), on)
             finally:
                 g["SSBS_LIB"] = old
+
+
+class VulkanBisectionTest(unittest.TestCase):
+    def test_extension_list_loads_the_implicit_layer_and_zero_disables_it(self):
+        with self.subTest(mode="selected"):
+            env = {"DROIDDECK_HIDE_EXTS": "VK_KHR_unified_image_layouts, VK_EXT_robustness2",
+                   "VK_INSTANCE_LAYERS": "VK_LAYER_other"}
+            self.assertIs(MODULE["with_vk_bisection"](env), env)
+            self.assertEqual(env["DROIDDECK_HIDE_EXTS_ENABLE"], "1")
+            self.assertEqual(env["VK_INSTANCE_LAYERS"], "VK_LAYER_other:VK_LAYER_DROIDDECK_hideexts")
+        for value in (None, "", "0"):
+            with self.subTest(mode=value):
+                env = {"VK_INSTANCE_LAYERS": "VK_LAYER_other"}
+                if value is not None:
+                    env["DROIDDECK_HIDE_EXTS"] = value
+                MODULE["with_vk_bisection"](env)
+                self.assertNotIn("DROIDDECK_HIDE_EXTS_ENABLE", env)
+                self.assertEqual(env["VK_INSTANCE_LAYERS"], "VK_LAYER_other")
