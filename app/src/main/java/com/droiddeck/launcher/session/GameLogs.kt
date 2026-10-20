@@ -87,9 +87,11 @@ object GameLogs {
         val steam = SessionPrefs.activeSteamRoot(context)
         val root = LinuxRuntime.rootDir(context)
         // Proton builds, plus the system and Steam runtime folders a Wine library could load FFmpeg from.
-        val tools = (File(steam, "steamapps/common").listFiles { f -> f.isDirectory && (f.name.startsWith("Proton") || f.name.startsWith("SteamLinuxRuntime")) }.orEmpty() +
-            File(steam, "compatibilitytools.d").listFiles { f -> f.isDirectory }.orEmpty() +
-            listOf(File(root, "usr/lib"), File(root, "usr/lib/aarch64-linux-gnu"), File(steam, "steamrtarm64"))).distinct().filter { it.isDirectory }
+        val tools: List<File> = (File(steam, "steamapps/common").listFiles()?.toList().orEmpty()
+            .filter { it.isDirectory && (it.name.startsWith("Proton") || it.name.startsWith("SteamLinuxRuntime")) } +
+            File(steam, "compatibilitytools.d").listFiles()?.toList().orEmpty().filter { it.isDirectory } +
+            listOf(File(root, "usr/lib"), File(root, "usr/lib/aarch64-linux-gnu"), File(steam, "steamrtarm64")))
+            .distinct().filter { it.isDirectory }
         val text = StringBuilder("Proton media stack\n")
         val wanted = Regex("lib(avcodec|avformat|avutil|swresample|swscale|avfilter|dav1d|vpx|openh264|x264)\\.so.*|winedmo\\.so|libgstlibav\\.so|libgst(videoparsersbad|isomp4|vpx|dav1d|openh264|v4l2codecs|video4linux2)\\.so")
         for (tool in tools) {
