@@ -136,6 +136,8 @@ object SessionFiles {
             "usr/local/lib/droiddeck-ea/droiddeck-ea" to "usr/local/lib/droiddeck-ea/droiddeck-ea",
             "usr/local/lib/droiddeck-ea/maxima-bootstrap" to "usr/local/lib/droiddeck-ea/maxima-bootstrap",
             "usr/local/lib/droiddeck-ea/droiddeck-ea-wine" to "usr/local/lib/droiddeck-ea/droiddeck-ea-wine",
+        ) + listOf("libavutil.so.56", "libavcodec.so.58", "libavformat.so.58", "libavfilter.so.7", "libswscale.so.5", "libswresample.so.3", "LICENSE", "VERSION")
+            .map { "usr/local/lib/droiddeck-ffmpeg/$it" to "usr/local/lib/droiddeck-ffmpeg/$it" }.toTypedArray() + arrayOf(
             "usr/local/lib/droiddeck/uruntime" to "usr/local/lib/droiddeck/uruntime",
             "usr/local/share/licenses/uruntime/LICENSE" to "usr/local/share/licenses/uruntime/LICENSE",
         ) + mangoapp + listOf("comet", "GalaxyCommunication.exe", "update-permissions.exe", "LICENSE", "version").map { "usr/local/lib/droiddeck-comet/$it" to "usr/local/lib/droiddeck-comet/$it" } + msitools.map { it to it } + vr + fexPreloads).filter { (asset, _) ->

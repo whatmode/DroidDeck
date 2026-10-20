@@ -273,6 +273,20 @@ def mark_install_scripts(command, env):
         print("droiddeck-game-env: install scripts not marked (%s)" % error, file=sys.stderr)
 
 
+FFMPEG_DIR = "/usr/local/lib/droiddeck-ffmpeg"
+
+
+def with_ffmpeg(env):
+    """Wine's winedmo and Proton's gst-libav link FFmpeg 4 (libavcodec.so.58), which ARM64 Proton
+    does not ship; without this they load the Steam client's cut-down copy, which cannot pass MP4
+    H.264 to a decoder, so game videos come out blank. DROIDDECK_FFMPEG=0 turns it off."""
+    if env.get("DROIDDECK_FFMPEG") == "0" or not os.path.isfile(os.path.join(FFMPEG_DIR, "libavcodec.so.58")):
+        return env
+    paths = [p for p in env.get("LD_LIBRARY_PATH", "").split(":") if p and p != FFMPEG_DIR]
+    env["LD_LIBRARY_PATH"] = ":".join([FFMPEG_DIR] + paths)
+    return env
+
+
 def main():
     command = sys.argv[1:]
     if not command:
@@ -310,6 +324,7 @@ def main():
     if mic_enabled == "0":
         env["BANNER_AUDIO_DIRECT_MIC"] = "0"
     env = force_ssbs(command, env)
+    env = with_ffmpeg(env)
     sync = load_sync()
     launch, launch_env = select_sync(command, env, sync)
     if launch[0] != command[0]:
