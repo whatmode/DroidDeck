@@ -95,11 +95,12 @@ object SessionLogShare {
         val since = System.currentTimeMillis() - 6L * 60 * 60 * 1000
         val found = home.listFiles { f -> f.isFile && f.name.matches(Regex("steam-\\d+\\.log")) && f.lastModified() >= since }.orEmpty().toMutableList()
         File(home, ".config/droiddeck/game-environment.json").takeIf { it.isFile }?.let { found += it }
+        found += unityLogs(context, out, since)
         val keep = 8L * 1024 * 1024
         return found.mapNotNull { src ->
             if (src.length() <= keep) return@mapNotNull src
             runCatching {
-                val tail = File(out, src.name)
+                val tail = File(out, "end-of-" + src.name)
                 java.io.RandomAccessFile(src, "r").use { raf ->
                     raf.seek(raf.length() - keep)
                     tail.outputStream().use { o ->
@@ -111,6 +112,29 @@ object SessionLogShare {
                 tail
             }.getOrNull()
         }
+    }
+
+    /** Unity games write their own Player.log under AppData/LocalLow/<company>/<game>/ in the prefix. */
+    private fun unityLogs(context: Context, out: File, since: Long): List<File> {
+        val compat = File(SessionPrefs.activeSteamRoot(context), "steamapps/compatdata")
+        val result = ArrayList<File>()
+        compat.listFiles { f -> f.isDirectory }.orEmpty().forEach { game ->
+            val low = File(game, "pfx/drive_c/users/steamuser/AppData/LocalLow")
+            low.listFiles { f -> f.isDirectory }.orEmpty().forEach { company ->
+                company.listFiles { f -> f.isDirectory }.orEmpty().forEach { title ->
+                    listOf("Player.log", "Player-prev.log").map { File(title, it) }
+                        .filter { it.isFile && it.lastModified() >= since - 48L * 60 * 60 * 1000 }
+                        .forEach { log ->
+                            runCatching {
+                                val copy = File(out, "${game.name}-${title.name}-${log.name}".replace(Regex("[^A-Za-z0-9._-]"), "_"))
+                                log.copyTo(copy, overwrite = true)
+                                result += copy
+                            }
+                        }
+                }
+            }
+        }
+        return result
     }
 
     private const val STEAM_LOG_MAX_BYTES = 8L * 1024 * 1024
