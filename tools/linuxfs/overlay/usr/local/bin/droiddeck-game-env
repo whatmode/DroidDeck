@@ -293,6 +293,21 @@ def with_ffmpeg(env):
     return env
 
 
+PROTON_DEFAULT_DEBUG = "+timestamp,+pid,+tid,+seh,+unwind,+threadname,+debugstr,+loaddll,+mscoree"
+
+
+def with_media_debug(env):
+    """With PROTON_LOG=1, also log what the video stack does: GStreamer warnings and Wine's
+    Media Foundation / winedmo / GStreamer-glue warnings. A WINEDEBUG or GST_DEBUG the user set
+    is left alone."""
+    if env.get("PROTON_LOG") != "1":
+        return env
+    env.setdefault("GST_DEBUG", "2")
+    env.setdefault("GST_DEBUG_NO_COLOR", "1")
+    env.setdefault("WINEDEBUG", PROTON_DEFAULT_DEBUG + ",warn+mfplat,warn+dmo,warn+quartz,warn+mfreadwrite,warn+wmvcore,warn+winegstreamer")
+    return env
+
+
 def main():
     command = sys.argv[1:]
     if not command:
@@ -331,6 +346,7 @@ def main():
         env["BANNER_AUDIO_DIRECT_MIC"] = "0"
     env = force_ssbs(command, env)
     env = with_ffmpeg(env)
+    env = with_media_debug(env)
     sync = load_sync()
     launch, launch_env = select_sync(command, env, sync)
     if launch[0] != command[0]:
