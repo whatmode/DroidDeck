@@ -274,6 +274,7 @@ def mark_install_scripts(command, env):
 
 
 FFMPEG_DIR = "/usr/local/lib/droiddeck-ffmpeg"
+FFMPEG_LIBS = ("libavutil.so.56", "libswresample.so.3", "libswscale.so.5", "libavcodec.so.58", "libavformat.so.58", "libavfilter.so.7")
 
 
 def with_ffmpeg(env):
@@ -284,6 +285,11 @@ def with_ffmpeg(env):
         return env
     paths = [p for p in env.get("LD_LIBRARY_PATH", "").split(":") if p and p != FFMPEG_DIR]
     env["LD_LIBRARY_PATH"] = ":".join([FFMPEG_DIR] + paths)
+    # Proton itself later puts Steam's FFmpeg (steamrtarm64/video) first on LD_LIBRARY_PATH, so the
+    # libraries are also preloaded by full path: a preloaded library answers for its soname.
+    ours = [os.path.join(FFMPEG_DIR, name) for name in FFMPEG_LIBS if os.path.isfile(os.path.join(FFMPEG_DIR, name))]
+    current = [p for p in re.split(r"[ :]", env.get("LD_PRELOAD", "")) if p and p not in ours]
+    env["LD_PRELOAD"] = ":".join(current + ours)
     return env
 
 

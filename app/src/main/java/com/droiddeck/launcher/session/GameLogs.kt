@@ -90,7 +90,7 @@ object GameLogs {
         val tools: List<File> = (File(steam, "steamapps/common").listFiles()?.toList().orEmpty()
             .filter { it.isDirectory && (it.name.startsWith("Proton") || it.name.startsWith("SteamLinuxRuntime")) } +
             File(steam, "compatibilitytools.d").listFiles()?.toList().orEmpty().filter { it.isDirectory } +
-            listOf(File(root, "usr/lib"), File(root, "usr/lib/aarch64-linux-gnu"), File(steam, "steamrtarm64")))
+            listOf(File(root, "usr/local/lib/droiddeck-ffmpeg"), File(root, "usr/lib"), File(root, "usr/lib/aarch64-linux-gnu"), File(steam, "steamrtarm64")))
             .distinct().filter { it.isDirectory }
         val text = StringBuilder("Proton media stack\n")
         val wanted = Regex("lib(avcodec|avformat|avutil|swresample|swscale|avfilter|dav1d|vpx|openh264|x264)\\.so.*|winedmo\\.so|libgstlibav\\.so|libgst(videoparsersbad|isomp4|vpx|dav1d|openh264|v4l2codecs|video4linux2)\\.so")
