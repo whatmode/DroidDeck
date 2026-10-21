@@ -21,9 +21,13 @@ static struct fake_dispatch g_pd_obj;
 
 static const char *g_extensions[] = {
     "VK_KHR_maintenance5",
+    "VK_KHR_maintenance6",
+    "VK_KHR_load_store_op_none",
+    "VK_KHR_swapchain",
+    "VK_EXT_robustness2",
+    "VK_EXT_depth_clip_enable",
     "VK_KHR_unified_image_layouts",
     "VK_EXT_transform_feedback",
-    "VK_KHR_swapchain",
 };
 #define EXTENSION_COUNT (sizeof(g_extensions) / sizeof(g_extensions[0]))
 
@@ -230,14 +234,15 @@ static void check_enumeration_filters_only_listed_names(void)
     setenv("DROIDDECK_HIDE_EXTS", "VK_KHR_maintenance5, VK_EXT_transform_feedback", 1);
     uint32_t count = 0;
     assert(enumerate_device_extensions((VkPhysicalDevice)&g_obj, NULL, &count, NULL) == VK_SUCCESS);
-    assert(count == 3);
-    VkExtensionProperties properties[8];
-    uint32_t filled = 8;
+    assert(count == EXTENSION_COUNT - 1);
+    VkExtensionProperties properties[16];
+    uint32_t filled = 16;
     assert(enumerate_device_extensions((VkPhysicalDevice)&g_obj, NULL, &filled, properties) == VK_SUCCESS);
-    assert(filled == 3);
+    assert(filled == EXTENSION_COUNT - 1);
+    /* maintenance5 is listed but DXVK-required, so it stays first; transform_feedback is gone. */
     assert(!strcmp(properties[0].extensionName, "VK_KHR_maintenance5"));
-    assert(!strcmp(properties[1].extensionName, "VK_KHR_unified_image_layouts"));
-    assert(!strcmp(properties[2].extensionName, "VK_KHR_swapchain"));
+    assert(!strcmp(properties[1].extensionName, "VK_KHR_maintenance6"));
+    assert(!strcmp(properties[EXTENSION_COUNT - 2].extensionName, "VK_KHR_unified_image_layouts"));
 
     /* A short buffer is truncated with VK_INCOMPLETE, as the loader expects. */
     filled = 1;
@@ -253,11 +258,14 @@ static void check_enumeration_filters_only_listed_names(void)
 
 /*
  * DXVK 3.1.1 marks these as required, so hiding one would make DXVK reject the device and the game
- * would not start at all. Listing them must leave both the extension and its features in place.
+ * would not start at all. Listing every one of them must leave the whole list, and the features
+ * behind them, untouched.
  */
 static void check_dxvk_required_extensions_are_kept(void)
 {
-    setenv("DROIDDECK_HIDE_EXTS", "VK_KHR_maintenance5,VK_EXT_robustness2", 1);
+    setenv("DROIDDECK_HIDE_EXTS",
+           "VK_KHR_load_store_op_none,VK_KHR_maintenance5,VK_KHR_maintenance6,VK_KHR_swapchain,"
+           "VK_EXT_robustness2,VK_EXT_depth_clip_enable", 1);
 
     uint32_t count = 0;
     assert(enumerate_device_extensions((VkPhysicalDevice)&g_obj, NULL, &count, NULL) == VK_SUCCESS);

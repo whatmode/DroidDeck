@@ -106,15 +106,19 @@ static int token_equals(const char *start, size_t length, const char *name)
 }
 
 /*
- * Extensions DXVK 3.1.1 treats as required (ENABLE_EXT/ENABLE_EXT_FEATURE with require=true):
- * hiding one makes DXVK reject the device, so the game never starts and the launch says nothing
- * about the rendering bug. They are never hidden, which keeps every bisection launch meaningful.
+ * Every extension DXVK 3.1.1 marks required (ENABLE_EXT/ENABLE_EXT_FEATURE with require=true in
+ * src/dxvk/dxvk_device_info.cpp): VK_KHR_load_store_op_none, VK_KHR_maintenance5, VK_KHR_maintenance6,
+ * VK_KHR_swapchain, VK_EXT_robustness2 and VK_EXT_depth_clip_enable. Hiding one makes DXVK reject
+ * the device, so the game never starts and the launch says nothing about the rendering bug. They are
+ * never hidden, which keeps every bisection launch meaningful.
  */
 static const char *const dxvk_required_extensions[] = {
     "VK_KHR_load_store_op_none",
     "VK_KHR_maintenance5",
     "VK_KHR_maintenance6",
+    "VK_KHR_swapchain",
     "VK_EXT_robustness2",
+    "VK_EXT_depth_clip_enable",
 };
 
 static int dxvk_required_index(const char *name)
