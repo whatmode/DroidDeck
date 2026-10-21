@@ -16,13 +16,12 @@ mkdir -p "$WORK"
 
 # PanVK-side patches from the mali-gl series, in order. The GL-only patches are deliberately
 # left out: they touch loader/EGL/kmod code this build does not compile.
-# 0003-0005 are upstream Mesa value-correctness fixes the pinned tree predates; see each patch
+# 0003-0004 are upstream Mesa value-correctness fixes the pinned tree predates; see each patch
 # for the upstream commit it is ported from.
 PANVK_PATCHES=(
   "$ROOT/mali-gl/patches/0002-panvk-csf-compute-tls-size.patch"
   "$ROOT/mali-gl/patches/0003-pan-bi-tls-spill-mem-access.patch"
   "$ROOT/mali-gl/patches/0004-pan-bi-tls-store-helper-analysis.patch"
-  "$ROOT/mali-gl/patches/0005-panvk-allow-merging-workgroups.patch"
 )
 
 log() { echo "== $*" | tee -a "$OUT/summary.txt"; }
