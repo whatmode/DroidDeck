@@ -95,14 +95,16 @@ rm -rf "$D"
 mkdir -p "$D"
 cp "$SO" "$D/libvulkan_panfrost.so"
 cp "$ICD" "$D/panfrost_icd.aarch64.json"
-python3 - "$D/meta.json" "$PROFILE" "$MESA_SHA" "$PATCH_ID" <<'EOF'
+python3 - "$D/meta.json" "$PROFILE" "$MESA_SHA" "$PATCH_ID" "$VARIANT" <<'EOF'
 import json, sys
-out, profile, sha, patch_id = sys.argv[1:]
+out, profile, sha, patch_id, variant = sys.argv[1:]
+# DroidDeck names the driver row from meta.json, not the zip filename, so the variant has to be
+# here: the patched and baseline zips are otherwise two identical rows and the A/B is unreadable.
 json.dump({
     "schemaVersion": 1,
     "kind": "linux-vulkan-icd",
-    "name": "DroidDeck-panvk-glibc",
-    "driverVersion": "Mesa 26.3.0-devel",
+    "name": "DroidDeck-panvk-glibc" + variant,
+    "driverVersion": "Mesa 26.3.0-devel " + sha[:8],
     "libc": "glibc",
     "libraryName": "libvulkan_panfrost.so",
     "abi": "linux-aarch64-glibc",
