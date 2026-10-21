@@ -302,13 +302,6 @@ def with_mali_video(env):
     their ordinary texture path for video. DROIDDECK_HIDE_YCBCR=0 keeps them."""
     if os.path.exists("/dev/mali0") and not os.path.exists("/dev/kgsl-3d0"):
         env.setdefault("DROIDDECK_HIDE_YCBCR", "1")
-        # D3D11 leaves compute shared memory undefined, but desktop drivers hand it out zeroed and
-        # games rely on that (Unity's auto exposure: one garbage read and the picture stays white).
-        # Mali does not zero it, so DXVK does. DROIDDECK_DXVK_ZERO_WG=0 turns it off.
-        own = env.get("DXVK_CONFIG", "")
-        if env.get("DROIDDECK_DXVK_ZERO_WG") != "0" and "zeroWorkgroupMemory" not in own:
-            own = own.strip().rstrip(";").strip()
-            env["DXVK_CONFIG"] = (own + "; " if own else "") + "d3d11.zeroWorkgroupMemory = True"
     return env
 
 

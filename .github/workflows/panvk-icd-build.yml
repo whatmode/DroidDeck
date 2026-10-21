@@ -1,0 +1,73 @@
+name: PanVK ICD build
+
+on:
+  push:
+    branches: [panvk-csf-tls-size]
+    paths:
+      - 'tools/panvk/**'
+      - 'mali-gl/patches/0002-panvk-csf-compute-tls-size.patch'
+      - '.github/workflows/panvk-icd-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: panvk-icd-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    env:
+      ZENITHBLUE_REF: 5b87b74d3e2580d5816e7f2c629f6f016a462f28
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            ninja-build pkg-config bison flex python3-mako python3-yaml python3-ply python3-pip \
+            clang llvm-18-dev libclang-18-dev libclang-cpp18-dev libclc-18-dev llvm-spirv-18 \
+            libllvmspirvlib-18-dev spirv-tools glslang-tools libelf-dev zlib1g-dev libexpat1-dev \
+            libdrm-dev libwayland-dev wayland-protocols libwayland-egl-backend-dev \
+            libx11-dev libx11-xcb-dev libxext-dev libxfixes-dev libxcb-glx0-dev libxcb-shm0-dev \
+            libxcb-dri2-0-dev libxcb-dri3-dev libxcb-present-dev libxcb-sync-dev libxcb-randr0-dev \
+            libxcb-xfixes0-dev libxshmfence-dev libxxf86vm-dev libxrandr-dev zip >/dev/null
+          pip install --break-system-packages -q 'meson>=1.4'
+          meson --version
+
+      - name: Fetch the PanVK kbase series
+        run: |
+          set -euo pipefail
+          git init -q zb
+          git -C zb fetch -q --depth 1 https://github.com/zenithblue-oss/panvk-kbase-android "$ZENITHBLUE_REF"
+          git -C zb checkout -q FETCH_HEAD
+
+      - name: Build the patched ICD
+        run: bash tools/panvk/build.sh zb out
+
+      - name: Upload the driver zip
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: panvk-icd
+          path: |
+            out/PanVK-Kbase-*.zip
+            out/summary.txt
+
+      - name: Publish the driver zip as a release asset
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=panvk-icd-latest
+          notes="Patched PanVK kbase glibc ICD from ${GITHUB_SHA::7}. Import the zip as a Linux Vulkan driver in DroidDeck."
+          gh release view "$tag" >/dev/null 2>&1 \
+            || gh release create "$tag" --prerelease --target "$GITHUB_SHA" --title "PanVK kbase ICD (test)" --notes "$notes"
+          gh release edit "$tag" --notes "$notes"
+          gh release upload "$tag" out/PanVK-Kbase-*.zip --clobber
