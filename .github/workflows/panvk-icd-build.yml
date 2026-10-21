@@ -21,10 +21,13 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
     env:
-      # Kept at the shipped RC4 ref so a test build differs from the shipped driver only by the
-      # mali-gl/patches PanVK fixes. Retarget this to a later vendor ref to pick up the vendor's
-      # post-RC4 series separately.
-      ZENITHBLUE_REF: 5b87b74d3e2580d5816e7f2c629f6f016a462f28
+      # The vendor tag for the shipped RC4 binary (panvk-kbase-v0.1.0-rc4) points at
+      # 5b87b74d, whose csf-v11 series stops at 186 -- but the vendor's own RC4 binary
+      # analysis finds strings that only 187-196 add, and the RC4 release notes say the
+      # source was never committed. Building 5b87b74d therefore does NOT reproduce the
+      # shipped driver, which invalidated the earlier "patches vs rebuild" A/B. Build the
+      # last vendor commit whose series matches what RC4 actually contains.
+      ZENITHBLUE_REF: 150c7cdd
     steps:
       - uses: actions/checkout@v4
 

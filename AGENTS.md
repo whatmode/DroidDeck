@@ -30,3 +30,20 @@
 - `mali-gl/scripts/build.sh` builds GL only (`-Dvulkan-drivers=`). The PanVK ICD is built by
   `tools/panvk/build.sh` (`.github/workflows/panvk-icd-build.yml`) and imported into the app as a
   Linux Vulkan driver zip.
+
+## The shipped RC4 ICD is not reproducible from `panvk-kbase-v0.1.0-rc4`
+
+- The vendor tag `panvk-kbase-v0.1.0-rc4` resolves to commit `5b87b74d` (2026-10-16), and the
+  release notes state outright that the build's source "was not committed ... built on 2026-10-17
+  from the patch series of that day". So the tag is a reference point, not the shipped source.
+- `5b87b74d`'s `patches/csf-v11` stops at `186`. The vendor's own RC4 binary analysis
+  (`worklogs/g615-dxvk/rc4-binary-analysis.md`) finds strings that only `187`-`196` add, so the
+  shipped RC4 binary was built from a series that includes those.
+- Consequence: an ICD built from `5b87b74d` differs from the shipped driver by far more than the
+  `mali-gl/patches` fixes. The earlier "patched vs baseline" A/B could not attribute a startup
+  failure to the patches, because the control was not the shipped driver either.
+- Build from `150c7cdd` (2026-10-16) instead: the last vendor commit whose `csf-v11` series ends at
+  `196`, which matches what RC4 contains. `5b87b74d..150c7cdd` is 11 commits, all patch/worklog.
+- `PANVK_DEBUG=no_crc` exists in this series (`csf-v11/018` adds `{"no_crc", PANVK_DEBUG_NO_CRC}`)
+  and disables transaction elimination (CRC) tile write-out. Worth a launch before blaming the
+  compiler: `csf-v11/019` is a CRC class where tiles stayed CRC-skipped and read back stale.
