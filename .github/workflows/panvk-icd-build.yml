@@ -27,7 +27,7 @@ jobs:
       # source was never committed. Building 5b87b74d therefore does NOT reproduce the
       # shipped driver, which invalidated the earlier "patches vs rebuild" A/B. Build the
       # last vendor commit whose series matches what RC4 actually contains.
-      ZENITHBLUE_REF: 150c7cdd
+      ZENITHBLUE_REF: 150c7cdd5b1f22f1994741a1a75577063d96a265
     steps:
       - uses: actions/checkout@v4
 
