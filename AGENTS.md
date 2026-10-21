@@ -47,3 +47,20 @@
 - `PANVK_DEBUG=no_crc` exists in this series (`csf-v11/018` adds `{"no_crc", PANVK_DEBUG_NO_CRC}`)
   and disables transaction elimination (CRC) tile write-out. Worth a launch before blaming the
   compiler: `csf-v11/019` is a CRC class where tiles stayed CRC-skipped and read back stale.
+
+## Reading a log zip: two traps that silently invalidate an A/B run
+
+Both were hit on the 2026-10-22-03 session, so check for them before trusting any result.
+
+- A per-game `null` *cancels* the shared value; it does not inherit it. `apply_config` in
+  `droiddeck-game-env` does `result.pop(name, None)` for a null entry, and the per-game map is
+  applied after `shared`, so `"games": {"1118240": {"PANVK_DEBUG": null}}` removes a shared
+  `PANVK_DEBUG=no_crc`. That is the UI's "unset" action; "restore" is the one that drops the row
+  and lets the shared value through. A diagnostic env var set in `shared` is therefore not
+  evidence of anything unless the same game has no null row for it.
+- The zip's top-level directory is the session, and one session is one launch. A zip with a single
+  session dir covers only that launch, whatever the tester says it contains. `device.txt` names the
+  selected driver from `meta.json` ("Linux driver") and `session.log` names the imported
+  `linux_vulkan_drivers/<id>`; read both to tell the patched ICD from the baseline one.
+- `d3d11.zeroWorkgroupMemory` is a no-op in DXVK 3.1.1 (see above), so its presence in a run's
+  `DXVK_CONFIG` is a red herring, not a variable under test.
