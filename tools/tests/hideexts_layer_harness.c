@@ -16,11 +16,13 @@
 #include "../vklayers/vk_layer_droiddeck_hideexts.c"
 
 static struct fake_dispatch { void *key; } g_obj;
+/* A second object, so the physical device can carry a dispatch key of its own. */
+static struct fake_dispatch g_pd_obj;
 
 static const char *g_extensions[] = {
     "VK_KHR_maintenance5",
     "VK_KHR_unified_image_layouts",
-    "VK_EXT_robustness2",
+    "VK_EXT_transform_feedback",
     "VK_KHR_swapchain",
 };
 #define EXTENSION_COUNT (sizeof(g_extensions) / sizeof(g_extensions[0]))
@@ -50,6 +52,15 @@ static void VKAPI_CALL mock_features2(VkPhysicalDevice device, VkPhysicalDeviceF
     (void)features;
 }
 
+static VkResult VKAPI_CALL mock_create_instance(const VkInstanceCreateInfo *create_info,
+        const VkAllocationCallbacks *allocator, VkInstance *instance)
+{
+    (void)create_info;
+    (void)allocator;
+    *instance = (VkInstance)&g_obj;
+    return VK_SUCCESS;
+}
+
 static PFN_vkVoidFunction VKAPI_CALL mock_gipa(VkInstance instance, const char *name)
 {
     (void)instance;
@@ -57,7 +68,32 @@ static PFN_vkVoidFunction VKAPI_CALL mock_gipa(VkInstance instance, const char *
         return (PFN_vkVoidFunction)mock_enumerate;
     if (!strcmp(name, "vkGetPhysicalDeviceFeatures2"))
         return (PFN_vkVoidFunction)mock_features2;
+    if (!strcmp(name, "vkCreateInstance"))
+        return (PFN_vkVoidFunction)mock_create_instance;
     return NULL;
+}
+
+/* Drives the layer's real vkCreateInstance, so the registered instance is set up exactly as a
+ * loader would leave it. */
+static void register_instance_through_create_instance(void)
+{
+    VkLayerInstanceLink link;
+    memset(&link, 0, sizeof(link));
+    link.pfnNextGetInstanceProcAddr = mock_gipa;
+
+    VkLayerInstanceCreateInfo chain;
+    memset(&chain, 0, sizeof(chain));
+    chain.sType = VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO;
+    chain.function = VK_LAYER_LINK_INFO;
+    chain.u.pLayerInfo = &link;
+
+    VkInstanceCreateInfo info;
+    memset(&info, 0, sizeof(info));
+    info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    info.pNext = &chain;
+    VkInstance instance = VK_NULL_HANDLE;
+    assert(create_instance(&info, NULL, &instance) == VK_SUCCESS);
+    assert(instance == (VkInstance)&g_obj);
 }
 
 static const struct feature_shape *shape_for(VkStructureType s_type)
@@ -112,16 +148,8 @@ static void check_masking(void)
     CASE(VkPhysicalDeviceExtendedDynamicState3FeaturesEXT,
          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT,
          extendedDynamicState3TessellationDomainOrigin, "VK_EXT_extended_dynamic_state3");
-#ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES
-    CASE(VkPhysicalDeviceMaintenance5Features,
-         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES, maintenance5,
-         "VK_KHR_maintenance5");
-#endif
-#ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_6_FEATURES
-    CASE(VkPhysicalDeviceMaintenance6Features,
-         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_6_FEATURES, maintenance6,
-         "VK_KHR_maintenance6");
-#endif
+    /* VK_KHR_maintenance5, VK_KHR_maintenance6 and VK_EXT_robustness2 are DXVK-required and must
+     * survive even when listed; check_dxvk_required_extensions_are_kept covers them. */
 #ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_8_FEATURES_KHR
     CASE(VkPhysicalDeviceMaintenance8FeaturesKHR,
          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_8_FEATURES_KHR, maintenance8,
@@ -140,9 +168,6 @@ static void check_masking(void)
     CASE(VkPhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT,
          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_FEATURES_EXT,
          attachmentFeedbackLoopLayout, "VK_EXT_attachment_feedback_loop_layout");
-    CASE(VkPhysicalDeviceRobustness2FeaturesEXT,
-         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT, robustBufferAccess2,
-         "VK_EXT_robustness2");
     CASE(VkPhysicalDeviceTransformFeedbackFeaturesEXT,
          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT, transformFeedback,
          "VK_EXT_transform_feedback");
@@ -183,7 +208,7 @@ static void check_masking(void)
 
 static void check_unlisted_extension_keeps_its_features(void)
 {
-    setenv("DROIDDECK_HIDE_EXTS", "VK_KHR_maintenance5", 1);
+    setenv("DROIDDECK_HIDE_EXTS", "VK_EXT_transform_feedback", 1);
     VkPhysicalDeviceRobustness2FeaturesEXT feature;
     memset(&feature, 0, sizeof(feature));
     feature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT;
@@ -202,27 +227,54 @@ static void check_unlisted_extension_keeps_its_features(void)
 
 static void check_enumeration_filters_only_listed_names(void)
 {
-    setenv("DROIDDECK_HIDE_EXTS", "VK_KHR_maintenance5, VK_EXT_robustness2", 1);
+    setenv("DROIDDECK_HIDE_EXTS", "VK_KHR_maintenance5, VK_EXT_transform_feedback", 1);
     uint32_t count = 0;
     assert(enumerate_device_extensions((VkPhysicalDevice)&g_obj, NULL, &count, NULL) == VK_SUCCESS);
-    assert(count == 2);
+    assert(count == 3);
     VkExtensionProperties properties[8];
     uint32_t filled = 8;
     assert(enumerate_device_extensions((VkPhysicalDevice)&g_obj, NULL, &filled, properties) == VK_SUCCESS);
-    assert(filled == 2);
-    assert(!strcmp(properties[0].extensionName, "VK_KHR_unified_image_layouts"));
-    assert(!strcmp(properties[1].extensionName, "VK_KHR_swapchain"));
+    assert(filled == 3);
+    assert(!strcmp(properties[0].extensionName, "VK_KHR_maintenance5"));
+    assert(!strcmp(properties[1].extensionName, "VK_KHR_unified_image_layouts"));
+    assert(!strcmp(properties[2].extensionName, "VK_KHR_swapchain"));
 
     /* A short buffer is truncated with VK_INCOMPLETE, as the loader expects. */
     filled = 1;
     assert(enumerate_device_extensions((VkPhysicalDevice)&g_obj, NULL, &filled, properties) == VK_INCOMPLETE);
     assert(filled == 1);
-    assert(!strcmp(properties[0].extensionName, "VK_KHR_unified_image_layouts"));
+    assert(!strcmp(properties[0].extensionName, "VK_KHR_maintenance5"));
 
     /* An explicit layer name asks for the layer's own extensions and passes through. */
     count = 0;
     assert(enumerate_device_extensions((VkPhysicalDevice)&g_obj, "VK_LAYER_DROIDDECK_hideexts", &count, NULL) == VK_SUCCESS);
     assert(count == EXTENSION_COUNT);
+}
+
+/*
+ * DXVK 3.1.1 marks these as required, so hiding one would make DXVK reject the device and the game
+ * would not start at all. Listing them must leave both the extension and its features in place.
+ */
+static void check_dxvk_required_extensions_are_kept(void)
+{
+    setenv("DROIDDECK_HIDE_EXTS", "VK_KHR_maintenance5,VK_EXT_robustness2", 1);
+
+    uint32_t count = 0;
+    assert(enumerate_device_extensions((VkPhysicalDevice)&g_obj, NULL, &count, NULL) == VK_SUCCESS);
+    assert(count == EXTENSION_COUNT);
+
+    VkPhysicalDeviceRobustness2FeaturesEXT feature;
+    memset(&feature, 0, sizeof(feature));
+    feature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT;
+    feature.robustBufferAccess2 = VK_TRUE;
+    feature.nullDescriptor = VK_TRUE;
+    VkPhysicalDeviceFeatures2 chain;
+    memset(&chain, 0, sizeof(chain));
+    chain.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    chain.pNext = &feature;
+    get_physical_device_features2((VkPhysicalDevice)&g_obj, &chain);
+    assert(feature.robustBufferAccess2 == VK_TRUE);
+    assert(feature.nullDescriptor == VK_TRUE);
 }
 
 static void check_unset_or_zero_hides_nothing(void)
@@ -239,6 +291,39 @@ static void check_unset_or_zero_hides_nothing(void)
     }
 }
 
+/*
+ * A loader may give a physical device a dispatch key that no instance has. The layer must still
+ * reach the next layer for vkGetPhysicalDevice* and vkCreateDevice, rather than failing the call:
+ * returning VK_ERROR_INITIALIZATION_FAILED here stops the application from starting at all.
+ */
+static void check_physical_device_with_its_own_dispatch_key(void)
+{
+    setenv("DROIDDECK_HIDE_EXTS", "VK_EXT_transform_feedback,VK_KHR_unified_image_layouts", 1);
+    g_obj.key = &g_obj;
+    g_pd_obj.key = &g_pd_obj;
+    register_instance_through_create_instance();
+
+    VkPhysicalDevice physical_device = (VkPhysicalDevice)&g_pd_obj;
+    assert(dispatch_key(physical_device) != dispatch_key(g_inst[0].handle));
+
+    uint32_t count = 0;
+    assert(enumerate_device_extensions(physical_device, NULL, &count, NULL) == VK_SUCCESS);
+    assert(count == EXTENSION_COUNT - 2);
+
+    VkPhysicalDeviceTransformFeedbackFeaturesEXT feature;
+    memset(&feature, 0, sizeof(feature));
+    feature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT;
+    feature.transformFeedback = VK_TRUE;
+    feature.geometryStreams = VK_TRUE;
+    VkPhysicalDeviceFeatures2 chain;
+    memset(&chain, 0, sizeof(chain));
+    chain.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    chain.pNext = &feature;
+    get_physical_device_features2(physical_device, &chain);
+    assert(feature.transformFeedback == VK_FALSE);
+    assert(feature.geometryStreams == VK_FALSE);
+}
+
 int main(void)
 {
     g_inst[0].handle = (VkInstance)&g_obj;
@@ -247,7 +332,9 @@ int main(void)
     check_masking();
     check_unlisted_extension_keeps_its_features();
     check_enumeration_filters_only_listed_names();
+    check_dxvk_required_extensions_are_kept();
     check_unset_or_zero_hides_nothing();
+    check_physical_device_with_its_own_dispatch_key();
     printf("hideexts layer passed\n");
     return 0;
 }
