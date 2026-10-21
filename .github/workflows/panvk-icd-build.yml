@@ -5,7 +5,7 @@ on:
     branches: [panvk-csf-tls-size]
     paths:
       - 'tools/panvk/**'
-      - 'mali-gl/patches/0002-panvk-csf-compute-tls-size.patch'
+      - 'mali-gl/patches/**'
       - '.github/workflows/panvk-icd-build.yml'
   workflow_dispatch:
 
@@ -21,6 +21,9 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
     env:
+      # Kept at the shipped RC4 ref so a test build differs from the shipped driver only by the
+      # mali-gl/patches PanVK fixes. Retarget this to a later vendor ref to pick up the vendor's
+      # post-RC4 series separately.
       ZENITHBLUE_REF: 5b87b74d3e2580d5816e7f2c629f6f016a462f28
     steps:
       - uses: actions/checkout@v4
