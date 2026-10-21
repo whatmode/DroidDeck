@@ -11,7 +11,7 @@ OUT=$(mkdir -p "$2" && cd "$2" && pwd)
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
 PROFILE=${PROFILE:-g615-v11-csf}
-WORK=$OUT/../work
+WORK=${PANVK_WORK:-$OUT/../work}
 mkdir -p "$WORK"
 
 # PanVK-side patches from the mali-gl series, in order. The GL-only patches are deliberately
@@ -23,6 +23,16 @@ PANVK_PATCHES=(
   "$ROOT/mali-gl/patches/0003-pan-bi-tls-spill-mem-access.patch"
   "$ROOT/mali-gl/patches/0004-pan-bi-tls-store-helper-analysis.patch"
 )
+
+# A/B control: PANVK_BASELINE=1 builds the vendor series with none of the patches above, so the
+# two zips differ only by the PanVK fixes. Needed because the shipped ICD was built elsewhere and
+# is not byte-reproducible here; without a same-toolchain baseline, a failure to start cannot be
+# attributed to the patches instead of to the rebuild.
+VARIANT=""
+if [ "${PANVK_BASELINE:-0}" = "1" ]; then
+  PANVK_PATCHES=()
+  VARIANT="-baseline"
+fi
 
 log() { echo "== $*" | tee -a "$OUT/summary.txt"; }
 : > "$OUT/summary.txt"
@@ -46,7 +56,6 @@ for p in "${PANVK_PATCHES[@]}"; do
     exit 1
   fi
 done
-
 B=$WORK/build-icd
 rm -rf "$B"
 if ! meson setup "$B" "$MESA" \
@@ -79,9 +88,9 @@ readelf --version-info "$SO" | grep -q 'GLIBC_' || { log "BUILD-FAIL: ICD is not
 readelf -s "$SO" 2>/dev/null | grep -q "kbase_kmod_ops" || { log "BUILD-FAIL: kbase_kmod_ops missing"; exit 1; }
 
 MESA_SHA=$(git -C "$MESA" rev-parse HEAD)
-PATCH_ID=$(sha256sum "${PANVK_PATCHES[@]}" | sha256sum | cut -c1-12)
+PATCH_ID=$(printf '%s\n' "${PANVK_PATCHES[@]}" | sha256sum | cut -c1-12)
 
-D="$OUT/panvk-glibc-$PROFILE"
+D="$OUT/panvk-glibc-$PROFILE$VARIANT"
 rm -rf "$D"
 mkdir -p "$D"
 cp "$SO" "$D/libvulkan_panfrost.so"
@@ -107,7 +116,7 @@ open(out, "a").write("\n")
 EOF
 (cd "$D" && sha256sum libvulkan_panfrost.so > SHA256SUMS.txt)
 
-ZIP="$OUT/PanVK-Kbase-$PROFILE-${MESA_SHA:0:8}.zip"
+ZIP="$OUT/PanVK-Kbase-$PROFILE$VARIANT-${MESA_SHA:0:8}.zip"
 rm -f "$ZIP"
 (cd "$D" && zip -q "$ZIP" libvulkan_panfrost.so panfrost_icd.aarch64.json meta.json SHA256SUMS.txt)
 log "package: $(basename "$ZIP") $(du -h "$ZIP" | cut -f1) sha256 $(sha256sum "$ZIP" | cut -d' ' -f1)"
