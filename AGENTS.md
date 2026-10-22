@@ -169,7 +169,9 @@ exactly two user-selectable things: its Proton build and its driver bundle.
 
 - `GameEnvironment.Config` holds only `shared`. `effective(config, preset)` takes no scope, and
   `withValue(config, name, value)` is the only mutator. There is no `validScope`, no `games` map,
-  no `NO_STEAM`/`CUSTOM_FEX_PRESET`/`CUSTOM_SYNC` sentinels.
+  no `NO_STEAM`/`CUSTOM_FEX_PRESET`/`CUSTOM_SYNC` sentinels. `withEntries()` now replaces the whole
+  `shared` map, where it used to replace one scope's entries, so a `withEntries()` chained after a
+  constructor that already set values drops them.
 - The guest `game-environment.json` carries `version`, `shared` and an optional `dxvkConfig`. The
   `games` and `dxvkConfigGames` sections are gone; `apply_config(env, config, fixes=None)` and
   `sync_config(config)` take no app id. Old files with those sections still load, because the guest
