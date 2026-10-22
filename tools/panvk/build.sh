@@ -78,7 +78,9 @@ ninja -C "$B" > "$OUT/build.log" 2>&1
 rc=$?
 grep -nE "error:|undefined reference" "$OUT/build.log" > "$OUT/errors.txt" || true
 log "build: ninja rc=$rc, $(wc -l < "$OUT/errors.txt") error lines"
-[ $rc -eq 0 ] || { grep -nE -B3 -A8 "error:" "$OUT/build.log" | head -400 > "$OUT/errors-context.txt"; exit 1; }
+# On failure, echo the context to stdout as well as the file: the step log is what a `gh run view
+# --log` shows, and without this the only copy is an artifact that a failed run never uploads.
+[ $rc -eq 0 ] || { grep -nE -B3 -A8 "error:" "$OUT/build.log" | head -400 > "$OUT/errors-context.txt"; cat "$OUT/errors-context.txt"; exit 1; }
 
 SO="$B/src/panfrost/vulkan/libvulkan_panfrost.so"
 ICD="$B/src/panfrost/vulkan/panfrost_icd.aarch64.json"
