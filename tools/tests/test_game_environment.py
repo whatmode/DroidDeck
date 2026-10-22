@@ -279,7 +279,7 @@ class GameEnvironmentTest(unittest.TestCase):
             COMPAT["adopt_extras"](str(tools))
             config = home / ".config/droiddeck/game-environment.json"
             config.parent.mkdir(parents=True)
-            config.write_text(json.dumps({"version": 1, "shared": {"CUSTOM": "shared"}, "games": {"42": {"CUSTOM": "specific"}}}))
+            config.write_text(json.dumps({"version": 1, "shared": {"CUSTOM": "shared"}}))
             wrappers = (tools / COMPAT["TOOL"] / COMPAT["LAUNCHER"], extra / COMPAT["EXTRA_WRAPPER"])
             for wrapper in wrappers:
                 wrapper.write_text(wrapper.read_text().replace("/usr/local/bin/droiddeck-game-env", str(BIN / "droiddeck-game-env")))
@@ -287,7 +287,7 @@ class GameEnvironmentTest(unittest.TestCase):
                     env={"PATH": os.defpath, "HOME": tmp, "STEAM_COMPAT_DATA_PATH": "/compatdata/42", "STEAM_COMPAT_CLIENT_INSTALL_PATH": str(steam)},
                     text=True, capture_output=True)
                 self.assertEqual(result.returncode, 7, result.stderr)
-                self.assertEqual(json.loads(result.stdout), ["specific", ["waitforexitandrun", "game with spaces.exe"]])
+                self.assertEqual(json.loads(result.stdout), ["shared", ["waitforexitandrun", "game with spaces.exe"]])
 
     def test_default_is_compatible_tool_and_labels_mark_it(self):
         with tempfile.TemporaryDirectory() as tmp:
