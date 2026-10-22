@@ -8,6 +8,18 @@ on:
       - 'mali-gl/patches/**'
       - '.github/workflows/panvk-icd-build.yml'
   workflow_dispatch:
+    inputs:
+      # Build a different vendor ref without editing this file. The default is the
+      # RC4-matching pin; the vendor's main is far ahead of it (csf-v11 197-212), so this
+      # is the A/B that separates "the pin is stale" from "a bug this repo must fix".
+      zenithblue_ref:
+        description: 'zenithblue ref to build (empty = the pinned RC4-matching ref)'
+        required: false
+        default: ''
+      patch_numbers:
+        description: 'mali-gl patch numbers to apply, space separated (empty = all; use "0002 0003 0004" for vendor main)'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -27,7 +39,11 @@ jobs:
       # source was never committed. Building 5b87b74d therefore does NOT reproduce the
       # shipped driver, which invalidated the earlier "patches vs rebuild" A/B. Build the
       # last vendor commit whose series matches what RC4 actually contains.
-      ZENITHBLUE_REF: 150c7cdd5b1f22f1994741a1a75577063d96a265
+      #
+      # A dispatch input overrides it, and is read from the environment rather than
+      # interpolated into the shell, so a ref string cannot inject commands.
+      ZENITHBLUE_REF: ${{ inputs.zenithblue_ref || '150c7cdd5b1f22f1994741a1a75577063d96a265' }}
+      PANVK_PATCH_NUMBERS: ${{ inputs.patch_numbers }}
     steps:
       - uses: actions/checkout@v4
 

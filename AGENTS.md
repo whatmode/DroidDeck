@@ -96,6 +96,41 @@ same `texture_features 0xc3fe001e`, "BC emulation on", and `MESA_SHADER_CACHE_DI
   large, so capability blocks near the top are absent from a long run. `session.log` keeps the
   `MESA: info:` lines.
 
+## The pinned vendor ref is not the tip, and `main` is where the fixes are
+
+`ZENITHBLUE_REF` is `150c7cdd` because that is the last ref whose `csf-v11` series matches the
+shipped RC4 binary. It is not the vendor's current tree. `zenithblue-oss/panvk-kbase-android` `main`
+is at `csf-v11/212` (the pin stops at `196`), same Mesa pin `5a07217f034b`, and the gap is almost
+entirely the BCn path this GPU always runs plus the `gpu_prerast` arenas.
+
+- **`csf-v11/205`** commits the 64 MiB `gpu_prerast` and 96 MiB tessellation arenas at the first
+  draw that needs them, not at `VkDevice` creation. On MediaTek kbase, GPU-fault growth on those
+  arenas **loses the first draw's output**, which is why they were committed and CPU-cleared up
+  front. Every DXVK device paid 160 MiB for it.
+- **`csf-v11/193`** is the clearest statement of the failure mode this repo keeps meeting: the GS
+  passthrough copied whole `vec4` slots, so clip lanes past the clip array size "kept whatever the
+  prerast arena held" — the result depended on what an earlier draw left in the arena. Uninitialized
+  arena content reaching a shader, no fault, wrong values.
+- **`csf-v11/209`** (util/u_queue) restarts the queue workers in a `fork()` child. A `fork()` child
+  has only the forking thread, so a job queued in the child never runs and `util_queue_finish()`
+  blocks forever. DroidDeck runs the whole stack under proot and Wine forks constantly, so this
+  class is live here in a way it is not on a plain Android app.
+- **`csf-v11/197-212`** rework BC decode (ETC2 transcode, BC6H/BC7 decode, BC1 palette fit) and
+  `207` makes BC raw blocks lazy — readable BC images stop keeping raw blocks until something reads
+  one back.
+
+Two consequences for this repo:
+
+- **A ref A/B is a dispatch, not an edit.** `workflow_dispatch` takes `zenithblue_ref` and
+  `patch_numbers`, so building `main` with `0002 0003 0004` is one click.
+  `PANVK_PATCH_NUMBERS` in `build.sh` selects the set; a named patch that does not apply still fails
+  the build, so nothing is skipped silently.
+- **`0005` does not apply to `main`** (it reworked `panvk_instance.c`/`panvk_physical_device.c`).
+  Build `main` with `0002 0003 0004`, or rebase `0005` first.
+
+The ICD zip name and the driver row both carry the vendor ref (`-zb<sha>`), because the Mesa pin is
+identical across refs and an A/B would otherwise publish two assets under one name.
+
 ## The kbase tunables are now automatic (`mali-gl/patches/0005`)
 
 The per-game switches the earlier sections reach for are gone. `0005` adds

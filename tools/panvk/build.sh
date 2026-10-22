@@ -25,6 +25,18 @@ PANVK_PATCHES=(
   "$ROOT/mali-gl/patches/0005-panvk-self-configuring-kbase-profile.patch"
 )
 
+# 0005 is a refactor of a later vendor tree and does not apply to every ref (it conflicts on
+# vendor main, which reworked the same files). Selecting the set explicitly keeps a patch from
+# being skipped silently: a patch named here that does not apply still fails the build.
+if [ -n "${PANVK_PATCH_NUMBERS:-}" ]; then
+  PANVK_PATCHES=()
+  for n in $PANVK_PATCH_NUMBERS; do
+    f=$(ls "$ROOT"/mali-gl/patches/"$n"-*.patch 2>/dev/null | head -1)
+    [ -n "$f" ] || { echo "== no patch for number $n" >&2; exit 1; }
+    PANVK_PATCHES+=("$f")
+  done
+fi
+
 # A/B control: PANVK_BASELINE=1 builds the vendor series with none of the patches above, so the
 # two zips differ only by the PanVK fixes. Needed because the shipped ICD was built elsewhere and
 # is not byte-reproducible here; without a same-toolchain baseline, a failure to start cannot be
@@ -38,7 +50,8 @@ fi
 log() { echo "== $*" | tee -a "$OUT/summary.txt"; }
 : > "$OUT/summary.txt"
 
-log "zenithblue $(git -C "$ZB" rev-parse HEAD) profile $PROFILE"
+ZB_SHA=$(git -C "$ZB" rev-parse HEAD)
+log "zenithblue $ZB_SHA profile $PROFILE"
 "$ZB/scripts/fetch-mesa.sh" "$WORK" > "$OUT/fetch.log" 2>&1 || { log "FETCH FAILED"; tail -20 "$OUT/fetch.log"; exit 1; }
 MESA=$WORK/mesa
 log "mesa $(git -C "$MESA" rev-parse HEAD)"
@@ -98,15 +111,16 @@ rm -rf "$D"
 mkdir -p "$D"
 cp "$SO" "$D/libvulkan_panfrost.so"
 cp "$ICD" "$D/panfrost_icd.aarch64.json"
-python3 - "$D/meta.json" "$PROFILE" "$MESA_SHA" "$PATCH_ID" "$VARIANT" <<'EOF'
+python3 - "$D/meta.json" "$PROFILE" "$MESA_SHA" "$PATCH_ID" "$VARIANT" "$ZB_SHA" <<'EOF'
 import json, sys
-out, profile, sha, patch_id, variant = sys.argv[1:]
-# DroidDeck names the driver row from meta.json, not the zip filename, so the variant has to be
-# here: the patched and baseline zips are otherwise two identical rows and the A/B is unreadable.
+out, profile, sha, patch_id, variant, vendor = sys.argv[1:]
+# DroidDeck names the driver row from meta.json, not the zip filename, so the variant and the
+# vendor ref both have to be here: otherwise the patched/baseline pair, or two refs, are
+# indistinguishable rows and the A/B is unreadable.
 json.dump({
     "schemaVersion": 1,
     "kind": "linux-vulkan-icd",
-    "name": "DroidDeck-panvk-glibc" + variant,
+    "name": "DroidDeck-panvk-glibc" + variant + " zb" + vendor[:8],
     "driverVersion": "Mesa 26.3.0-devel " + sha[:8],
     "libc": "glibc",
     "libraryName": "libvulkan_panfrost.so",
@@ -116,12 +130,15 @@ json.dump({
     "profile": profile,
     "sourceCommit": sha,
     "patchSeriesId": patch_id,
+    "vendorRef": vendor,
 }, open(out, "w"), indent=2)
 open(out, "a").write("\n")
 EOF
 (cd "$D" && sha256sum libvulkan_panfrost.so > SHA256SUMS.txt)
 
-ZIP="$OUT/PanVK-Kbase-$PROFILE$VARIANT-${MESA_SHA:0:8}.zip"
+# The Mesa pin is the same across vendor refs, so the ref has to be in the name or a
+# ref A/B publishes two assets under one name and clobbers the first.
+ZIP="$OUT/PanVK-Kbase-$PROFILE$VARIANT-${MESA_SHA:0:8}-zb${ZB_SHA:0:8}.zip"
 rm -f "$ZIP"
 (cd "$D" && zip -q "$ZIP" libvulkan_panfrost.so panfrost_icd.aarch64.json meta.json SHA256SUMS.txt)
 log "package: $(basename "$ZIP") $(du -h "$ZIP" | cut -f1) sha256 $(sha256sum "$ZIP" | cut -d' ' -f1)"
