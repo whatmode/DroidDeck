@@ -211,8 +211,8 @@ class DrawerActions(
     val glassesPresent: Boolean = false,
     val glassesOutput: Boolean = false,
     val immersiveSteamVr: Boolean = false,
-    val textureAnisotropy: Int? = 0,
-    val textureLodBias: String? = TextureFiltering.LOD_BIAS_OFF,
+    val textureAnisotropy: Int = 0,
+    val textureLodBias: String = TextureFiltering.LOD_BIAS_OFF,
     val secondScreenMode: SecondScreenMode,
     val secondScreenDisplays: List<SecondScreenDisplay>,
     val selectedSecondScreenDisplay: Int,
@@ -248,8 +248,8 @@ class DrawerActions(
     val onCardboardRecenter: () -> Unit = {},
     val onGlassesRecenter: () -> Unit = {},
     val onSteamVr: (String) -> Unit = {},
-    val onTextureAnisotropy: (Int?) -> Unit = {},
-    val onTextureLodBias: (String?) -> Unit = {},
+    val onTextureAnisotropy: (Int) -> Unit = {},
+    val onTextureLodBias: (String) -> Unit = {},
     val onSecondScreenMode: (SecondScreenMode) -> Unit,
     val onSecondScreenDisplay: (Int) -> Unit,
     val onLaunchAndroidApp: (HomeApp.LaunchableApp, Int?) -> Unit,
@@ -1002,6 +1002,8 @@ private fun TextureFilteringGroup(host: MenuHost, a: DrawerActions, track: (Stri
             chipModifier = track("texture-sharpness"), onPick = a.onTextureLodBias)
     }
 }
+
+private fun signed(v: Int) = if (v > 0) "+$v" else "$v"
 
 @Composable
 private fun ComponentsDrawerPage(host: MenuHost, a: DrawerActions, track: (String) -> Modifier) {
