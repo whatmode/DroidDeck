@@ -28,8 +28,9 @@ class GameEnvironmentTest {
     }
 
     @Test fun anUnsetValueRemovesADefaultAndClearingItRestoresTheDefault() {
-        val config = GameEnvironment.Config(shared = mapOf("VKD3D_FEATURE_LEVEL" to "12_0"))
-            .withEntries(mapOf("VKD3D_SHADER_MODEL" to null))
+        val config = GameEnvironment.Config(
+            shared = mapOf("VKD3D_FEATURE_LEVEL" to "12_0", "VKD3D_SHADER_MODEL" to null),
+        )
         val values = GameEnvironment.effective(config, "")
         assertEquals("12_0", values["VKD3D_FEATURE_LEVEL"])
         assertTrue(values.containsKey("VKD3D_SHADER_MODEL"))
