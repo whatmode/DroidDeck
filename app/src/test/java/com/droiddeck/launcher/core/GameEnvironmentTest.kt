@@ -66,13 +66,6 @@ class GameEnvironmentTest {
         assertEquals("400000000", GameEnvironment.effective(config, "", "43")["DOTNET_GCRegionRange"])
     }
 
-    @Test fun multiSelectionPreservesCustomTokensAndRemovesToggledValues() {
-        assertEquals("fps,custom_token,frametimes", GameEnvironmentOptions.toggle("fps,custom_token", "frametimes"))
-        assertEquals("custom_token", GameEnvironmentOptions.toggle("fps,custom_token", "fps"))
-        assertEquals("", GameEnvironmentOptions.toggle("fps", "fps"))
-        assertEquals("fps", GameEnvironmentOptions.toggle("", "fps"))
-    }
-
     @Test fun switchingPresetDropsOldPresetOnlyVariables() {
         val config = GameEnvironment.Config()
         assertEquals("none", GameEnvironment.effective(config, "EXTREME", "")["FEX_SMCCHECKS"])

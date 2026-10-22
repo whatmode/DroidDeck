@@ -551,11 +551,6 @@ internal fun SessionDrawer(open: Boolean, requestedPage: SessionDrawerPage, cont
                             if (a.steam) SettingsGroup(stringResource(R.string.game_settings_title)) {
                                 DrawerFexPresetRow(host, a, focus.track(page, "fex"))
                                 DrawerNoSteamRow(host, a, focus.track(page, "no-steam"))
-                                GameEnvironmentRow(
-                                    modifier = focus.track(page, "game-env"),
-                                    showHint = false,
-                                    initialScope = a.selectedGameProfileId?.toString().orEmpty(),
-                                )
                             }
                             ComponentsDrawerPage(host, a) { key -> focus.track(page, key) }
                             ComponentDownloadsDrawerGroup(

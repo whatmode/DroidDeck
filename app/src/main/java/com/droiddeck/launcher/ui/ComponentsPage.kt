@@ -176,7 +176,6 @@ fun ComponentsPage(
     var gameProtonChoice by remember { mutableStateOf<ProtonDefault.GameChoice?>(null) }
     var gameComponents by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var gameComponentMenu by remember { mutableStateOf<String?>(null) }
-    var environmentEditor by remember { mutableStateOf(false) }
     var winComponentsOpen by remember { mutableStateOf<Boolean?>(null) }
     var winComponentsRevision by remember { mutableStateOf(0) }
     var environment by remember { mutableStateOf<GameEnvironment.Config?>(null) }
@@ -774,7 +773,6 @@ fun ComponentsPage(
                     onProton = ::setGameProton,
                     onComponentMenu = { gameComponentMenu = it },
                     onComponent = ::setGameComponent,
-                    onEnvironment = { environmentEditor = true },
                     onWinComponents = { winComponentsOpen = false },
                     onReset = {
                         ask(
@@ -868,19 +866,6 @@ fun ComponentsPage(
                 FocusText(stringResource(R.string.common_cancel), colors.onBackground, modifier = Modifier.focusRequester(cancelFocus)) { confirm = null }
             },
         )
-    }
-    if (environmentEditor && selectedGame != null) {
-        GameEnvironmentEditor(
-            byPad = androidx.compose.ui.platform.LocalInputModeManager.current.inputMode == androidx.compose.ui.input.InputMode.Keyboard,
-            initialScope = selectedGame.profileKey,
-        ) {
-            environmentEditor = false
-            coroutine.launch {
-                runCatching { withContext(Dispatchers.IO) { GameEnvironmentStore.read(ctx) } }
-                    .onSuccess { environment = it; environmentError = false }
-                    .onFailure { environmentError = true }
-            }
-        }
     }
     val winOpen = winComponentsOpen
     if (winOpen != null && selectedGame != null) {
@@ -1072,7 +1057,6 @@ private fun GameComponentOverrides(
     onProton: (String?) -> Unit,
     onComponentMenu: (String?) -> Unit,
     onComponent: (String, String?) -> Unit,
-    onEnvironment: () -> Unit,
     onWinComponents: () -> Unit,
     onReset: () -> Unit,
     modifier: Modifier = Modifier,
@@ -1157,7 +1141,6 @@ private fun GameComponentOverrides(
                 proton = effectiveProton,
                 onMenu = onComponentMenu,
                 onPick = onComponent,
-                onRuntimeOptions = onEnvironment,
             )
             GamePackageRow(
                 comp = "vkd3d",
@@ -1168,14 +1151,7 @@ private fun GameComponentOverrides(
                 proton = effectiveProton,
                 onMenu = onComponentMenu,
                 onPick = onComponent,
-                onRuntimeOptions = onEnvironment,
             )
-            SettingsRow(
-                stringResource(R.string.game_env_title),
-                stringResource(R.string.comp_game_environment_other_hint),
-            ) {
-                SecondaryButton(stringResource(R.string.game_env_edit), enabled = !busy, onClick = onEnvironment)
-            }
             SettingsRow(
                 stringResource(R.string.wincomp_title),
                 if (picks.isEmpty()) stringResource(R.string.wincomp_card_none)
@@ -1213,7 +1189,6 @@ private fun GamePackageRow(
     proton: ComponentsManager.Proton? = null,
     onMenu: (String?) -> Unit,
     onPick: (String, String?) -> Unit,
-    onRuntimeOptions: (() -> Unit)? = null,
 ) {
     val choices = packages.filter { it.comp == comp }
     val selected = choices.firstOrNull { it.file == selectedFile }
@@ -1246,9 +1221,6 @@ private fun GamePackageRow(
                         }
                     }
                 }
-            }
-            if (onRuntimeOptions != null) {
-                SecondaryButton(stringResource(R.string.comp_game_runtime_options), enabled = !busy, onClick = onRuntimeOptions)
             }
         }
     }
