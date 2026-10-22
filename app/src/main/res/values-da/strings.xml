@@ -383,11 +383,6 @@
     <string name="comp_check_nightlies">Søg Nightlies for nye pakker</string>
     <string name="comp_proton">Proton</string>
     <string name="comp_proton_note">Den Proton, der vælges her, kører alle spil, der ikke selv har valgt en i Steam, og en ændring foretaget i Steam vises også her. Steam erstatter Valves Proton, når den opdaterer; originalerne bevares for hver build.</string>
-    <string name="comp_scope">Konfiguration</string>
-    <string name="comp_profile_game_detail">Gemte indstillinger bruges automatisk, når %1$s starter.</string>
-    <string name="comp_game_environment_hint">Miljøindstillinger for Proton, DXVK, VKD3D og synkronisering for dette spil.</string>
-    <string name="comp_game_dxvk">DXVK</string>
-    <string name="comp_game_vkd3d">VKD3D-Proton</string>
     <string name="game_no_steam_title">Start uden Steam</string>
     <string name="game_no_steam_detail">Åbner det i Proton/FEX uden Steam-klienten; Steam-funktioner er slået fra.</string>
     <string name="game_steam_with">Starter med Steam</string>

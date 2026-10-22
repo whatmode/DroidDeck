@@ -383,11 +383,6 @@
     <string name="comp_check_nightlies">नए पैकेज के लिए Nightlies देखें</string>
     <string name="comp_proton">Proton</string>
     <string name="comp_proton_note">यहां चुना गया Proton उन सभी गेम को चलाता है जिन्होंने Steam में अपना अलग Proton नहीं चुना है, और Steam में किया गया बदलाव यहां भी दिखता है। Steam अपडेट होने पर Valve का Proton बदल देता है; हर बिल्ड के ओरिजिनल सुरक्षित रहते हैं।</string>
-    <string name="comp_scope">कॉन्फ़िगरेशन</string>
-    <string name="comp_profile_game_detail">%1$s शुरू होने पर सेव की गई सेटिंग खुद इस्तेमाल होती हैं।</string>
-    <string name="comp_game_environment_hint">इस गेम के लिए Proton, DXVK, VKD3D और सिंक्रोनाइज़ेशन एनवायरनमेंट विकल्प।</string>
-    <string name="comp_game_dxvk">DXVK</string>
-    <string name="comp_game_vkd3d">VKD3D-Proton</string>
     <string name="game_no_steam_title">Steam के बिना शुरू करें</string>
     <string name="game_no_steam_detail">इसे Steam क्लाइंट के बिना Proton/FEX में खोलता है; Steam सुविधाएँ बंद रहती हैं।</string>
     <string name="game_steam_with">Steam के साथ शुरू होता है</string>

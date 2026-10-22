@@ -387,11 +387,6 @@
     <string name="comp_check_nightlies">Шукати нові пакети в нічних збірках</string>
     <string name="comp_proton">Proton</string>
     <string name="comp_proton_note">Вибраний тут Proton запускає кожну гру, для якої в Steam не вибрано власний, а зміна, зроблена в Steam, теж відображається тут. Під час оновлення Steam замінює Proton від Valve; оригінали зберігаються для кожної збірки.</string>
-    <string name="comp_scope">Конфігурація</string>
-    <string name="comp_profile_game_detail">Збережені налаштування, які автоматично застосовуються під час запуску %1$s.</string>
-    <string name="comp_game_environment_hint">Параметри середовища Proton, DXVK, VKD3D і синхронізації для цієї гри.</string>
-    <string name="comp_game_dxvk">DXVK</string>
-    <string name="comp_game_vkd3d">VKD3D-Proton</string>
     <string name="game_no_steam_title">Запустити без Steam</string>
     <string name="game_no_steam_detail">Відкриває в Proton/FEX без клієнта Steam; функції Steam вимкнено.</string>
     <string name="game_steam_with">Запускається зі Steam</string>

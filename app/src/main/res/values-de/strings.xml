@@ -380,11 +380,6 @@
     <string name="comp_check_nightlies">Nightlies nach neuen Paketen durchsuchen</string>
     <string name="comp_proton">Proton</string>
     <string name="comp_proton_note">Das hier gewählte Proton führt jedes Spiel aus, das in Steam kein eigenes gewählt hat, und eine Änderung in Steam erscheint auch hier. Steam ersetzt Valves Proton bei Updates; die Originale werden pro Build aufbewahrt.</string>
-    <string name="comp_scope">Konfiguration</string>
-    <string name="comp_profile_game_detail">Gespeicherte Einstellungen, die beim Start von %1$s automatisch verwendet werden.</string>
-    <string name="comp_game_environment_hint">Umgebungsoptionen für Proton, DXVK, VKD3D und Synchronisation in diesem Spiel.</string>
-    <string name="comp_game_dxvk">DXVK</string>
-    <string name="comp_game_vkd3d">VKD3D-Proton</string>
     <string name="game_no_steam_title">Ohne Steam starten</string>
     <string name="game_no_steam_detail">Öffnet es in Proton/FEX ohne den Steam-Client; Steam-Funktionen sind aus.</string>
     <string name="game_steam_with">Startet mit Steam</string>

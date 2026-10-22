@@ -381,11 +381,6 @@
     <string name="comp_check_nightlies">Kiểm tra Nightlies để tìm gói mới</string>
     <string name="comp_proton">Proton</string>
     <string name="comp_proton_note">Proton được chọn ở đây chạy mọi game chưa chọn Proton riêng trong Steam, và một thay đổi thực hiện trong Steam cũng hiện ở đây. Steam thay thế Proton của Valve khi nó cập nhật; các bản gốc được giữ lại theo từng build.</string>
-    <string name="comp_scope">Cấu hình</string>
-    <string name="comp_profile_game_detail">Thiết lập đã lưu được dùng tự động khi %1$s khởi chạy.</string>
-    <string name="comp_game_environment_hint">Các tùy chọn môi trường Proton, DXVK, VKD3D và đồng bộ hóa cho game này.</string>
-    <string name="comp_game_dxvk">DXVK</string>
-    <string name="comp_game_vkd3d">VKD3D-Proton</string>
     <string name="game_no_steam_title">Khởi động không cần Steam</string>
     <string name="game_no_steam_detail">Mở trong Proton/FEX mà không có ứng dụng Steam; các tính năng Steam bị tắt.</string>
     <string name="game_steam_with">Khởi động cùng Steam</string>

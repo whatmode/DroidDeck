@@ -383,11 +383,6 @@
     <string name="comp_check_nightlies">Új csomagok keresése a Nightliesben</string>
     <string name="comp_proton">Proton</string>
     <string name="comp_proton_note">Az itt kiválasztott Proton futtat minden olyan játékot, amely a Steamben nem választott saját Protont, és a Steamben végzett módosítás is megjelenik itt. A Steam frissítéskor lecseréli a Valve Protonját; az eredetik buildenként megmaradnak.</string>
-    <string name="comp_scope">Konfiguráció</string>
-    <string name="comp_profile_game_detail">A mentett beállítások automatikusan érvénybe lépnek a %1$s indításakor.</string>
-    <string name="comp_game_environment_hint">Proton-, DXVK-, VKD3D- és szinkronizációs környezeti beállítások ehhez a játékhoz.</string>
-    <string name="comp_game_dxvk">DXVK</string>
-    <string name="comp_game_vkd3d">VKD3D-Proton</string>
     <string name="game_no_steam_title">Indítás Steam nélkül</string>
     <string name="game_no_steam_detail">Proton/FEX alatt nyitja meg a Steam kliens nélkül; a Steam funkciói ki vannak kapcsolva.</string>
     <string name="game_steam_with">Steammel indul</string>

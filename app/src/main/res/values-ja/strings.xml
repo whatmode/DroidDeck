@@ -381,11 +381,6 @@
     <string name="comp_check_nightlies">Nightliesの新しいパッケージを確認</string>
     <string name="comp_proton">Proton</string>
     <string name="comp_proton_note">ここで選択したProtonは、Steamで個別のProtonが選択されていないすべてのゲームを実行します。Steamで変更した場合もここに反映されます。Steamのアップデート時にValveのProtonは置き換えられますが、元のファイルはビルドごとに保持されます。</string>
-    <string name="comp_scope">構成</string>
-    <string name="comp_profile_game_detail">%1$sの起動時に自動的に使用される保存済みの設定です。</string>
-    <string name="comp_game_environment_hint">このゲームのProton、DXVK、VKD3D、同期の環境オプション。</string>
-    <string name="comp_game_dxvk">DXVK</string>
-    <string name="comp_game_vkd3d">VKD3D-Proton</string>
     <string name="game_no_steam_title">Steamなしで起動</string>
     <string name="game_no_steam_detail">Steam クライアントなしで Proton/FEX で開きます。Steam の機能はオフになります。</string>
     <string name="game_steam_with">Steam と一緒に起動</string>

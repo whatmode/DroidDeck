@@ -383,11 +383,6 @@
     <string name="comp_check_nightlies">Tarkista Nightlies uusien pakettien varalta</string>
     <string name="comp_proton">Proton</string>
     <string name="comp_proton_note">Tässä valittu Proton käynnistää kaikki pelit, jotka eivät ole valinneet omaa Protoniaan Steamissa, ja Steamissa tehty muutos näkyy myös tässä. Steam korvaa Valven Protonin päivittäessään; alkuperäiset säilytetään versiokohtaisesti.</string>
-    <string name="comp_scope">Määritys</string>
-    <string name="comp_profile_game_detail">Tallennetut asetukset käytetään automaattisesti, kun %1$s käynnistyy.</string>
-    <string name="comp_game_environment_hint">Tämän pelin Proton-, DXVK-, VKD3D- ja synkronointiympäristön asetukset.</string>
-    <string name="comp_game_dxvk">DXVK</string>
-    <string name="comp_game_vkd3d">VKD3D-Proton</string>
     <string name="game_no_steam_title">Käynnistä ilman Steamia</string>
     <string name="game_no_steam_detail">Avaa sen Protonissa/FEXissä ilman Steam-asiakasta; Steamin ominaisuudet ovat pois päältä.</string>
     <string name="game_steam_with">Käynnistyy Steamin kanssa</string>

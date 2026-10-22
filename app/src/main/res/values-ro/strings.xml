@@ -385,11 +385,6 @@
     <string name="comp_check_nightlies">Verifică versiunile nightly pentru pachete noi</string>
     <string name="comp_proton">Proton</string>
     <string name="comp_proton_note">Proton-ul ales aici rulează orice joc care nu și-a ales propriul în Steam, și o modificare făcută în Steam apare și aici. Steam înlocuiește Proton-ul Valve la actualizare; originalele sunt păstrate pentru fiecare versiune.</string>
-    <string name="comp_scope">Configurare</string>
-    <string name="comp_profile_game_detail">Setări salvate, folosite automat la lansarea %1$s.</string>
-    <string name="comp_game_environment_hint">Opțiuni de mediu Proton, DXVK, VKD3D și sincronizare pentru acest joc.</string>
-    <string name="comp_game_dxvk">DXVK</string>
-    <string name="comp_game_vkd3d">VKD3D-Proton</string>
     <string name="game_no_steam_title">Pornește fără Steam</string>
     <string name="game_no_steam_detail">Îl deschide în Proton/FEX fără clientul Steam; funcțiile Steam sunt oprite.</string>
     <string name="game_steam_with">Pornește cu Steam</string>

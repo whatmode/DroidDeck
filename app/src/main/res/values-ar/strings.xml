@@ -391,11 +391,6 @@
     <string name="comp_check_nightlies">البحث عن حزم جديدة في الإصدارات الليلية</string>
     <string name="comp_proton">Proton</string>
     <string name="comp_proton_note">يشغّل Proton المختار هنا كل لعبة لم تختر إصدارها الخاص في Steam، ويظهر هنا أيضًا أي تغيير يتم في Steam. يستبدل Steam إصدار Proton من Valve عند تحديثه، ويُحتفظ بالملفات الأصلية لكل إصدار.</string>
-    <string name="comp_scope">التهيئة</string>
-    <string name="comp_profile_game_detail">إعدادات محفوظة تُستخدم تلقائيًا عند تشغيل %1$s.</string>
-    <string name="comp_game_environment_hint">خيارات البيئة لـ Proton وDXVK وVKD3D والمزامنة لهذه اللعبة.</string>
-    <string name="comp_game_dxvk">DXVK</string>
-    <string name="comp_game_vkd3d">VKD3D-Proton</string>
     <string name="game_no_steam_title">بدء اللعبة بدون Steam</string>
     <string name="game_no_steam_detail">يفتحها في Proton/FEX بدون عميل Steam؛ ميزات Steam معطّلة.</string>
     <string name="game_steam_with">يبدأ مع Steam</string>

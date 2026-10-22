@@ -387,11 +387,6 @@
     <string name="comp_check_nightlies">Zkontrolovat Nightlies na nové balíčky</string>
     <string name="comp_proton">Proton</string>
     <string name="comp_proton_note">Proton vybraný zde spouští každou hru, která si ve Steamu nevybrala svůj vlastní, a změna provedená ve Steamu se zobrazí i tady. Steam při aktualizaci nahrazuje Proton od Valve; originály jsou zachovány pro každé sestavení.</string>
-    <string name="comp_scope">Konfigurace</string>
-    <string name="comp_profile_game_detail">Uložené nastavení se automaticky použije při spuštění %1$s.</string>
-    <string name="comp_game_environment_hint">Možnosti prostředí Proton, DXVK, VKD3D a synchronizace pro tuto hru.</string>
-    <string name="comp_game_dxvk">DXVK</string>
-    <string name="comp_game_vkd3d">VKD3D-Proton</string>
     <string name="game_no_steam_title">Spustit bez Steamu</string>
     <string name="game_no_steam_detail">Otevře ji v Protonu/FEX bez klienta Steamu; funkce Steamu jsou vypnuté.</string>
     <string name="game_steam_with">Spouští se se Steamem</string>

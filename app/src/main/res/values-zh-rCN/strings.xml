@@ -381,11 +381,6 @@
     <string name="comp_check_nightlies">检查 Nightlies 上的新软件包</string>
     <string name="comp_proton">Proton</string>
     <string name="comp_proton_note">此处选择的 Proton 会运行所有未在 Steam 中单独选择 Proton 的游戏，在 Steam 中所做的更改也会显示在这里。Steam 更新时会替换 Valve 的 Proton；每个构建的原件都会保留。</string>
-    <string name="comp_scope">配置</string>
-    <string name="comp_profile_game_detail">%1$s 启动时自动使用的已保存设置。</string>
-    <string name="comp_game_environment_hint">此游戏的 Proton、DXVK、VKD3D 及同步环境选项。</string>
-    <string name="comp_game_dxvk">DXVK</string>
-    <string name="comp_game_vkd3d">VKD3D-Proton</string>
     <string name="game_no_steam_title">不启动 Steam 直接开始</string>
     <string name="game_no_steam_detail">在不启动 Steam 客户端的情况下用 Proton/FEX 打开；Steam 功能关闭。</string>
     <string name="game_steam_with">随 Steam 启动</string>

@@ -380,11 +380,6 @@
     <string name="comp_check_nightlies">Yeni paketler için Nightlies\'i kontrol et</string>
     <string name="comp_proton">Proton</string>
     <string name="comp_proton_note">Burada seçilen Proton, Steam\'de kendi Proton\'unu seçmemiş her oyunu çalıştırır; Steam\'de yapılan bir değişiklik de burada görünür. Steam güncellenince Valve\'ın Proton\'unu değiştirir; orijinaller her derleme için saklanır.</string>
-    <string name="comp_scope">Yapılandırma</string>
-    <string name="comp_profile_game_detail">%1$s başlatıldığında otomatik kullanılan kayıtlı ayarlar.</string>
-    <string name="comp_game_environment_hint">Bu oyun için Proton, DXVK, VKD3D ve senkronizasyon ortam seçenekleri.</string>
-    <string name="comp_game_dxvk">DXVK</string>
-    <string name="comp_game_vkd3d">VKD3D-Proton</string>
     <string name="game_no_steam_title">Steam olmadan başlat</string>
     <string name="game_no_steam_detail">Steam istemcisi olmadan Proton/FEX\'te açar; Steam özellikleri kapalıdır.</string>
     <string name="game_steam_with">Steam ile başlar</string>
