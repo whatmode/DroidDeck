@@ -22,6 +22,7 @@ PANVK_PATCHES=(
   "$ROOT/mali-gl/patches/0002-panvk-csf-compute-tls-size.patch"
   "$ROOT/mali-gl/patches/0003-pan-bi-tls-spill-mem-access.patch"
   "$ROOT/mali-gl/patches/0004-pan-bi-tls-store-helper-analysis.patch"
+  "$ROOT/mali-gl/patches/0005-panvk-self-configuring-kbase-profile.patch"
 )
 
 # A/B control: PANVK_BASELINE=1 builds the vendor series with none of the patches above, so the

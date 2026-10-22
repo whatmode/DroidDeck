@@ -1,0 +1,792 @@
+diff --git a/src/panfrost/vulkan/csf/panvk_gpu_prerast.c b/src/panfrost/vulkan/csf/panvk_gpu_prerast.c
+index b6c9ef25568..8ed54c8e98e 100644
+--- a/src/panfrost/vulkan/csf/panvk_gpu_prerast.c
++++ b/src/panfrost/vulkan/csf/panvk_gpu_prerast.c
+@@ -82,7 +82,7 @@ panvk_per_arch(gpu_prerast_can_lower)(
+                                                   : &shader->xfb);
+     const bool side_effects = shader->has_side_effects;
+     const bool vp_select = !gs && shader->vp_scissor_loc;
+-    if (!(PANVK_DEBUG(GPU_PRERAST) || poly || gs || xfb || side_effects ||
++    if (!(poly || gs || xfb || side_effects ||
+           vp_select) ||
+         !shader->lowered_vs_compiled || !shader->passthrough_vs_compiled ||
+         (poly && !shader->polygon_compiled) ||
+diff --git a/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c b/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c
+index de520006576..c3a91b58df5 100644
+--- a/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c
++++ b/src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c
+@@ -79,37 +79,6 @@
+ #define KBASE_TILER_HEAP_RENEW_INTERVAL 128
+ #define KBASE_TILER_HEAP_RENEW_WORK 65536
+ 
+-/* Diagnostic override for the tiler-heap renewal cadence.
+- * PANVK_KBASE_HEAP_RENEW_INTERVAL=0 disables renewal entirely; any positive
+- * value replaces the default interval. */
+-static uint32_t
+-kbase_tiler_heap_renew_interval(void)
+-{
+-   static uint32_t interval;
+-
+-   if (!interval) {
+-      int64_t v = debug_get_num_option("PANVK_KBASE_HEAP_RENEW_INTERVAL",
+-                                       KBASE_TILER_HEAP_RENEW_INTERVAL);
+-      interval = (v <= 0 || v > UINT32_MAX) ? UINT32_MAX : (uint32_t)v;
+-   }
+-
+-   return interval;
+-}
+-
+-static uint64_t
+-kbase_tiler_heap_renew_work(void)
+-{
+-   static uint64_t threshold = UINT64_MAX;
+-
+-   if (threshold == UINT64_MAX) {
+-      int64_t v = debug_get_num_option("PANVK_KBASE_HEAP_RENEW_WORK",
+-                                       KBASE_TILER_HEAP_RENEW_WORK);
+-      threshold = v > 0 ? v : 0;
+-   }
+-
+-   return threshold;
+-}
+-
+ static VkResult
+ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
+                           uint64_t target_seqno, uint32_t rekick_mask,
+@@ -2946,14 +2915,11 @@ reset_trace_bufs(struct panvk_gpu_queue *queue)
+  * CPU and GPU never overlapped (NFS Most Wanted: one 20 ms stall per frame).
+  * Signal targets cover every subqueue's emitted seqno, which already
+  * includes the waited-for targets, so an empty submit still signals after
+- * its waits.  PANVK_KBASE_GPU_SEMAPHORE_WAITS=0 restores the CPU waits. */
+-DEBUG_GET_ONCE_BOOL_OPTION(kbase_gpu_semaphore_waits,
+-                           "PANVK_KBASE_GPU_SEMAPHORE_WAITS", true)
+-
++ * its waits.  Whether this is used is fixed per GPU by the profile. */
+ static bool
+-kbase_gpu_waits_disabled(void)
++kbase_gpu_waits_disabled(const struct panvk_physical_device *pdev)
+ {
+-   return !debug_get_option_kbase_gpu_semaphore_waits();
++   return !pdev->profile.gpu_semaphore_waits;
+ }
+ 
+ static VkResult
+@@ -3018,7 +2984,7 @@ panvk_queue_submit_ioctl_kbase(struct panvk_queue_submit *submit,
+       uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT];
+       void *owner;
+ 
+-      if (!kbase_gpu_waits_disabled() && wait->wait_value == 0 &&
++      if (!kbase_gpu_waits_disabled(submit->phys_dev) && wait->wait_value == 0 &&
+           panvk_kbase_sync_peek(wait->sync, &owner, targets) &&
+           (owner == NULL || owner == queue)) {
+          for (uint32_t i = 0; owner && i < PANVK_SUBQUEUE_COUNT; i++) {
+@@ -3094,10 +3060,12 @@ panvk_queue_submit_ioctl_kbase(struct panvk_queue_submit *submit,
+          queue->kbase_tiler_work_count += submit->tiler_work_estimate;
+    }
+ 
+-   uint64_t renew_work = kbase_tiler_heap_renew_work();
++   const struct panvk_kbase_profile *profile =
++      &submit->phys_dev->profile;
++   uint64_t renew_work = profile->heap_renew_work;
+    if (submit->tiler_work_estimate &&
+        (queue->kbase_tiler_submit_count >=
+-           kbase_tiler_heap_renew_interval() ||
++           profile->heap_renew_interval ||
+         (renew_work && queue->kbase_tiler_work_count >= renew_work))) {
+       /* No graphics drain: in-flight entries keep the retired heap and its
+        * descriptor slot (see kbase_subqueue_emit_job()).  Draining here
+@@ -3107,7 +3075,7 @@ panvk_queue_submit_ioctl_kbase(struct panvk_queue_submit *submit,
+       /* Backpressure: the heap does not recycle chunks between renewals, so
+        * if the retired heap stays busy for 4x the renewal budget, drain the
+        * graphics subqueues once and renew, to bound the current heap. */
+-      const uint32_t interval = kbase_tiler_heap_renew_interval();
++      const uint32_t interval = profile->heap_renew_interval;
+       if (result == VK_INCOMPLETE &&
+           ((interval && queue->kbase_tiler_submit_count >= 4ull * interval) ||
+            (renew_work && queue->kbase_tiler_work_count / 4 >= renew_work))) {
+diff --git a/src/panfrost/vulkan/panvk_device.h b/src/panfrost/vulkan/panvk_device.h
+index 2b96abd9fa0..1fd2f1319ad 100644
+--- a/src/panfrost/vulkan/panvk_device.h
++++ b/src/panfrost/vulkan/panvk_device.h
+@@ -230,7 +230,7 @@ panvk_device_adjust_bo_flags(const struct panvk_device *device,
+     */
+    const bool allow_wb_mmap =
+       (pdev->kmod.dev->props.supported_bo_flags & PAN_KMOD_BO_FLAG_WB_MMAP) &&
+-      !PANVK_DEBUG(DUMP) && !PANVK_DEBUG(NO_WB_MMAP);
++      pdev->profile.wb_mmap && !PANVK_DEBUG(DUMP);
+ 
+    if (!allow_wb_mmap)
+       bo_flags &= ~PAN_KMOD_BO_FLAG_WB_MMAP;
+diff --git a/src/panfrost/vulkan/panvk_image.c b/src/panfrost/vulkan/panvk_image.c
+index 275aae3cc61..8c9e6ae4305 100644
+--- a/src/panfrost/vulkan/panvk_image.c
++++ b/src/panfrost/vulkan/panvk_image.c
+@@ -402,7 +402,9 @@ static bool
+ panvk_should_checksum(struct panvk_image *image,
+                       const VkImageCreateInfo *pCreateInfo)
+ {
+-   if (PANVK_DEBUG(NO_CRC))
++   const struct panvk_physical_device *phys_dev =
++      to_panvk_physical_device(image->vk.base.device->physical);
++   if (phys_dev->profile.no_crc)
+       return false;
+ 
+    const VkImageDrmFormatModifierExplicitCreateInfoEXT *explicit_info =
+@@ -469,7 +471,7 @@ panvk_bc_shadow_info(const struct panvk_image *image, VkImageCreateInfo *info,
+    };
+ 
+    /* Fixed-rate AFRC on RGBA8 shadows (BC1/2/3/7) where the GPU has it.
+-    * PANVK_BC_AFRC is the coding-unit size in bytes: 32 (4 bits per
++    * The coding-unit size in bytes: 32 (4 bits per
+     * component, max 4-5 LSB error on real pictures), 24 or 16 (3 or 2 bits,
+     * lossier), 0 = off. Unset, BC1/BC2 take 24 (12 bpp): their colour is a
+     * 4-entry 565 palette and BC2 alpha is 4-bit, so 3 bits per component
+@@ -495,8 +497,7 @@ panvk_bc_shadow_info(const struct panvk_image *image, VkImageCreateInfo *info,
+                     image->vk.format == VK_FORMAT_BC1_RGB_SRGB_BLOCK ||
+                     image->vk.format == VK_FORMAT_BC7_UNORM_BLOCK ||
+                     image->vk.format == VK_FORMAT_BC7_SRGB_BLOCK;
+-   const unsigned cu =
+-      debug_get_num_option("PANVK_BC_AFRC", bc8 ? 16 : bc12 ? 24 : 32);
++   const unsigned cu = bc8 ? 16 : bc12 ? 24 : 32;
+ 
+    if ((cu == 16 || cu == 24 || cu == 32) &&
+        image->bc_format == VK_FORMAT_R8G8B8A8_UNORM &&
+@@ -767,11 +768,11 @@ panvk_image_init(struct panvk_image *image,
+    image->bc_gfx = image->bc_emul &&
+                    pan_arch(phys_dev->kmod.dev->props.gpu_id) >= 10 &&
+                    image->vk.image_type == VK_IMAGE_TYPE_2D &&
+-                   !PANVK_DEBUG(BC_COMPUTE) && !PANVK_DEBUG(NO_GS);
++                   panvk_kbase_bc_fragment_shadow(&phys_dev->profile);
+    if (image->bc_emul) {
+       image->bc_format =
+          image->bc_gfx
+-            ? panvk_bc_compact_format(image->vk.format, PANVK_DEBUG(BC_WIDE))
++            ? panvk_bc_compact_format(image->vk.format, phys_dev->profile.bc_wide)
+             : panvk_bc_decoded_format(image->vk.format);
+    }
+ 
+diff --git a/src/panfrost/vulkan/panvk_instance.c b/src/panfrost/vulkan/panvk_instance.c
+index a0c9bd1d5a3..db6e1d46d9e 100644
+--- a/src/panfrost/vulkan/panvk_instance.c
++++ b/src/panfrost/vulkan/panvk_instance.c
+@@ -53,20 +53,11 @@ static const struct debug_control panvk_debug_options[] = {
+    {"force_simultaneous", PANVK_DEBUG_FORCE_SIMULTANEOUS},
+    {"implicit_others_inv", PANVK_DEBUG_IMPLICIT_OTHERS_INV},
+    {"force_blackhole", PANVK_DEBUG_FORCE_BLACKHOLE},
+-   {"wsi_no_afbc", PANVK_DEBUG_WSI_NO_AFBC},
+-   {"no_wb_mmap", PANVK_DEBUG_NO_WB_MMAP},
+    {"no_user_mmap_sync", PANVK_DEBUG_NO_USER_MMAP_SYNC},
+-   {"cached_before_coherent", PANVK_DEBUG_CACHED_BEFORE_COHERENT},
+    {"no_extended_va_range", PANVK_DEBUG_NO_EXTENDED_VA_RANGE},
+    {"hsr_prepass", PANVK_DEBUG_HSR_PREPASS},
+-   {"no_crc", PANVK_DEBUG_NO_CRC},
+    {"kbase_diag", PANVK_DEBUG_KBASE_DIAG},
+-   {"gpu_prerast", PANVK_DEBUG_GPU_PRERAST},
+-   {"no_bc_emul", PANVK_DEBUG_NO_BC_EMUL},
+-   {"no_gs", PANVK_DEBUG_NO_GS},
+    {"robust_ssbo_vec", PANVK_DEBUG_ROBUST_SSBO_VEC},
+-   {"bc_compute", PANVK_DEBUG_BC_COMPUTE},
+-   {"bc_wide", PANVK_DEBUG_BC_WIDE},
+    {NULL, 0},
+ };
+ 
+diff --git a/src/panfrost/vulkan/panvk_instance.h b/src/panfrost/vulkan/panvk_instance.h
+index 3a51098bc23..abe4ed40876 100644
+--- a/src/panfrost/vulkan/panvk_instance.h
++++ b/src/panfrost/vulkan/panvk_instance.h
+@@ -28,20 +28,11 @@ enum panvk_debug_flags {
+    PANVK_DEBUG_FORCE_SIMULTANEOUS = 1 << 10,
+    PANVK_DEBUG_IMPLICIT_OTHERS_INV = 1 << 11,
+    PANVK_DEBUG_FORCE_BLACKHOLE = 1 << 12,
+-   PANVK_DEBUG_WSI_NO_AFBC = 1 << 13,
+-   PANVK_DEBUG_NO_WB_MMAP = 1 << 14,
+    PANVK_DEBUG_NO_USER_MMAP_SYNC = 1 << 15,
+-   PANVK_DEBUG_CACHED_BEFORE_COHERENT = 1 << 16,
+    PANVK_DEBUG_NO_EXTENDED_VA_RANGE = 1 << 17,
+    PANVK_DEBUG_HSR_PREPASS = 1 << 18,
+-   PANVK_DEBUG_NO_CRC = 1 << 19,
+    PANVK_DEBUG_KBASE_DIAG = 1 << 20,
+-   PANVK_DEBUG_GPU_PRERAST = 1 << 21,
+-   PANVK_DEBUG_NO_BC_EMUL = 1 << 22,
+-   PANVK_DEBUG_NO_GS = 1 << 23,
+    PANVK_DEBUG_ROBUST_SSBO_VEC = 1 << 24,
+-   PANVK_DEBUG_BC_COMPUTE = 1 << 26,
+-   PANVK_DEBUG_BC_WIDE = 1 << 27,
+ };
+ 
+ extern uint64_t panvk_debug;
+diff --git a/src/panfrost/vulkan/panvk_kbase_profile.h b/src/panfrost/vulkan/panvk_kbase_profile.h
+new file mode 100644
+index 00000000000..efa5cc2e13d
+--- /dev/null
++++ b/src/panfrost/vulkan/panvk_kbase_profile.h
+@@ -0,0 +1,121 @@
++/*
++ * Copyright © 2026 DroidDeck
++ * SPDX-License-Identifier: MIT
++ *
++ * Self-configuration for the Mali kbase backend.
++ *
++ * Every tunable below used to be an environment variable a tester had to set
++ * per game, which made a bug report a description of the reporter's
++ * environment instead of the driver.  The values are derived from what
++ * pan_kmod already probes, so the same GPU always gets the same behaviour and
++ * the shipped driver needs no launcher-side environment.
++ */
++
++#ifndef PANVK_KBASE_PROFILE_H
++#define PANVK_KBASE_PROFILE_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#include "kmod/pan_kmod.h"
++#include "pan_props.h"
++
++enum panvk_bc_mode {
++   /* The GPU samples BC natively; no decode is performed. */
++   PANVK_BC_MODE_NATIVE,
++   /* BC is decoded by a compute shader into a linear plane. */
++   PANVK_BC_MODE_COMPUTE,
++   /* BC is decoded by a fragment pass into a compact tiled shadow. */
++   PANVK_BC_MODE_FRAGMENT_SHADOW,
++};
++
++struct panvk_kbase_profile {
++   enum panvk_bc_mode bc_mode;
++
++   /* Keep BC4/BC5/BC6H shadows at 16 bpp instead of the compact format. */
++   bool bc_wide;
++
++   /* Advertise geometry shaders, which the compute-based gpu_prerast path
++    * carries. */
++   bool geometry_shaders;
++
++   uint32_t tiler_chunk_size;
++   uint32_t tiler_initial_chunks;
++   uint32_t tiler_max_chunks;
++   uint32_t heap_renew_interval;
++   uint32_t heap_renew_work;
++
++   /* Wait for same-queue semaphores on the GPU rather than stalling the CPU. */
++   bool gpu_semaphore_waits;
++
++   /* Order the HOST_CACHED memory type before the coherent one. */
++   bool cached_before_coherent;
++
++   /* Expose the WB_MMAP memory type. */
++   bool wb_mmap;
++
++   /* Suppress the CRCs the tiled layout would otherwise maintain. */
++   bool no_crc;
++
++   /* Advertise AFBC for WSI images. */
++   bool wsi_afbc;
++};
++
++/* All ten BC formats, the mask the emulation decision keys on. */
++#define PANVK_BC_NATIVE_MASK 0x1ff80
++
++static inline bool
++panvk_kbase_has_native_bc(const struct pan_kmod_dev_props *props)
++{
++   return (pan_query_compressed_formats(props) & PANVK_BC_NATIVE_MASK) ==
++          PANVK_BC_NATIVE_MASK;
++}
++
++static inline struct panvk_kbase_profile
++panvk_kbase_profile_for(const struct pan_kmod_dev_props *props)
++{
++   const unsigned arch = pan_arch(props->gpu_id);
++   struct panvk_kbase_profile p = {
++      .bc_mode = PANVK_BC_MODE_FRAGMENT_SHADOW,
++      .bc_wide = false,
++      .geometry_shaders = true,
++      .tiler_chunk_size = 1024 * 1024,
++      .tiler_initial_chunks = 10,
++      .tiler_max_chunks = 400,
++      .heap_renew_interval = 128,
++      .heap_renew_work = 65536,
++      .gpu_semaphore_waits = true,
++      .cached_before_coherent = false,
++      .wb_mmap = true,
++      .no_crc = false,
++      .wsi_afbc = true,
++   };
++
++   /* Layered FS rendering starts at v10, so lower arches decode BC through
++    * compute.  Geometry shaders are advertised from v9 on. */
++   if (arch < 10)
++      p.bc_mode = PANVK_BC_MODE_COMPUTE;
++   if (arch < 9)
++      p.geometry_shaders = false;
++
++   /* Where the probe reports every BC format the GPU samples them natively,
++    * so no decode path is selected at all. */
++   if (panvk_kbase_has_native_bc(props))
++      p.bc_mode = PANVK_BC_MODE_NATIVE;
++
++   return p;
++}
++
++static inline bool
++panvk_kbase_bc_fragment_shadow(const struct panvk_kbase_profile *p)
++{
++   return p->bc_mode == PANVK_BC_MODE_FRAGMENT_SHADOW;
++}
++
++static inline bool
++panvk_kbase_bc_emulated(const struct panvk_kbase_profile *p)
++{
++   return p->bc_mode != PANVK_BC_MODE_NATIVE;
++}
++
++#endif /* PANVK_KBASE_PROFILE_H */
+diff --git a/src/panfrost/vulkan/panvk_physical_device.c b/src/panfrost/vulkan/panvk_physical_device.c
+index a6d85a4bc4f..a263ea5668c 100644
+--- a/src/panfrost/vulkan/panvk_physical_device.c
++++ b/src/panfrost/vulkan/panvk_physical_device.c
+@@ -133,231 +133,6 @@ create_kmod_dev(struct panvk_physical_device *device,
+    return VK_SUCCESS;
+ }
+ 
+-#if defined(HAVE_PAN_KMOD_KBASE)
+-static bool
+-kbase_sysfs_read(const char *dir, const char *name, char *value,
+-                 size_t value_size)
+-{
+-   char path[192];
+-   snprintf(path, sizeof(path), "%s/%s", dir, name);
+-
+-   int fd = open(path, O_RDONLY | O_CLOEXEC);
+-   if (fd < 0)
+-      return false;
+-
+-   ssize_t len = read(fd, value, value_size - 1);
+-   int saved_errno = errno;
+-   close(fd);
+-   errno = saved_errno;
+-   if (len <= 0)
+-      return false;
+-
+-   while (len > 0 && (value[len - 1] == '\n' || value[len - 1] == ' '))
+-      len--;
+-   value[len] = '\0';
+-   return true;
+-}
+-
+-static bool
+-kbase_sysfs_write(const char *dir, const char *name, const char *value)
+-{
+-   char path[192];
+-   snprintf(path, sizeof(path), "%s/%s", dir, name);
+-
+-   int fd = open(path, O_WRONLY | O_CLOEXEC);
+-   if (fd < 0)
+-      return false;
+-
+-   size_t len = strlen(value);
+-   ssize_t written = write(fd, value, len);
+-   int saved_errno = errno;
+-   close(fd);
+-   errno = saved_errno;
+-   return written == len;
+-}
+-
+-static bool
+-kbase_sysfs_has_value(const char *values, const char *wanted)
+-{
+-   const char *start = values;
+-
+-   while (*start) {
+-      while (*start == ' ' || *start == '\n')
+-         start++;
+-
+-      const char *end = start;
+-      while (*end && *end != ' ' && *end != '\n')
+-         end++;
+-
+-      if ((size_t)(end - start) == strlen(wanted) &&
+-          !strncmp(start, wanted, end - start))
+-         return true;
+-
+-      start = end;
+-   }
+-
+-   return false;
+-}
+-
+-static bool
+-kbase_parse_frequencies(const char *values, uint32_t requested,
+-                        uint32_t *min_freq, uint32_t *max_freq,
+-                        bool *requested_available)
+-{
+-   char frequencies[512];
+-   snprintf(frequencies, sizeof(frequencies), "%s", values);
+-
+-   *min_freq = UINT32_MAX;
+-   *max_freq = 0;
+-   *requested_available = false;
+-
+-   char *saveptr = NULL;
+-   for (char *token = strtok_r(frequencies, " \n", &saveptr); token;
+-        token = strtok_r(NULL, " \n", &saveptr)) {
+-      char *end = NULL;
+-      errno = 0;
+-      unsigned long freq = strtoul(token, &end, 10);
+-      if (errno || !end || *end || freq > UINT32_MAX)
+-         return false;
+-
+-      *min_freq = MIN2(*min_freq, (uint32_t)freq);
+-      *max_freq = MAX2(*max_freq, (uint32_t)freq);
+-      *requested_available |= requested == freq;
+-   }
+-
+-   return *max_freq != 0;
+-}
+-
+-static bool
+-kbase_set_frequency_range(const char *sysfs, uint32_t min_freq,
+-                          uint32_t max_freq)
+-{
+-   char min_value[32], max_value[32];
+-   snprintf(min_value, sizeof(min_value), "%u\n", min_freq);
+-   snprintf(max_value, sizeof(max_value), "%u\n", max_freq);
+-
+-   /* Lower the minimum first when expanding/down-clocking a range.  Raise
+-    * the maximum first when selecting a higher fixed frequency. */
+-   char current_min_value[32];
+-   uint32_t current_min = 0;
+-   if (kbase_sysfs_read(sysfs, "scaling_min_freq", current_min_value,
+-                        sizeof(current_min_value)))
+-      current_min = strtoul(current_min_value, NULL, 10);
+-
+-   if (max_freq < current_min) {
+-      return kbase_sysfs_write(sysfs, "scaling_min_freq", min_value) &&
+-             kbase_sysfs_write(sysfs, "scaling_max_freq", max_value);
+-   }
+-
+-   return kbase_sysfs_write(sysfs, "scaling_max_freq", max_value) &&
+-          kbase_sysfs_write(sysfs, "scaling_min_freq", min_value);
+-}
+-
+-static void
+-configure_kbase_dvfs(const char *device_path)
+-{
+-   const char *option = os_get_option("PANVK_KBASE_DVFS");
+-   if (!option || !option[0] || !strcmp(option, "none"))
+-      return;
+-
+-   const char *device_name = strrchr(device_path, '/');
+-   device_name = device_name ? device_name + 1 : device_path;
+-
+-   char sysfs[128];
+-   snprintf(sysfs, sizeof(sysfs), "/sys/class/misc/%s/device", device_name);
+-
+-   char available_frequencies[512];
+-   if (!kbase_sysfs_read(sysfs, "available_frequencies",
+-                         available_frequencies,
+-                         sizeof(available_frequencies))) {
+-      mesa_logw("kbase: PANVK_KBASE_DVFS=%s ignored: cannot read %s", option,
+-                sysfs);
+-      return;
+-   }
+-
+-   bool auto_mode = !strcmp(option, "auto");
+-   bool default_mode = !strcmp(option, "default");
+-   bool max_mode = !strcmp(option, "max");
+-   uint32_t requested = 0;
+-
+-   if (!auto_mode && !default_mode && !max_mode) {
+-      char *end = NULL;
+-      errno = 0;
+-      unsigned long parsed = strtoul(option, &end, 10);
+-      if (errno || !end || *end || parsed > UINT32_MAX)
+-         goto invalid_option;
+-      requested = parsed;
+-   }
+-
+-   uint32_t min_freq, max_freq;
+-   bool requested_available;
+-   if (!kbase_parse_frequencies(available_frequencies, requested, &min_freq,
+-                                &max_freq, &requested_available)) {
+-      mesa_logw("kbase: cannot parse available GPU frequencies from %s",
+-                sysfs);
+-      return;
+-   }
+-
+-   if (max_mode) {
+-      requested = max_freq;
+-      requested_available = true;
+-   }
+-
+-   if (auto_mode || default_mode) {
+-      if (!kbase_set_frequency_range(sysfs, min_freq, max_freq))
+-         goto write_failed;
+-
+-      const char *governor =
+-         default_mode ? "quickstep" : "quickstep_use_mcu";
+-      char available_governors[256];
+-      if (!kbase_sysfs_read(sysfs, "available_governors",
+-                            available_governors,
+-                            sizeof(available_governors)))
+-         goto write_failed;
+-
+-      if (auto_mode &&
+-          !kbase_sysfs_has_value(available_governors, governor))
+-         governor = "capacity_use_mcu";
+-
+-      if (!kbase_sysfs_has_value(available_governors, governor)) {
+-         mesa_logw("kbase: requested DVFS governor is unavailable (%s)",
+-                   available_governors);
+-         return;
+-      }
+-
+-      char governor_value[64];
+-      snprintf(governor_value, sizeof(governor_value), "%s\n", governor);
+-      if (!kbase_sysfs_write(sysfs, "governor", governor_value))
+-         goto write_failed;
+-
+-      mesa_logi("kbase: GPU DVFS governor %s, range %u-%u kHz", governor,
+-                min_freq, max_freq);
+-      return;
+-   }
+-
+-   if (!requested_available) {
+-      mesa_logw("kbase: requested GPU frequency %u kHz is unavailable (%s)",
+-                requested, available_frequencies);
+-      return;
+-   }
+-
+-   if (!kbase_set_frequency_range(sysfs, requested, requested))
+-      goto write_failed;
+-
+-   mesa_logi("kbase: GPU frequency fixed at %u kHz", requested);
+-   return;
+-
+-invalid_option:
+-   mesa_logw("kbase: invalid PANVK_KBASE_DVFS value '%s' "
+-             "(expected auto, default, max, none, or a frequency in kHz)",
+-             option);
+-   return;
+-
+-write_failed:
+-   mesa_logw("kbase: PANVK_KBASE_DVFS=%s could not configure %s: %s", option,
+-             sysfs, strerror(errno));
+-}
+-
+ static VkResult
+ create_kmod_dev_kbase(struct panvk_physical_device *device,
+                       const struct panvk_instance *instance,
+@@ -390,7 +165,6 @@ create_kmod_dev_kbase(struct panvk_physical_device *device,
+ 
+    snprintf(device->kbase_node_path, sizeof(device->kbase_node_path), "%s",
+             path);
+-   configure_kbase_dvfs(path);
+ 
+    return VK_SUCCESS;
+ }
+@@ -555,7 +329,7 @@ get_device_heaps(struct panvk_physical_device *device,
+       .heapIndex = 0,
+    };
+ 
+-   if (!PANVK_DEBUG(NO_WB_MMAP) &&
++   if (device->profile.wb_mmap &&
+        (device->kmod.dev->props.supported_bo_flags & PAN_KMOD_BO_FLAG_WB_MMAP)) {
+       assert(device->memory.type_count < ARRAY_SIZE(device->memory.types));
+       host_cached_not_coherent_idx = device->memory.type_count;
+@@ -572,10 +346,11 @@ get_device_heaps(struct panvk_physical_device *device,
+     * calls), and so many added at each version that it gets impossible to
+     * catch up. So, keep things ordered in a way that the first HOST_VISIBLE
+     * type is also the one requiring no CPU cache maintenance if we're asked
+-    * to. The cached_before_coherent debug option is left to help investigate
+-    * cpu cache related perf issues.
++    * to. The ordering is derived from the GPU's coherency: a GPU that is not
++    * IO-coherent needs the explicit cache maintenance, so it keeps the
++    * coherent type first.
+     */
+-   if (PANVK_DEBUG(CACHED_BEFORE_COHERENT) &&
++   if (device->profile.cached_before_coherent &&
+        host_cached_not_coherent_idx != -1 &&
+        host_coherent_not_cached_idx != -1 &&
+        host_coherent_not_cached_idx < host_cached_not_coherent_idx) {
+@@ -1228,6 +1003,8 @@ panvk_physical_device_init(struct panvk_physical_device *device,
+    device->model = pan_get_model(device->kmod.dev->props.gpu_id,
+                                  device->kmod.dev->props.gpu_variant);
+ 
++   device->profile = panvk_kbase_profile_for(&device->kmod.dev->props);
++
+    unsigned arch = pan_arch(device->kmod.dev->props.gpu_id);
+ 
+    if (!device->model) {
+@@ -1243,13 +1020,7 @@ panvk_physical_device_init(struct panvk_physical_device *device,
+    case 7:
+    case 11:
+    case 14:
+-      if (!os_get_option("PAN_I_WANT_A_BROKEN_VULKAN_DRIVER")) {
+-         result = panvk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
+-                               "WARNING: panvk is not well-tested on v%d, "
+-                               "pass PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1 "
+-                               "if you know what you're doing.", arch);
+-         goto fail;
+-      }
++      /* Supported by this series; no environment escape required. */
+       break;
+ 
+    case 10:
+@@ -1361,6 +1132,8 @@ panvk_physical_device_init_kbase(struct panvk_physical_device *device,
+    device->model = pan_get_model(device->kmod.dev->props.gpu_id,
+                                  device->kmod.dev->props.gpu_variant);
+ 
++   device->profile = panvk_kbase_profile_for(&device->kmod.dev->props);
++
+    unsigned arch = pan_arch(device->kmod.dev->props.gpu_id);
+ 
+    /* Release builds drop vk_errorf text without a debug messenger; log the
+@@ -1445,9 +1218,9 @@ panvk_physical_device_init_kbase(struct panvk_physical_device *device,
+        * 1 MiB chunks take the discontiguous small-page path, which only
+        * needs order-0 pages; the GPU MMU provides the virtual contiguity.
+        * Chunk counts are doubled to keep the same byte budget. */
+-      device->csf.tiler.chunk_size = 1024 * 1024;
+-      device->csf.tiler.initial_chunks = 10;
+-      device->csf.tiler.max_chunks = 400;
++      device->csf.tiler.chunk_size = device->profile.tiler_chunk_size;
++      device->csf.tiler.initial_chunks = device->profile.tiler_initial_chunks;
++      device->csf.tiler.max_chunks = device->profile.tiler_max_chunks;
+    }
+ 
+    if (arch != 10)
+@@ -1852,29 +1625,12 @@ format_is_supported(struct panvk_physical_device *physical_device,
+ bool
+ panvk_bc_emul_enabled(const struct panvk_physical_device *physical_device)
+ {
+-   if (PANVK_DEBUG(NO_BC_EMUL))
+-      return false;
+-
+-   /* Emulate unless every BC format is native. Some v9/v10 kbase GPUs
+-    * (G57, G610) report BC1 alone; keying off BC1 disabled emulation there
+-    * and left textureCompressionBC false with no usable BC format. */
+-   static const enum pipe_format bc_fmts[] = {
+-      PIPE_FORMAT_DXT1_RGBA,       PIPE_FORMAT_DXT3_RGBA,
+-      PIPE_FORMAT_DXT5_RGBA,       PIPE_FORMAT_RGTC1_UNORM,
+-      PIPE_FORMAT_RGTC1_SNORM,     PIPE_FORMAT_RGTC2_UNORM,
+-      PIPE_FORMAT_RGTC2_SNORM,     PIPE_FORMAT_BPTC_RGB_FLOAT,
+-      PIPE_FORMAT_BPTC_RGB_UFLOAT, PIPE_FORMAT_BPTC_RGBA_UNORM,
+-   };
+-   uint32_t supported_compr_fmts =
+-      pan_query_compressed_formats(&physical_device->kmod.dev->props);
+-
+-   for (unsigned i = 0; i < ARRAY_SIZE(bc_fmts); i++) {
+-      const struct pan_format fmt = physical_device->formats.all[bc_fmts[i]];
+-      if (!fmt.hw || !(BITFIELD_BIT(fmt.texfeat_bit) & supported_compr_fmts))
+-         return true;
+-   }
+-
+-   return false;
++   /* Emulation is needed unless every BC format is native. Some v9/v10 kbase
++    * GPUs (G57, G610) report BC1 alone, so the decision keys on the full set
++    * rather than on BC1: keying off BC1 alone disabled emulation there and
++    * left textureCompressionBC false with no usable BC format. The answer is
++    * fixed by the probe in panvk_kbase_profile_for(). */
++   return panvk_kbase_bc_emulated(&physical_device->profile);
+ }
+ 
+ static VkFormatFeatureFlags2
+@@ -2134,7 +1890,7 @@ panvk_get_mod_format_caps(const struct panvk_physical_device *pdev,
+    if (!mod_handler)
+       return 0;
+ 
+-   if (drm_is_afbc(mod) && PANVK_DEBUG(WSI_NO_AFBC))
++   if (drm_is_afbc(mod) && !pdev->profile.wsi_afbc)
+       return 0;
+ 
+    return mod_handler->get_format_caps(&pdev->kmod.dev->props, pfmt, mod);
+diff --git a/src/panfrost/vulkan/panvk_physical_device.h b/src/panfrost/vulkan/panvk_physical_device.h
+index c04ef1c20c3..03d1386e06e 100644
+--- a/src/panfrost/vulkan/panvk_physical_device.h
++++ b/src/panfrost/vulkan/panvk_physical_device.h
+@@ -10,6 +10,7 @@
+ #include <sys/types.h>
+ 
+ #include "panvk_instance.h"
++#include "panvk_kbase_profile.h"
+ #include "panvk_macros.h"
+ 
+ #include "vk_physical_device.h"
+@@ -34,6 +35,9 @@ struct panvk_physical_device {
+ 
+    const struct pan_model *model;
+ 
++   /* Derived from the probed GPU properties; never from the environment. */
++   struct panvk_kbase_profile profile;
++
+    union {
+       struct {
+          struct {
+diff --git a/src/panfrost/vulkan/panvk_vX_device.c b/src/panfrost/vulkan/panvk_vX_device.c
+index edb350bbe09..3e1a9834cc8 100644
+--- a/src/panfrost/vulkan/panvk_vX_device.c
++++ b/src/panfrost/vulkan/panvk_vX_device.c
+@@ -618,7 +618,7 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
+    util_dynarray_init(&device->tls.bos, NULL);
+ 
+ #if PAN_ARCH >= 9
+-   if (PANVK_DEBUG(GPU_PRERAST) || device->vk.enabled_features.fillModeNonSolid ||
++   if (device->vk.enabled_features.fillModeNonSolid ||
+        device->vk.enabled_features.geometryShader ||
+        device->vk.enabled_features.transformFeedback ||
+        device->vk.enabled_features.shaderOutputViewportIndex ||
+diff --git a/src/panfrost/vulkan/panvk_vX_physical_device.c b/src/panfrost/vulkan/panvk_vX_physical_device.c
+index 5091109a329..a8d7a68e777 100644
+--- a/src/panfrost/vulkan/panvk_vX_physical_device.c
++++ b/src/panfrost/vulkan/panvk_vX_physical_device.c
+@@ -317,7 +317,7 @@ panvk_per_arch(get_physical_device_features)(
+       .fullDrawIndexUint32 = true,
+       .imageCubeArray = true,
+       .independentBlend = true,
+-      .geometryShader = PAN_ARCH >= 9 && !PANVK_DEBUG(NO_GS),
++      .geometryShader = PAN_ARCH >= 9 && device->profile.geometry_shaders,
+       .tessellationShader = PAN_ARCH >= 9,
+       .sampleRateShading = true,
+       .dualSrcBlend = true,
+@@ -632,7 +632,7 @@ panvk_per_arch(get_physical_device_features)(
+ 
+       /* VK_EXT_transform_feedback */
+       .transformFeedback = PAN_ARCH >= 9,
+-      .geometryStreams = PAN_ARCH >= 9 && !PANVK_DEBUG(NO_GS),
++      .geometryStreams = PAN_ARCH >= 9 && device->profile.geometry_shaders,
+ 
+       /* v7 doesn't support AFBC(BGR). We need to tweak the texture swizzle to
+        * make it work, which forces us to apply the same swizzle on the border
+@@ -1339,7 +1339,7 @@ panvk_per_arch(get_physical_device_properties)(
+       /* Streams come from a GS (v9: one without it). */
+       .maxTransformFeedbackStreams =
+          PAN_ARCH >= 10  ? 4
+-         : PAN_ARCH == 9 ? (PANVK_DEBUG(NO_GS) ? 1 : 4)
++         : PAN_ARCH == 9 ? (device->profile.geometry_shaders ? 4 : 1)
+                          : 0,
+       .maxTransformFeedbackBuffers = PAN_ARCH >= 9 ? 4 : 0,
+       .maxTransformFeedbackBufferSize = UINT32_MAX,
+@@ -1349,7 +1349,8 @@ panvk_per_arch(get_physical_device_properties)(
+       .transformFeedbackQueries = PAN_ARCH >= 9,
+       .transformFeedbackStreamsLinesTriangles = PAN_ARCH >= 9,
+       .transformFeedbackRasterizationStreamSelect =
+-         PAN_ARCH >= 10 || (PAN_ARCH == 9 && !PANVK_DEBUG(NO_GS)),
++         PAN_ARCH >= 10 ||
++            (PAN_ARCH == 9 && device->profile.geometry_shaders),
+       .transformFeedbackDraw = true,
+ 
+       /* VK_EXT_shader_tile_image */
+diff --git a/src/panfrost/vulkan/panvk_vX_shader.c b/src/panfrost/vulkan/panvk_vX_shader.c
+index a69c1482d10..7da1ccd6084 100644
+--- a/src/panfrost/vulkan/panvk_vX_shader.c
++++ b/src/panfrost/vulkan/panvk_vX_shader.c
+@@ -3456,7 +3456,7 @@ panvk_compile_shader(struct panvk_device *dev,
+          !state || !state->rs ||
+          BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_RS_POLYGON_MODE);
+       const bool want_prerast =
+-         PANVK_DEBUG(GPU_PRERAST) || info->nir->xfb_info ||
++         info->nir->xfb_info ||
+          info->nir->info.writes_memory ||
+          (info->next_stage_mask & (VK_SHADER_STAGE_GEOMETRY_BIT |
+                                    VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT)) ||

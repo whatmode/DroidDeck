@@ -1,5 +1,13 @@
 # White-frame test matrix (Lake, app 1118240)
 
+> **Obsolete as of `mali-gl/patches/0005`.** The kbase tunables this matrix sets are no longer
+> read from the environment: `PANVK_DEBUG`'s `bc_compute`, `bc_wide`, `no_bc_emul`, `no_gs`,
+> `wsi_no_afbc`, `no_crc`, `no_wb_mmap`, `cached_before_coherent` and `gpu_prerast` are gone, and
+> `PANVK_BC_AFRC` no longer exists. The driver now derives all of them from the GPU probe in
+> `panvk_kbase_profile_for()`, so every test below runs the same code path and none of them can
+> render. To compare two profile choices, edit that function and rebuild
+> (`.github/workflows/panvk-icd-build.yml`). The matrix is kept only for its reading rules.
+
 Every test below is **one launch, one share**. The zip holds one session only, so send one zip per
 test. Each test lists the complete per-game environment block; do not carry values over between
 tests, because a leftover key silently changes the run.

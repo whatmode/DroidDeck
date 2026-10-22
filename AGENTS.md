@@ -95,3 +95,37 @@ same `texture_features 0xc3fe001e`, "BC emulation on", and `MESA_SHADER_CACHE_DI
 - `proton/steam-<appid>.log` is truncated from the front (`[... first N bytes left out ...]`) when
   large, so capability blocks near the top are absent from a long run. `session.log` keeps the
   `MESA: info:` lines.
+
+## The kbase tunables are now automatic (`mali-gl/patches/0005`)
+
+The per-game switches the earlier sections reach for are gone. `0005` adds
+`src/panfrost/vulkan/panvk_kbase_profile.h`: one `struct panvk_kbase_profile`, filled once per
+physical device from `pan_kmod_dev_props` by `panvk_kbase_profile_for()` and stored in
+`panvk_physical_device::profile`. Every site that used to read an environment variable now reads
+that struct, so the same GPU always gets the same behaviour and no launcher-side env is needed.
+
+- Removed env knobs (all read at runtime before): `PANVK_DEBUG`'s `no_bc_emul`, `bc_compute`,
+  `bc_wide`, `no_gs`, `wsi_no_afbc`, `no_crc`, `no_wb_mmap`, `cached_before_coherent`,
+  `gpu_prerast`, plus `PANVK_BC_AFRC`, `PANVK_KBASE_DVFS`, `PANVK_KBASE_HEAP_RENEW_INTERVAL`,
+  `PANVK_KBASE_HEAP_RENEW_WORK`, `PANVK_KBASE_GPU_SEMAPHORE_WAITS`. The kbase DVFS sysfs
+  frequency pinning and its helpers are deleted outright.
+- Kept: the diagnostic-only toggles that never changed a shipped code path --
+  `force_simultaneous`, `implicit_others_inv` (`PANVK_DEBUG`), and the trace/debug options
+  (`PANVK_FAN_CHUNKS`, `PANVK_KBASE_ASYNC_HEAP_TERM`, `PANVK_V9_RT128`, `PANVK_ZS_PRELOAD_ALWAYS`,
+  `PANVK_DESC_TRACEBUF_SIZE`, `PANVK_CS_TRACEBUF_SIZE`, `PANVK_UTRACE_CLONE_MEM_SIZE`).
+- The arch gate no longer needs `PAN_I_WANT_A_BROKEN_VULKAN_DRIVER` on the DRM path (v6/v7/v11/v14
+  are what this series supports). The kbase path never had it.
+- **The test matrix in `docs/white-frame-test-matrix.md` is obsolete.** Every `PANVK_DEBUG` value it
+  sets except `force_simultaneous`/`implicit_others_inv` is now ignored, and `PANVK_BC_AFRC` no
+  longer exists. To compare two profile choices now, edit `panvk_kbase_profile_for()` and rebuild.
+- **Every value reproduces the vendor series' shipped default.** The point of `0005` is to make the
+  environment unable to change rendering, not to retune it: `bc_mode` is `FRAGMENT_SHADOW` on v10+,
+  `COMPUTE` below v10, and `NATIVE` only where the probe reports all ten BC formats
+  (`panvk_kbase_has_native_bc`, mask `0x1ff80` -- the ten `MALI_BC*` texfeat bits 7-16). Geometry
+  shaders are advertised from v9 on. `cached_before_coherent` stays **false**: it is a
+  CTS-breaking perf experiment upstream, and it was off by default. Tiler heap geometry is
+  1 MiB/10/400 (the kbase small-page path); the DRM path keeps its own 2 MiB/5/64. Heap renewal is
+  128/65536.
+- Consequence: `0005` is a refactor, not a fix. It changes no rendered output by itself. It removes
+  the whole class of "the report describes the tester's environment" bugs and it is the prerequisite
+  for any real white-frame fix, which is then a one-line change to `panvk_kbase_profile_for()`.
