@@ -64,3 +64,27 @@ Both were hit on the 2026-10-22-03 session, so check for them before trusting an
   `linux_vulkan_drivers/<id>`; read both to tell the patched ICD from the baseline one.
 - `d3d11.zeroWorkgroupMemory` is a no-op in DXVK 3.1.1 (see above), so its presence in a run's
   `DXVK_CONFIG` is a red herring, not a variable under test.
+
+## The white frame is not in `mali-gl/patches` (baseline A/B, 2026-10-22)
+
+Two sessions, same env, `PANVK_DEBUG=no_crc` in `shared` with no per-game null (so it applied):
+
+- `2026-10-22-03-steam` (patched ICD, `237e96e4`): white.
+- `2026-10-22-06-steam` (baseline ICD, `4e2b5d7f`, vendor series with none of the patches): white.
+
+So `0002`-`0004` are not the cause and must not be blamed for it. `no_crc` is also not the fix,
+which clears the CRC/transaction-elimination class (and `csf-v11/019`). Both runs also show the
+same `texture_features 0xc3fe001e`, "BC emulation on", and `MESA_SHADER_CACHE_DISABLE` off.
+
+- What DXVK uses and zink does not, in this driver: BC emulation (`csf-v11/039` + `108`, default on,
+  `PANVK_DEBUG=no_bc_emul` opts out) and the `gpu_prerast` geometry-shader path (`csf-v11/048`,
+  default on for `PANVK_DEBUG(NO_GS)`). Both are DXVK-shaped and both are value-correctness risks.
+  The zero-build discriminators are `PANVK_DEBUG=no_bc_emul` and `PANVK_DEBUG=no_gs`; note that
+  `no_bc_emul` can fail DXVK adapter creation because DXVK marks `textureCompressionBC` as
+  `require = true` (`src/dxvk/dxvk_device_info.cpp`), so a launch failure there is expected and
+  is not a rendering result.
+- Do not re-run the extension bisection for this: `VK_KHR_maintenance5` is required by DXVK, and
+  the six required extensions (see the PR#1 list) cannot be hidden without killing the launch.
+- `proton/steam-<appid>.log` is truncated from the front (`[... first N bytes left out ...]`) when
+  large, so capability blocks near the top are absent from a long run. `session.log` keeps the
+  `MESA: info:` lines.
