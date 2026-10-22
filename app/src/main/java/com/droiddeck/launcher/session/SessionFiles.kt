@@ -127,7 +127,11 @@ object SessionFiles {
                 "usr/share/vulkan/implicit_layer.d/droiddeck_vr.json") +
             // Mali: hides NV12 / YCbCr formats from games (loaded only with DROIDDECK_HIDE_YCBCR=1).
             listOf("usr/local/lib/droiddeck-vklayers/libVkLayer_droiddeck_noycbcr.so" to "usr/local/lib/droiddeck-vklayers/libVkLayer_droiddeck_noycbcr.so",
-                "usr/local/lib/droiddeck-vklayers/VK_LAYER_DROIDDECK_noycbcr.json" to "usr/share/vulkan/implicit_layer.d/droiddeck_noycbcr.json")
+                "usr/local/lib/droiddeck-vklayers/VK_LAYER_DROIDDECK_noycbcr.json" to "usr/share/vulkan/implicit_layer.d/droiddeck_noycbcr.json",
+                // Bisection: hides the device extensions named in DROIDDECK_HIDE_EXTS (loaded only
+                // with DROIDDECK_HIDE_EXTS_ENABLE=1, which droiddeck-game-env derives from it).
+                "usr/local/lib/droiddeck-vklayers/libVkLayer_droiddeck_hideext.so" to "usr/local/lib/droiddeck-vklayers/libVkLayer_droiddeck_hideext.so",
+                "usr/local/lib/droiddeck-vklayers/VK_LAYER_DROIDDECK_hideext.json" to "usr/share/vulkan/implicit_layer.d/droiddeck_hideext.json")
         val fexPreloads = listOf("x86_64", "i386").flatMap { arch ->
             listOf("libblsession.so", "libfakeinput.so", "libfaultreport.so").map { "$arch/$it" to "usr/local/lib/droiddeck-fex/$arch/$it" }
         } + listOf("libthunkaudit.so", "libvulkan-thunk.so", "libwebkitinput.so").map { "x86_64/$it" to "usr/local/lib/droiddeck-fex/x86_64/$it" }

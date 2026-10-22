@@ -17,15 +17,67 @@ tests, because a leftover key silently changes the run.
 
 ## Why these and not the extension list
 
-DXVK marks 53 features and extensions `require = true` (`src/dxvk/dxvk_device_info.cpp`). Hiding any
-of them fails `checkDeviceCompatibility()`, `DxvkAdapter::isCompatible()` returns false, and the game
-dies at startup instead of rendering. That kills the whole extension-bisection plan, and it kills
-`no_bc_emul` (`textureCompressionBC`, line 868) and `no_gs` (`geometryShader`, line 834) too.
+An earlier revision of this file said extension bisection was dead. That was wrong, and the
+correction matters because it reopens the plan's step 2, which is the cheapest test available.
+
+DXVK marks 53 of its 174 feature/extension entries `require = true`
+(`src/dxvk/dxvk_device_info.cpp`). Hiding one of those fails `checkDeviceCompatibility()`,
+`DxvkAdapter::isCompatible()` returns false, and the game dies at startup instead of rendering.
+Hiding an entry that is `require = false` does not: `chainFeature()` only sets the feature when the
+extension's `specVersion` is non-zero, so a hidden extension leaves the feature false and DXVK
+takes its fallback path.
+
+Only **6 extensions** carry a `require = true` feature, and `VK_LAYER_DROIDDECK_hideext` refuses
+exactly those:
+
+| extension | required feature |
+|---|---|
+| `VK_KHR_swapchain` | presentation |
+| `VK_KHR_load_store_op_none` | `loadStoreOpNone` |
+| `VK_KHR_maintenance5` | `maintenance5` |
+| `VK_KHR_maintenance6` | `maintenance6` |
+| `VK_EXT_depth_clip_enable` | `depthClipEnable` |
+| `VK_EXT_robustness2` | `robustBufferAccess2`, `nullDescriptor` |
+
+Everything else in the brief's list is `require = false` and therefore hideable:
+`VK_KHR_unified_image_layouts`, `VK_EXT_extended_dynamic_state3`,
+`VK_EXT_attachment_feedback_loop_layout`, `VK_KHR_dynamic_rendering_local_read`,
+`VK_KHR_shader_float_controls2`, `VK_KHR_shader_untyped_pointers`, `VK_EXT_transform_feedback`,
+`VK_EXT_multi_draw`, `VK_EXT_depth_bias_control`, `VK_EXT_non_seamless_cube_map`,
+`VK_EXT_custom_border_color`, `VK_KHR_maintenance8`, `VK_KHR_maintenance9`.
+
+`no_bc_emul` (`textureCompressionBC`, line 868) and `no_gs` (`geometryShader`, line 834) remain
+dead ends, because those are `require = true` core features, not extensions.
 
 G715 reports `texture_features 0xc3fe001e`, and `0xc3fe001e & 0x1ff80 == 0`, so it has no native BC:
 BC emulation is exactly what supplies `textureCompressionBC`. `no_bc_emul` therefore removes a
 required feature rather than changing a code path. Forcing `PANVK_BC_MODE_COMPUTE` is the change
 that keeps the feature and still moves the path (T1).
+
+## Extension bisection (E-tests)
+
+These need **no rebuild**. `DROIDDECK_HIDE_EXTS` names a comma-separated list; the layer hides those
+device extensions from DXVK. Set it in the per-game environment and launch once, exactly like the
+T-tests. `droiddeck-game-env` derives `DROIDDECK_HIDE_EXTS_ENABLE=1` from it, so only one variable
+is set. The layer prints what it hid to stderr, which lands in `session.log`.
+
+Bisect in halves. If hiding a half renders, the culprit is in that half; if it stays white, it is in
+the other half. Four to five launches pin one extension.
+
+| test | `DROIDDECK_HIDE_EXTS` | reading |
+|---|---|---|
+| E1 | `VK_KHR_unified_image_layouts,VK_EXT_extended_dynamic_state3,VK_EXT_attachment_feedback_loop_layout,VK_KHR_dynamic_rendering_local_read,VK_KHR_shader_float_controls2,VK_KHR_shader_untyped_pointers,VK_EXT_transform_feedback,VK_EXT_multi_draw,VK_EXT_depth_bias_control,VK_EXT_non_seamless_cube_map,VK_EXT_custom_border_color,VK_KHR_maintenance8,VK_KHR_maintenance9` | renders → halve. white → none of these, go to the render-path tests |
+| E2 | first half of the E1 list | renders → halve again |
+| E3 | second half of the E1 list | renders → halve again |
+
+`VK_KHR_unified_image_layouts` is the first one to try on its own, because DXVK also exposes a
+direct switch for it: `DXVK_CONFIG="dxvk.enableUnifiedImageLayouts = False"` needs no layer at all.
+If that single line renders, the answer is found with one launch.
+
+**Renders →** the bug is in that extension's PanVK path; read that path, then write the minimal
+repro and take it to dEQP (plan step 5).
+**Still white with everything hidden →** no optional extension is involved; go back to the
+render-path tests below, and the answer is a shader or format path, not a feature.
 
 ## Frozen baseline: identical in every test
 
@@ -35,16 +87,12 @@ that keeps the feature and still moves the path (T1).
 | `DROIDDECK_HIDE_YCBCR` | `1` | the shipped mali default; keep it constant |
 | `MESA_SHADER_CACHE_DISABLE` | *(unset)* | keep the cache in its normal state |
 | `DXVK_CONFIG` | *(no bisection keys)* | `zeroWorkgroupMemory` is not a real DXVK option |
-| `PANVK_DEBUG` | *(varies — the test variable)* | |
+| `DROIDDECK_HIDE_EXTS` | *(unset except in E-tests)* | the extension bisection variable |
 
-Do this **once**, before T1, not between tests:
-
-```sh
-rm -rf ~/.cache/mesa_shader_cache ~/.cache/dxvk
-```
-
-The "first two launches worked, then white forever" pattern is what a poisoned cache looks like, and
-this rules it out for free.
+Do **not** clear any cache, before or between tests. The "first two launches worked, then white
+forever" pattern is what a poisoned cache looks like, and it was already refuted on device:
+`MESA_SHADER_CACHE_DISABLE=true` changed nothing, and deleting DXVK's state cache changed nothing.
+Clearing caches now would only add a variable to a run that has to be comparable.
 
 ## The tests
 

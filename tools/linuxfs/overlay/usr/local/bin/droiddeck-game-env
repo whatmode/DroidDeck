@@ -299,6 +299,16 @@ def with_mali_video(env):
     return env
 
 
+def with_hide_exts(env):
+    """VK_LAYER_DROIDDECK_hideext hides the device extensions named in DROIDDECK_HIDE_EXTS so
+    DXVK falls back to its non-extension path. The layer manifest is gated on
+    DROIDDECK_HIDE_EXTS_ENABLE, which the loader compares by value, so the tester sets only
+    DROIDDECK_HIDE_EXTS and the flag follows. An empty or absent value disables the layer."""
+    if env.get("DROIDDECK_HIDE_EXTS"):
+        env.setdefault("DROIDDECK_HIDE_EXTS_ENABLE", "1")
+    return env
+
+
 def with_media_debug(env):
     """With PROTON_LOG=1, also log what the video stack does: GStreamer warnings and Wine's
     Media Foundation / winedmo / GStreamer-glue warnings. A WINEDEBUG or GST_DEBUG the user set
@@ -351,6 +361,7 @@ def main():
     env = with_ffmpeg(env)
     env = with_media_debug(env)
     env = with_mali_video(env)
+    env = with_hide_exts(env)
     sync = load_sync()
     launch, launch_env = select_sync(command, env, sync)
     if launch[0] != command[0]:

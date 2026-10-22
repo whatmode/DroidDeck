@@ -43,6 +43,16 @@ class ReadConfigMappingTest(unittest.TestCase):
 
 
 class GameEnvironmentTest(unittest.TestCase):
+    def test_hide_exts_enable_flag_follows_the_extension_list(self):
+        hide = MODULE["with_hide_exts"]
+        self.assertEqual(hide({}), {})
+        self.assertEqual(hide({"DROIDDECK_HIDE_EXTS": ""}), {"DROIDDECK_HIDE_EXTS": ""})
+        self.assertEqual(hide({"DROIDDECK_HIDE_EXTS": "VK_KHR_unified_image_layouts"}),
+                         {"DROIDDECK_HIDE_EXTS": "VK_KHR_unified_image_layouts", "DROIDDECK_HIDE_EXTS_ENABLE": "1"})
+        # A tester who sets the flag explicitly keeps their value.
+        self.assertEqual(hide({"DROIDDECK_HIDE_EXTS": "VK_EXT_multi_draw", "DROIDDECK_HIDE_EXTS_ENABLE": "0"}),
+                         {"DROIDDECK_HIDE_EXTS": "VK_EXT_multi_draw", "DROIDDECK_HIDE_EXTS_ENABLE": "0"})
+
     def test_directaudio_capture_follows_the_session_microphone_setting(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
