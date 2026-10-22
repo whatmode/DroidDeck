@@ -94,6 +94,30 @@ forever" pattern is what a poisoned cache looks like, and it was already refuted
 `MESA_SHADER_CACHE_DISABLE=true` changed nothing, and deleting DXVK's state cache changed nothing.
 Clearing caches now would only add a variable to a run that has to be comparable.
 
+## DXVK-side tests (Z-tests)
+
+These need **no rebuild and no layer**: DXVK reads `DXVK_CONFIG` (the `dxvkConfig` field the app
+already injects), and each is one launch. Run them **first** — they are the cheapest way to test
+the brief's theory 1, and the first two are things zink's GL path would not do, which is exactly the
+"something DXVK uses that zink doesn't" shape of the bug.
+
+Set the value in the per-game environment for Lake:
+
+| test | `DXVK_CONFIG` | reading |
+|---|---|---|
+| Z1 | `dxvk.tilerMode = False` | DXVK's tiler submission heuristics. PanVK is a tiler, so this path is live here and absent under zink/GL. Renders → the bug is in the tiler path |
+| Z2 | `dxvk.enableUnifiedImageLayouts = False` | theory 3's unified-layouts arm. Renders → unified layouts |
+| Z3 | `d3d11.disableDirectImageMapping = True` | theory 3's image arm: wrong row pitch or wrong reads on mapped dynamic images |
+| Z4 | `dxvk.zeroMappedMemory = True` | reads of freshly allocated images that PanVK does not zero |
+
+`dxvk.tilerMode` is documented as "only intended to be changed for performance testing and
+debugging purposes", which is what this is. All four keys are real options in DXVK's `dxvk.conf`;
+`d3d11.zeroWorkgroupMemory` (already ruled out) is not one, which is why that earlier test proved
+nothing.
+
+**Renders →** stop and read that path; a single config line has localised the bug.
+**All four white →** no DXVK-side option is involved; go to the E-tests.
+
 ## The tests
 
 Each test is a **driver build**, not an env var. Dispatch `panvk-icd-build.yml` with the

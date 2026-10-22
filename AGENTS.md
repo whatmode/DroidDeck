@@ -27,6 +27,18 @@
   shaders come from dxbc-spirv, which always emits `OpConstantNull` initializers for LDS variables;
   Mesa then always runs `nir_zero_initialize_shared_memory`, so `VK_KHR_zero_initialize_workgroup_memory`
   is already satisfied on this path.
+- **Extension hiding is viable, contrary to an earlier note here.** DXVK marks 53 of its 174
+  feature entries `require = true` in `src/dxvk/dxvk_device_info.cpp`, and `chainFeature()` gates a
+  feature on the extension's `specVersion`, so hiding a `require = false` extension makes DXVK take
+  its fallback path. Only six extensions carry a required feature: `VK_KHR_swapchain`,
+  `VK_KHR_load_store_op_none`, `VK_KHR_maintenance5`, `VK_KHR_maintenance6`,
+  `VK_EXT_depth_clip_enable`, `VK_EXT_robustness2`. `VK_LAYER_DROIDDECK_hideext`
+  (`DROIDDECK_HIDE_EXTS`) hides the rest and refuses those six. Prefer a DXVK `DXVK_CONFIG` key
+  when one exists (`dxvk.tilerMode`, `dxvk.enableUnifiedImageLayouts`, `d3d11.disableDirectImageMapping`,
+  `dxvk.zeroMappedMemory`): it needs no layer and no rebuild.
+- `dxvk.tilerMode` is the highest-value DXVK-side switch to try first, because PanVK is a tiler and
+  zink's GL path is not: it turns on submission heuristics that only exist on a tiler, which matches
+  "DXVK uses something zink does not".
 - `mali-gl/scripts/build.sh` builds GL only (`-Dvulkan-drivers=`). The PanVK ICD is built by
   `tools/panvk/build.sh` (`.github/workflows/panvk-icd-build.yml`) and imported into the app as a
   Linux Vulkan driver zip.
