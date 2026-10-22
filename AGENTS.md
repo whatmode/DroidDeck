@@ -76,15 +76,22 @@ So `0002`-`0004` are not the cause and must not be blamed for it. `no_crc` is al
 which clears the CRC/transaction-elimination class (and `csf-v11/019`). Both runs also show the
 same `texture_features 0xc3fe001e`, "BC emulation on", and `MESA_SHADER_CACHE_DISABLE` off.
 
-- What DXVK uses and zink does not, in this driver: BC emulation (`csf-v11/039` + `108`, default on,
-  `PANVK_DEBUG=no_bc_emul` opts out) and the `gpu_prerast` geometry-shader path (`csf-v11/048`,
-  default on for `PANVK_DEBUG(NO_GS)`). Both are DXVK-shaped and both are value-correctness risks.
-  The zero-build discriminators are `PANVK_DEBUG=no_bc_emul` and `PANVK_DEBUG=no_gs`; note that
-  `no_bc_emul` can fail DXVK adapter creation because DXVK marks `textureCompressionBC` as
-  `require = true` (`src/dxvk/dxvk_device_info.cpp`), so a launch failure there is expected and
-  is not a rendering result.
-- Do not re-run the extension bisection for this: `VK_KHR_maintenance5` is required by DXVK, and
-  the six required extensions (see the PR#1 list) cannot be hidden without killing the launch.
+- What DXVK uses and zink does not, in this driver: BC emulation (`csf-v11/039` + `108`, default on)
+  and the `gpu_prerast` geometry-shader path (`csf-v11/048`, default on). Both are DXVK-shaped and
+  both are value-correctness risks.
+- **`no_bc_emul` and `no_gs` are NOT usable discriminators.** Both clear a feature DXVK marks
+  `require = true` (`src/dxvk/dxvk_device_info.cpp`): `no_bc_emul` clears `textureCompressionBC`
+  (line 868) and `no_gs` clears `geometryShader` (line 834). DXVK then refuses the adapter
+  (`checkDeviceCompatibility` -> "Device does not support required feature ..."), so the run fails
+  at startup and produces no rendering result at all. Same trap as the `VK_KHR_maintenance5` round.
+- Use `PANVK_DEBUG=bc_compute` instead: it sets `bc_gfx = false` while leaving `bc_emul = true`
+  (`csf-v11/150`), so `textureCompressionBC` stays set and DXVK still creates the device, but BC
+  decode falls back from the fragment-pass AFBC/AFRC shadow to the old compute path. That isolates
+  `csf-v11/150`/`151` and is the only zero-build switch here that can actually render.
+  `PANVK_BC_AFRC=0` (a plain env var, not a `PANVK_DEBUG` flag) then splits AFRC off from the
+  fragment shadow; it changes no feature bit.
+- The six extensions DXVK requires (see the PR#1 list) cannot be hidden without killing the launch,
+  so the extension bisection is closed for this bug.
 - `proton/steam-<appid>.log` is truncated from the front (`[... first N bytes left out ...]`) when
   large, so capability blocks near the top are absent from a long run. `session.log` keeps the
   `MESA: info:` lines.
