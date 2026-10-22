@@ -20,6 +20,13 @@ on:
         description: 'mali-gl patch numbers to apply, space separated (empty = all; use "0002 0003 0004" for vendor main)'
         required: false
         default: ''
+      # 0005 moved the old per-game env switches into the compiled profile, so a behaviour
+      # bisection is now a rebuild. This sets one initializer field, e.g.
+      # bc_mode=PANVK_BC_MODE_COMPUTE or no_crc=true, and lands in the zip name and meta.json.
+      profile_knob:
+        description: 'one panvk_kbase_profile_for() field to override, name=value (empty = none; needs patch 0005)'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -44,6 +51,7 @@ jobs:
       # interpolated into the shell, so a ref string cannot inject commands.
       ZENITHBLUE_REF: ${{ inputs.zenithblue_ref || '150c7cdd5b1f22f1994741a1a75577063d96a265' }}
       PANVK_PATCH_NUMBERS: ${{ inputs.patch_numbers }}
+      PANVK_PROFILE_KNOB: ${{ inputs.profile_knob }}
     steps:
       - uses: actions/checkout@v4
 
@@ -73,6 +81,8 @@ jobs:
         run: bash tools/panvk/build.sh zb out
 
       - name: Build the baseline ICD (vendor series, no mali-gl patches)
+        # build.sh refuses PANVK_PROFILE_KNOB under PANVK_BASELINE=1: the control has no 0005,
+        # so it stays at the vendor defaults.
         run: PANVK_BASELINE=1 PANVK_WORK="$PWD/work-baseline" bash tools/panvk/build.sh zb out-baseline
 
       - name: Upload the driver zips
@@ -94,6 +104,9 @@ jobs:
           set -euo pipefail
           tag=panvk-icd-latest
           notes="Patched and baseline PanVK kbase glibc ICDs from ${GITHUB_SHA::7}. Import the zip as a Linux Vulkan driver in DroidDeck. The -baseline zip is the vendor series with none of the mali-gl patches; A/B the two to tell the patches apart from the rebuild."
+          if [ -n "${PANVK_PROFILE_KNOB}" ]; then
+            notes="$notes This run overrides panvk_kbase_profile_for() with ${PANVK_PROFILE_KNOB}, so its zip and driver row carry -knob- and it is NOT comparable to the plain patched build."
+          fi
           gh release view "$tag" >/dev/null 2>&1 \
             || gh release create "$tag" --prerelease --target "$GITHUB_SHA" --title "PanVK kbase ICD (test)" --notes "$notes"
           gh release edit "$tag" --notes "$notes"

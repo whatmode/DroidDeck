@@ -70,6 +70,26 @@ for p in "${PANVK_PATCHES[@]}"; do
     exit 1
   fi
 done
+
+# One profile value per build. 0005 moved the old per-game env switches (bc_compute, no_crc,
+# no_bc_emul, no_gs, gpu_prerast, ...) into panvk_kbase_profile_for(), so a behaviour bisection is
+# now an edit plus a rebuild. PANVK_PROFILE_KNOB names one field of that initializer and the value
+# to give it, e.g. bc_mode=PANVK_BC_MODE_COMPUTE or no_crc=true. The knob is folded into the
+# variant, so it reaches the zip name and meta.json and two knob builds are separate driver rows.
+KNOB=${PANVK_PROFILE_KNOB:-}
+if [ -n "$KNOB" ] && [ "${PANVK_BASELINE:-0}" = "1" ]; then
+  # The baseline is the control: it must stay at the vendor defaults, so a knob that would
+  # mutate it is refused rather than silently applied.
+  log "PANVK_PROFILE_KNOB ignored: PANVK_BASELINE=1 is the unpatched control"
+  KNOB=""
+fi
+if [ -n "$KNOB" ]; then
+  HDR="$MESA/src/panfrost/vulkan/panvk_kbase_profile.h"
+  [ -f "$HDR" ] || { log "PANVK_PROFILE_KNOB: $HDR missing (needs patch 0005)"; exit 1; }
+  python3 "$HERE/profile-knob.py" "$HDR" "$KNOB" || { log "PANVK_PROFILE_KNOB FAILED"; exit 1; }
+  log "profile knob: $KNOB"
+  VARIANT="$VARIANT-knob-$(printf '%s' "$KNOB" | tr -c 'A-Za-z0-9._-' '-')"
+fi
 B=$WORK/build-icd
 rm -rf "$B"
 if ! meson setup "$B" "$MESA" \

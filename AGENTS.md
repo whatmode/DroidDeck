@@ -73,6 +73,17 @@ So `0002`-`0004` are not the cause and must not be blamed for it. `no_crc` is al
 which clears the CRC/transaction-elimination class (and `csf-v11/019`). Both runs also show the
 same `texture_features 0xc3fe001e`, "BC emulation on", and `MESA_SHADER_CACHE_DISABLE` off.
 
+A third run on the `150c7cdd` pair (patched `b81707dc`, carrying `0002`-`0005`) is also white.
+That is the build that first carried `0005`, so it closes the "the pin is stale / `0005` was the
+missing fix" reading as well: white on `150c7cdd` with and without the patches. It does not test
+`0005` as a cause, because `0005` is a refactor that changes no rendered output by design.
+
+Consequence: stop A/B-ing the patch series against the rebuild. Every build in this repo renders
+white, and the two refs are white too, so the difference from the shipped RC4 is not what is being
+measured. The next test has to change one driver behaviour at a time *inside* the build -- which
+now means editing `panvk_kbase_profile_for()` and rebuilding, since `0005` removed the env switches
+that used to do it (see above). `no_crc` was the last one that could be set from the guest.
+
 - What DXVK uses and zink does not, in this driver: BC emulation (`csf-v11/039` + `108`, default on)
   and the `gpu_prerast` geometry-shader path (`csf-v11/048`, default on). Both are DXVK-shaped and
   both are value-correctness risks.
@@ -81,10 +92,18 @@ same `texture_features 0xc3fe001e`, "BC emulation on", and `MESA_SHADER_CACHE_DI
   (line 868) and `no_gs` clears `geometryShader` (line 834). DXVK then refuses the adapter
   (`checkDeviceCompatibility` -> "Device does not support required feature ..."), so the run fails
   at startup and produces no rendering result at all. Same trap as the `VK_KHR_maintenance5` round.
-- Use `PANVK_DEBUG=bc_compute` instead: it sets `bc_gfx = false` while leaving `bc_emul = true`
-  (`csf-v11/150`), so `textureCompressionBC` stays set and DXVK still creates the device, but BC
-  decode falls back from the fragment-pass AFBC/AFRC shadow to the old compute path. That isolates
-  `csf-v11/150`/`151` and is the only zero-build switch here that can actually render.
+- **`PANVK_DEBUG=bc_compute` no longer exists in the patched ICD.** `0005` deleted the whole
+  `panvk_debug_options` block that carried `bc_compute`, `no_crc`, `no_bc_emul`, `no_gs`,
+  `gpu_prerast`, `bc_wide`, `wsi_no_afbc`, `no_wb_mmap` and `cached_before_coherent`, and moved
+  those decisions into `panvk_kbase_profile_for()`. So on a build that carries `0005` the recorded
+  "use `PANVK_DEBUG=bc_compute`" advice is dead: that switch cannot select the compute BC path any
+  more, and neither can `PANVK_BC_AFRC` (`0005` deletes it too). In a `0005` build the only way to
+  change one of these is to edit `panvk_kbase_profile_for()` and rebuild -- which is also why a
+  "patched vs baseline" zip A/B cannot discriminate a BC-path bug: both builds run the same BC path.
+- On a build **without** `0005` (e.g. `237e96e4`), `PANVK_DEBUG=bc_compute` does work: it sets
+  `bc_gfx = false` while leaving `bc_emul = true` (`csf-v11/150`), so `textureCompressionBC` stays
+  set and DXVK still creates the device, but BC decode falls back from the fragment-pass AFBC/AFRC
+  shadow to the old compute path. That isolates `csf-v11/150`/`151`.
   `PANVK_BC_AFRC=0` (a plain env var, not a `PANVK_DEBUG` flag) then splits AFRC off from the
   fragment shadow; it changes no feature bit.
 - The six extensions DXVK requires (see the PR#1 list) cannot be hidden without killing the launch,
@@ -147,9 +166,13 @@ that struct, so the same GPU always gets the same behaviour and no launcher-side
   `PANVK_DESC_TRACEBUF_SIZE`, `PANVK_CS_TRACEBUF_SIZE`, `PANVK_UTRACE_CLONE_MEM_SIZE`).
 - The arch gate no longer needs `PAN_I_WANT_A_BROKEN_VULKAN_DRIVER` on the DRM path (v6/v7/v11/v14
   are what this series supports). The kbase path never had it.
-- **The test matrix in `docs/white-frame-test-matrix.md` is obsolete.** Every `PANVK_DEBUG` value it
-  sets except `force_simultaneous`/`implicit_others_inv` is now ignored, and `PANVK_BC_AFRC` no
-  longer exists. To compare two profile choices now, edit `panvk_kbase_profile_for()` and rebuild.
+- **The test matrix in `docs/white-frame-test-matrix.md` is obsolete as written.** Every `PANVK_DEBUG`
+  value it sets except `force_simultaneous`/`implicit_others_inv` is now ignored, and `PANVK_BC_AFRC`
+  no longer exists. The matrix has been rewritten to drive those tests through
+  `PANVK_PROFILE_KNOB` (a `workflow_dispatch` input on `panvk-icd-build.yml`) instead: each row is
+  one build with one `panvk_kbase_profile_for()` field overridden, and the knob is folded into the
+  zip name and `meta.json` so the driver row names the test. `implicit_others_inv` (T7) is still a
+  live `PANVK_DEBUG` flag and needs no rebuild.
 - **Every value reproduces the vendor series' shipped default.** The point of `0005` is to make the
   environment unable to change rendering, not to retune it: `bc_mode` is `FRAGMENT_SHADOW` on v10+,
   `COMPUTE` below v10, and `NATIVE` only where the probe reports all ten BC formats
