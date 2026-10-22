@@ -520,11 +520,10 @@ def launch(command, env, mode, decide=None):
 def game_environment(env):
     try:
         game_env = runpy.run_path(os.path.join(BIN_DIR, "droiddeck-game-env"))
-        app = game_env["game_id"](env) or env.get("SteamAppId") or env.get("SteamGameId")
-        if not app:
+        if not (game_env["game_id"](env) or env.get("SteamAppId") or env.get("SteamGameId")):
             return env
         with open(GAME_ENVIRONMENT, encoding="utf-8") as source:
-            return game_env["apply_config"](env, json.load(source), str(app))
+            return game_env["apply_config"](env, json.load(source))
     except FileNotFoundError:
         return env
     except Exception as error:

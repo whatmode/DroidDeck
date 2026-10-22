@@ -52,12 +52,9 @@
 
 Both were hit on the 2026-10-22-03 session, so check for them before trusting any result.
 
-- A per-game `null` *cancels* the shared value; it does not inherit it. `apply_config` in
-  `droiddeck-game-env` does `result.pop(name, None)` for a null entry, and the per-game map is
-  applied after `shared`, so `"games": {"1118240": {"PANVK_DEBUG": null}}` removes a shared
-  `PANVK_DEBUG=no_crc`. That is the UI's "unset" action; "restore" is the one that drops the row
-  and lets the shared value through. A diagnostic env var set in `shared` is therefore not
-  evidence of anything unless the same game has no null row for it.
+- There are no per-game environment overrides any more. `game-environment.json` carries a single
+  `shared` map, so a diagnostic env var in `shared` reaches every game, and there is no UI row that
+  could cancel it. Read the published file in the zip to confirm what actually applied.
 - The zip's top-level directory is the session, and one session is one launch. A zip with a single
   session dir covers only that launch, whatever the tester says it contains. `device.txt` names the
   selected driver from `meta.json` ("Linux driver") and `session.log` names the imported
@@ -67,7 +64,7 @@ Both were hit on the 2026-10-22-03 session, so check for them before trusting an
 
 ## The white frame is not in `mali-gl/patches` (baseline A/B, 2026-10-22)
 
-Two sessions, same env, `PANVK_DEBUG=no_crc` in `shared` with no per-game null (so it applied):
+Two sessions, same env, `PANVK_DEBUG=no_crc` in `shared` (so it applied):
 
 - `2026-10-22-03-steam` (patched ICD, `237e96e4`): white.
 - `2026-10-22-06-steam` (baseline ICD, `4e2b5d7f`, vendor series with none of the patches): white.
@@ -164,3 +161,30 @@ that struct, so the same GPU always gets the same behaviour and no launcher-side
 - Consequence: `0005` is a refactor, not a fix. It changes no rendered output by itself. It removes
   the whole class of "the report describes the tester's environment" bugs and it is the prerequisite
   for any real white-frame fix, which is then a one-line change to `panvk_kbase_profile_for()`.
+
+## The app has one shared game environment (no per-game profiles)
+
+The per-game compatibility profile feature is gone from the app, not just hidden. A game now has
+exactly two user-selectable things: its Proton build and its driver bundle.
+
+- `GameEnvironment.Config` holds only `shared`. `effective(config, preset)` takes no scope, and
+  `withValue(config, name, value)` is the only mutator. There is no `validScope`, no `games` map,
+  no `NO_STEAM`/`CUSTOM_FEX_PRESET`/`CUSTOM_SYNC` sentinels.
+- The guest `game-environment.json` carries `version`, `shared` and an optional `dxvkConfig`. The
+  `games` and `dxvkConfigGames` sections are gone; `apply_config(env, config, fixes=None)` and
+  `sync_config(config)` take no app id. Old files with those sections still load, because the guest
+  only reads the keys it knows.
+- Per-game FEX preset and sync backend are gone with the profiles. Start-without-Steam moved from
+  `DROIDDECK_NO_STEAM` in the environment to the `noSteamGames` set in the `session` prefs; it is
+  still a per-game toggle (the game settings card), but it no longer rides the environment file.
+- Deleted with the feature: `GameProfileManager`, `GameProfileFollowState`,
+  `GameProfileRefreshState`, `GameProfileInventoryCache`, `SelectedGameProfile`,
+  `LatestRequestCoordinator`, `TextureFilteringPrefs`, `ComponentsManager.gameComponents`/
+  `setGameComponent`/`clearGameComponents`, `ProtonDefault.gameChoice`/`gameSelectedId`/
+  `requestGame`/`parseGames`, `SessionPrefs.gameTextureFiltering` and friends,
+  `SettingsReset.resetAll(context, gameProfiles, gameScopes)`, `ProtonDefault.GAMES`
+  (`droiddeck-compat/games.json`), and `steam-compatibility`'s `requested_games`/`game_requests`/
+  `DEFERRED_GAME_TOOL`.
+- A `droiddeck-compat/games.json` left on a device from an older build is inert: nothing reads it.
+  Do not "restore" it as a diagnostic, and do not add a per-game env var path back for one game --
+  that is what made the earlier A/B runs unreadable.

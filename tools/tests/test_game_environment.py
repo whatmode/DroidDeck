@@ -56,7 +56,7 @@ class GameEnvironmentTest(unittest.TestCase):
                     profile = {} if override is None else {
                         "BANNER_AUDIO_DIRECT_MIC": override, "BL_MIC_ENABLED": override,
                     }
-                    config.write_text(json.dumps({"version": 1, "games": {"42": profile}}))
+                    config.write_text(json.dumps({"version": 1, "shared": profile}))
                     env = dict(os.environ, HOME=tmp, BL_MIC_ENABLED=enabled,
                                BANNER_AUDIO_DIRECT_MIC="1", STEAM_COMPAT_DATA_PATH="/compatdata/42")
                     result = subprocess.run([sys.executable, str(BIN / "droiddeck-game-env"),
@@ -83,17 +83,16 @@ class GameEnvironmentTest(unittest.TestCase):
             self.assertEqual(calls[0][0][1], str(root))
             self.assertEqual(calls[0][1]["DROIDDECK_SEED_SCRIPTS"], str(script))
 
-    def test_profile_precedence_and_unset(self):
+    def test_shared_values_override_the_inherited_environment_and_can_unset(self):
         env = {"KEEP": "inherited", "REMOVE": "inherited", "CUSTOM": "launch option"}
-        config = {"version": 1, "shared": {"CUSTOM": "shared"}, "games": {"42": {"REMOVE": None, "CUSTOM": "game", "EMPTY": ""}}}
-        self.assertEqual(MODULE["apply_config"](env, config, "42"), {"KEEP": "inherited", "CUSTOM": "game", "EMPTY": ""})
+        config = {"version": 1, "shared": {"REMOVE": None, "CUSTOM": "shared", "EMPTY": ""}}
+        self.assertEqual(MODULE["apply_config"](env, config), {"KEEP": "inherited", "CUSTOM": "shared", "EMPTY": ""})
         self.assertEqual(env["REMOVE"], "inherited")
-        self.assertEqual(MODULE["apply_config"](env, config, "43")["CUSTOM"], "shared")
 
-    def test_a_games_wine_sync_choice_also_reaches_its_setup_runs(self):
+    def test_the_sync_choice_reaches_the_games_setup_runs(self):
         env = {"BL_SYNC": "1", "BL_SYNC_FALLBACK": "1", "BL_FSYNC_FIRST": "0", "OTHER": "kept"}
-        config = {"version": 1, "games": {"42": {"BL_SYNC": "0", "BL_FSYNC_FIRST": "1", "PROTON_NO_ESYNC": "1", "FEX_TSOENABLED": "1"}}}
-        chosen = MODULE["apply_config"](env, MODULE["sync_config"](config, "42"), "42")
+        config = {"version": 1, "shared": {"BL_SYNC": "0", "BL_FSYNC_FIRST": "1", "PROTON_NO_ESYNC": "1", "FEX_TSOENABLED": "1"}}
+        chosen = MODULE["apply_config"](env, MODULE["sync_config"](config))
         self.assertEqual(chosen, {"BL_SYNC": "0", "BL_SYNC_FALLBACK": "1", "BL_FSYNC_FIRST": "1", "PROTON_NO_ESYNC": "1", "OTHER": "kept"})
 
     def test_component_profiles_override_general_and_restore_it_for_the_next_game(self):
@@ -189,9 +188,7 @@ class GameEnvironmentTest(unittest.TestCase):
                 env, extra, notes = MODULE["engine_fixes"](str(city / exe), [])
                 self.assertEqual((env, extra), ({"FEX_X87REDUCEDPRECISION": "0"}, []))
             config = {"version": 1, "shared": {"FEX_X87REDUCEDPRECISION": "1"}}
-            self.assertEqual(MODULE["apply_config"]({}, config, "200260", env)["FEX_X87REDUCEDPRECISION"], "0")
-            config["games"] = {"200260": {"FEX_X87REDUCEDPRECISION": "1"}}
-            self.assertEqual(MODULE["apply_config"]({}, config, "200260", env)["FEX_X87REDUCEDPRECISION"], "1")
+            self.assertEqual(MODULE["apply_config"]({}, config, env)["FEX_X87REDUCEDPRECISION"], "0")
             asylum = Path(tmp) / "Batman Arkham Asylum GOTY/Binaries"
             asylum.mkdir(parents=True)
             for name in ("ShippingPC-BmGame.exe", "BmLauncher.exe"):
@@ -209,50 +206,33 @@ class GameEnvironmentTest(unittest.TestCase):
             finally:
                 MODULE["FIXES"].remove(check)
 
-    def test_engine_fixes_sit_between_shared_and_game_profiles(self):
+    def test_engine_fixes_override_the_shared_environment(self):
         env = {"WINEDLLOVERRIDES": "dxgi=n"}
         fixes = {"FEX_MULTIBLOCK": "0", "WINEDLLOVERRIDES": "libsentry=d"}
-        config = {"version": 1, "shared": {"FEX_MULTIBLOCK": "1"}, "games": {"42": {"FEX_TSOENABLED": "0"}}}
-        result = MODULE["apply_config"](env, config, "42", {**fixes, "FEX_TSOENABLED": "1"})
+        config = {"version": 1, "shared": {"FEX_MULTIBLOCK": "1"}}
+        result = MODULE["apply_config"](env, config, fixes)
         self.assertEqual(result["FEX_MULTIBLOCK"], "0")
-        self.assertEqual(result["FEX_TSOENABLED"], "0")
         self.assertEqual(result["WINEDLLOVERRIDES"], "dxgi=n;libsentry=d")
 
     def test_invalid_configuration_is_atomic(self):
         env = {"ORIGINAL": "unchanged"}
         for entries in ({"A": "ok", "BAD=KEY": "x"}, {"A": "bad\0value"}, {"A": 1}):
             with self.assertRaises(ValueError):
-                MODULE["apply_config"](env, {"version": 1, "shared": entries}, "42")
+                MODULE["apply_config"](env, {"version": 1, "shared": entries})
             self.assertEqual(env, {"ORIGINAL": "unchanged"})
 
     def test_texture_filtering_is_appended_to_dxvk_config(self):
         options = "d3d9.samplerAnisotropy = 16; d3d11.samplerAnisotropy = 16"
-        config = {"version": 1, "shared": {}, "games": {}, "dxvkConfig": options}
-        self.assertEqual(MODULE["apply_config"]({}, config, "42")["DXVK_CONFIG"], options)
+        config = {"version": 1, "shared": {}, "dxvkConfig": options}
+        self.assertEqual(MODULE["apply_config"]({}, config)["DXVK_CONFIG"], options)
         own = {"DXVK_CONFIG": "dxvk.maxFrameRate = 60; "}
-        self.assertEqual(MODULE["apply_config"](own, config, "42")["DXVK_CONFIG"], "dxvk.maxFrameRate = 60; " + options)
-        shared = {"version": 1, "shared": {"DXVK_CONFIG": "dxvk.tearFree = True"}, "games": {}, "dxvkConfig": options}
-        self.assertEqual(MODULE["apply_config"]({}, shared, "42")["DXVK_CONFIG"], "dxvk.tearFree = True; " + options)
-        self.assertNotIn("DXVK_CONFIG", MODULE["apply_config"]({}, {**config, "dxvkConfig": ""}, "42"))
+        self.assertEqual(MODULE["apply_config"](own, config)["DXVK_CONFIG"], "dxvk.maxFrameRate = 60; " + options)
+        shared = {"version": 1, "shared": {"DXVK_CONFIG": "dxvk.tearFree = True"}, "dxvkConfig": options}
+        self.assertEqual(MODULE["apply_config"]({}, shared)["DXVK_CONFIG"], "dxvk.tearFree = True; " + options)
+        self.assertNotIn("DXVK_CONFIG", MODULE["apply_config"]({}, {**config, "dxvkConfig": ""}))
         for bad in (1, "a\0b", "x" * 8193):
             with self.assertRaises(ValueError):
-                MODULE["apply_config"]({}, {**config, "dxvkConfig": bad}, "42")
-
-    def test_game_texture_filtering_overrides_default_without_leaking(self):
-        default = "d3d9.samplerAnisotropy = 16"
-        game = "d3d9.samplerAnisotropy = 4"
-        config = {
-            "version": 1,
-            "shared": {},
-            "games": {},
-            "dxvkConfig": default,
-            "dxvkConfigGames": {"42": game, "43": ""},
-        }
-        self.assertEqual(MODULE["apply_config"]({}, config, "42")["DXVK_CONFIG"], game)
-        self.assertNotIn("DXVK_CONFIG", MODULE["apply_config"]({}, config, "43"))
-        self.assertEqual(MODULE["apply_config"]({}, config, "44")["DXVK_CONFIG"], default)
-        with self.assertRaises(ValueError):
-            MODULE["apply_config"]({}, {**config, "dxvkConfigGames": []}, "42")
+                MODULE["apply_config"]({}, {**config, "dxvkConfig": bad})
 
     def test_game_ids_and_probes(self):
         for prefix in ("", "/compatdata/0", "/compatdata/0-123", "/compatdata/nope", "/compatdata/4294967296"):
@@ -671,24 +651,6 @@ class ProtonDefaultTest(unittest.TestCase):
         self.assertEqual(changes, {})
         self.assertEqual(auto, {})
 
-    def test_native_arm64_keeps_explicit_runtime_fex_and_proton_profiles(self):
-        fex = COMPAT["FEX_TOOL"]
-        current = {
-            "0": self.TOOL,
-            "42": COMPAT["TOOL_11"],
-            "43": "GE-Proton11-7",
-            "44": "steamlinuxruntime_arm64",
-            "45": fex,
-            "46": "",
-        }
-        changes, auto = COMPAT["plan_mapping"](
-            current, ["42", "43", "44", "45", "46"], self.NAMES, self.TOOL, {},
-            {app: None for app in ("42", "43", "44", "45", "46")},
-            overrides={"46": "GE-Proton11-7"},
-        )
-        self.assertEqual(changes, {"46": "GE-Proton11-7"})
-        self.assertEqual(auto, {})
-
     def test_titles_following_the_default_move_with_it_and_picks_stay(self):
         current = {"0": self.TOOL, "10": self.TOOL, "11": "GE-Proton11-7", "12": self.TOOL}
         auto = {"10": self.TOOL, "11": self.TOOL, "12": self.TOOL}
@@ -705,32 +667,15 @@ class ProtonDefaultTest(unittest.TestCase):
         changes, auto = self.plan({"0": self.TOOL}, [], self.TOOL, {"10": self.TOOL})
         self.assertEqual((changes, auto), ({}, {}))
 
-    def test_per_game_proton_override_and_inherit_follow_steam_mappings(self):
+    def test_steam_picks_stay_and_followers_move_with_the_default(self):
         current = {"0": self.TOOL, "10": self.TOOL, "11": "GE-Proton11-7", "12": self.TOOL}
-        overrides = {"10": "GE-Proton11-7", "11": None}
         changes, auto = COMPAT["plan_mapping"](
             current, ["10", "11", "12"], self.NAMES, COMPAT["TOOL_11"],
-            {"10": self.TOOL, "12": self.TOOL}, overrides=overrides)
-        self.assertEqual(changes, {"0": COMPAT["TOOL_11"], "10": "GE-Proton11-7", "11": COMPAT["TOOL_11"], "12": COMPAT["TOOL_11"]})
-        self.assertEqual(auto, {"11": COMPAT["TOOL_11"], "12": COMPAT["TOOL_11"]})
+            {"10": self.TOOL, "12": self.TOOL}, native={"10": "GE-Proton11-7"})
+        self.assertEqual(changes, {"0": COMPAT["TOOL_11"], "10": "GE-Proton11-7", "12": COMPAT["TOOL_11"]})
+        self.assertEqual(auto, {"10": "GE-Proton11-7", "12": COMPAT["TOOL_11"]})
 
-    def test_per_game_requests_resolve_identity_and_defer_a_new_live_tool(self):
-        requests = {
-            "10": {"valve": False, "dir": "GE-Proton11-7"},
-            "11": None,
-            "12": {"valve": True, "dir": "Proton 11.0 (ARM64)"},
-            "0": None,
-        }
-        self.assertEqual(
-            COMPAT["requested_games"](requests, self.CATALOG),
-            {"10": "GE-Proton11-7", "11": None, "12": COMPAT["TOOL_11"]},
-        )
-        self.assertEqual(
-            COMPAT["requested_games"](requests, self.CATALOG, [self.TOOL, COMPAT["TOOL_11"]]),
-            {"10": COMPAT["DEFERRED_GAME_TOOL"], "11": None, "12": COMPAT["TOOL_11"]},
-        )
-
-    def test_missing_per_game_proton_is_preserved_during_default_registration(self):
+    def test_an_existing_mapping_is_left_alone_during_default_registration(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "config.vdf"
             config.write_text(config_text([
@@ -738,12 +683,6 @@ class ProtonDefaultTest(unittest.TestCase):
                 ("10", "GE-Proton9-1"),
                 ("11", self.TOOL),
             ]))
-            (Path(tmp) / "games.json").write_text(json.dumps({
-                "version": 1,
-                "games": {
-                    "10": {"valve": False, "dir": "GE-Proton9-1"},
-                },
-            }))
 
             COMPAT["register_default"](
                 str(config), ["10", "11"], default=COMPAT["TOOL_11"],

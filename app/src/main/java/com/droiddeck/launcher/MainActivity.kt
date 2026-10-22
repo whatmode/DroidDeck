@@ -1159,7 +1159,7 @@ class MainActivity : ComponentActivity() {
                     onClose = { placementCheck = null },
                 )
                 if (showResetSettings) com.droiddeck.launcher.ui.ResetSettingsDialog(
-                    onConfirm = { gameProfiles -> resetSettings(gameProfiles) },
+                    onConfirm = { resetSettings() },
                     onDismiss = { showResetSettings = false },
                 )
                 flood?.let { f -> com.droiddeck.launcher.ui.LaunchFlood(f.from, onProgress = { floodProgress = it }) { launchFlooded(f) } }
@@ -1484,7 +1484,6 @@ class MainActivity : ComponentActivity() {
             onRefresh = { components.refreshComponentCatalog() },
             onImport = { pickComponent.launch(InAppFilePicker.buildIntent(this, WCP_EXT, getString(R.string.comp_pick_wcp))) },
             onBack = { if (!com.droiddeck.launcher.ui.Hops.back { showComponents = false }) showComponents = false },
-            games = steamGames,
             generalFexPreset = fexPreset,
             onGeneralFexPreset = { id -> SessionPrefs.setFexPreset(this, id); fexPreset = id },
             gpu = drivers.state(),
@@ -2063,11 +2062,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun resetSettings(gameProfiles: Boolean) {
+    private fun resetSettings() {
         if (SessionState.running) return
-        val scopes = steamGames.map { it.profileKey }
         Thread({
-            val ok = com.droiddeck.launcher.session.SettingsReset.resetAll(this, gameProfiles, scopes)
+            val ok = com.droiddeck.launcher.session.SettingsReset.resetAll(this)
             ui.post {
                 if (isDestroyed) return@post
                 com.droiddeck.launcher.core.AppLanguage.setChosen(this, com.droiddeck.launcher.core.AppLanguage.SYSTEM)
