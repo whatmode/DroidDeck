@@ -343,14 +343,13 @@ index 00000000000..efa5cc2e13d
 +
 +#endif /* PANVK_KBASE_PROFILE_H */
 diff --git a/src/panfrost/vulkan/panvk_physical_device.c b/src/panfrost/vulkan/panvk_physical_device.c
-index a6d85a4bc4f..a263ea5668c 100644
+index a6d85a4bc4f..bbc4496ada7 100644
 --- a/src/panfrost/vulkan/panvk_physical_device.c
 +++ b/src/panfrost/vulkan/panvk_physical_device.c
-@@ -133,231 +133,6 @@ create_kmod_dev(struct panvk_physical_device *device,
-    return VK_SUCCESS;
+@@ -134,230 +134,6 @@ create_kmod_dev(struct panvk_physical_device *device,
  }
  
--#if defined(HAVE_PAN_KMOD_KBASE)
+ #if defined(HAVE_PAN_KMOD_KBASE)
 -static bool
 -kbase_sysfs_read(const char *dir, const char *name, char *value,
 -                 size_t value_size)
@@ -578,7 +577,7 @@ index a6d85a4bc4f..a263ea5668c 100644
  static VkResult
  create_kmod_dev_kbase(struct panvk_physical_device *device,
                        const struct panvk_instance *instance,
-@@ -390,7 +165,6 @@ create_kmod_dev_kbase(struct panvk_physical_device *device,
+@@ -390,7 +166,6 @@ create_kmod_dev_kbase(struct panvk_physical_device *device,
  
     snprintf(device->kbase_node_path, sizeof(device->kbase_node_path), "%s",
              path);
@@ -586,7 +585,7 @@ index a6d85a4bc4f..a263ea5668c 100644
  
     return VK_SUCCESS;
  }
-@@ -555,7 +329,7 @@ get_device_heaps(struct panvk_physical_device *device,
+@@ -555,7 +330,7 @@ get_device_heaps(struct panvk_physical_device *device,
        .heapIndex = 0,
     };
  
@@ -595,7 +594,7 @@ index a6d85a4bc4f..a263ea5668c 100644
         (device->kmod.dev->props.supported_bo_flags & PAN_KMOD_BO_FLAG_WB_MMAP)) {
        assert(device->memory.type_count < ARRAY_SIZE(device->memory.types));
        host_cached_not_coherent_idx = device->memory.type_count;
-@@ -572,10 +346,11 @@ get_device_heaps(struct panvk_physical_device *device,
+@@ -572,10 +347,11 @@ get_device_heaps(struct panvk_physical_device *device,
      * calls), and so many added at each version that it gets impossible to
      * catch up. So, keep things ordered in a way that the first HOST_VISIBLE
      * type is also the one requiring no CPU cache maintenance if we're asked
@@ -610,7 +609,7 @@ index a6d85a4bc4f..a263ea5668c 100644
         host_cached_not_coherent_idx != -1 &&
         host_coherent_not_cached_idx != -1 &&
         host_coherent_not_cached_idx < host_cached_not_coherent_idx) {
-@@ -1228,6 +1003,8 @@ panvk_physical_device_init(struct panvk_physical_device *device,
+@@ -1228,6 +1004,8 @@ panvk_physical_device_init(struct panvk_physical_device *device,
     device->model = pan_get_model(device->kmod.dev->props.gpu_id,
                                   device->kmod.dev->props.gpu_variant);
  
@@ -619,7 +618,7 @@ index a6d85a4bc4f..a263ea5668c 100644
     unsigned arch = pan_arch(device->kmod.dev->props.gpu_id);
  
     if (!device->model) {
-@@ -1243,13 +1020,7 @@ panvk_physical_device_init(struct panvk_physical_device *device,
+@@ -1243,13 +1021,7 @@ panvk_physical_device_init(struct panvk_physical_device *device,
     case 7:
     case 11:
     case 14:
@@ -634,7 +633,7 @@ index a6d85a4bc4f..a263ea5668c 100644
        break;
  
     case 10:
-@@ -1361,6 +1132,8 @@ panvk_physical_device_init_kbase(struct panvk_physical_device *device,
+@@ -1361,6 +1133,8 @@ panvk_physical_device_init_kbase(struct panvk_physical_device *device,
     device->model = pan_get_model(device->kmod.dev->props.gpu_id,
                                   device->kmod.dev->props.gpu_variant);
  
@@ -643,7 +642,7 @@ index a6d85a4bc4f..a263ea5668c 100644
     unsigned arch = pan_arch(device->kmod.dev->props.gpu_id);
  
     /* Release builds drop vk_errorf text without a debug messenger; log the
-@@ -1445,9 +1218,9 @@ panvk_physical_device_init_kbase(struct panvk_physical_device *device,
+@@ -1445,9 +1219,9 @@ panvk_physical_device_init_kbase(struct panvk_physical_device *device,
         * 1 MiB chunks take the discontiguous small-page path, which only
         * needs order-0 pages; the GPU MMU provides the virtual contiguity.
         * Chunk counts are doubled to keep the same byte budget. */
@@ -656,7 +655,7 @@ index a6d85a4bc4f..a263ea5668c 100644
     }
  
     if (arch != 10)
-@@ -1852,29 +1625,12 @@ format_is_supported(struct panvk_physical_device *physical_device,
+@@ -1852,29 +1626,12 @@ format_is_supported(struct panvk_physical_device *physical_device,
  bool
  panvk_bc_emul_enabled(const struct panvk_physical_device *physical_device)
  {
@@ -692,7 +691,7 @@ index a6d85a4bc4f..a263ea5668c 100644
  }
  
  static VkFormatFeatureFlags2
-@@ -2134,7 +1890,7 @@ panvk_get_mod_format_caps(const struct panvk_physical_device *pdev,
+@@ -2134,7 +1891,7 @@ panvk_get_mod_format_caps(const struct panvk_physical_device *pdev,
     if (!mod_handler)
        return 0;
  
