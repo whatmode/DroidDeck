@@ -114,6 +114,26 @@ PYEOF
   log "import clear default: $PANVK_IMPORT_CLEAR"
   VARIANT="$VARIANT-importclear-$PANVK_IMPORT_CLEAR"
 fi
+# PANVK_DEBUG_DEFAULT=<flags> builds a driver that behaves as if PANVK_DEBUG=<flags> were set,
+# for testing a debug switch without setting variables on the device. A PANVK_DEBUG the user sets
+# still wins. Only for trees without 0005, which moved the switches into the compiled profile.
+if [ -n "${PANVK_DEBUG_DEFAULT:-}" ] && [ "${PANVK_BASELINE:-0}" != "1" ]; then
+  case $PANVK_DEBUG_DEFAULT in *[!a-z0-9_,]*) log "PANVK_DEBUG_DEFAULT: bad flags"; exit 1 ;; esac
+  INST="$MESA/src/panfrost/vulkan/panvk_instance.c"
+  grep -q 'os_get_option("PANVK_DEBUG")' "$INST" || { log "PANVK_DEBUG_DEFAULT: PANVK_DEBUG lookup missing in $INST"; exit 1; }
+  cat >> "$INST" <<CEOF
+
+/* droiddeck: default debug flags for this test build (tools/panvk/build.sh) */
+#include <stdlib.h>
+__attribute__((constructor)) static void
+droiddeck_panvk_debug_default(void)
+{
+   setenv("PANVK_DEBUG", "$PANVK_DEBUG_DEFAULT", 0);
+}
+CEOF
+  log "PANVK_DEBUG default: $PANVK_DEBUG_DEFAULT"
+  VARIANT="$VARIANT-debug-$(printf '%s' "$PANVK_DEBUG_DEFAULT" | tr ',' '+')"
+fi
 B=$WORK/build-icd
 rm -rf "$B"
 if ! meson setup "$B" "$MESA" \
