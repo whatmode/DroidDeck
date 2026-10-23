@@ -31,6 +31,10 @@ on:
         description: 'print why the device was lost and the pending kernel CSF notifications (1 = on)'
         required: false
         default: '1'
+      import_clear:
+        description: 'MEM_IMPORT flag bits to drop by default, hex (empty = none)'
+        required: false
+        default: '0x40400'
 
 permissions:
   contents: write
@@ -57,6 +61,7 @@ jobs:
       PANVK_PATCH_NUMBERS: ${{ inputs.patch_numbers }}
       PANVK_PROFILE_KNOB: ${{ inputs.profile_knob }}
       PANVK_REPORT_LOST: ${{ inputs.report_lost || '1' }}
+      PANVK_IMPORT_CLEAR: ${{ github.event_name == 'push' && '0x40400' || inputs.import_clear }}
     steps:
       - uses: actions/checkout@v4
 

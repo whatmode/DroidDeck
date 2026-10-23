@@ -96,6 +96,24 @@ if [ "${PANVK_REPORT_LOST:-0}" = "1" ] && [ "${PANVK_BASELINE:-0}" != "1" ]; the
   python3 "$HERE/report-lost.py" "$MESA" | tee -a "$OUT/summary.txt" || { log "REPORT-LOST FAILED"; exit 1; }
   VARIANT="$VARIANT-lostlog"
 fi
+# PANVK_IMPORT_CLEAR=<hex mask> compiles in a default for the vendor's PANVK_KBASE_IMPORT_CLEAR,
+# the MEM_IMPORT flag bits to drop, so every process using the driver (gamescope, Steam, games)
+# imports dma-bufs that way without an environment variable. The variable still overrides it.
+if [ -n "${PANVK_IMPORT_CLEAR:-}" ] && [ "${PANVK_BASELINE:-0}" != "1" ]; then
+  KMOD="$MESA/src/panfrost/lib/kmod/kbase_kmod.c"
+  ANCHOR='const char *clear_env = getenv("PANVK_KBASE_IMPORT_CLEAR");'
+  grep -qF "$ANCHOR" "$KMOD" || { log "IMPORT-CLEAR: anchor missing in $KMOD"; exit 1; }
+  python3 - "$KMOD" "$ANCHOR" "$PANVK_IMPORT_CLEAR" <<'PYEOF'
+import sys
+path, anchor, mask = sys.argv[1:]
+int(mask, 0)
+src = open(path).read()
+src = src.replace(anchor, anchor + '\n   if (!clear_env)\n      clear_env = "%s";' % mask, 1)
+open(path, "w").write(src)
+PYEOF
+  log "import clear default: $PANVK_IMPORT_CLEAR"
+  VARIANT="$VARIANT-importclear-$PANVK_IMPORT_CLEAR"
+fi
 B=$WORK/build-icd
 rm -rf "$B"
 if ! meson setup "$B" "$MESA" \
