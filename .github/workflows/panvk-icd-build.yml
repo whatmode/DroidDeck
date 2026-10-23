@@ -57,11 +57,11 @@ jobs:
       #
       # A dispatch input overrides it, and is read from the environment rather than
       # interpolated into the shell, so a ref string cannot inject commands.
-      ZENITHBLUE_REF: ${{ inputs.zenithblue_ref || '150c7cdd5b1f22f1994741a1a75577063d96a265' }}
-      PANVK_PATCH_NUMBERS: ${{ inputs.patch_numbers }}
+      ZENITHBLUE_REF: ${{ inputs.zenithblue_ref || (github.event_name == 'push' && '9be6dd63442aaefa95378b4dd8354a1b8c04c40d') || '150c7cdd5b1f22f1994741a1a75577063d96a265' }}
+      PANVK_PATCH_NUMBERS: ${{ inputs.patch_numbers || (github.event_name == 'push' && '0002 0003 0004') || '' }}
       PANVK_PROFILE_KNOB: ${{ inputs.profile_knob }}
       PANVK_REPORT_LOST: ${{ inputs.report_lost || '1' }}
-      PANVK_IMPORT_CLEAR: ${{ github.event_name == 'push' && '0x40400' || inputs.import_clear }}
+      PANVK_IMPORT_CLEAR: ${{ inputs.import_clear }}
     steps:
       - uses: actions/checkout@v4
 
