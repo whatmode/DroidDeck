@@ -339,6 +339,35 @@ def lift_environment_arguments(command, env):
     return env
 
 
+LOG_DIRS_KEPT = 30
+
+
+def with_log_dir(command, env):
+    """With PROTON_LOG=1, give every Proton start its own log folder. Proton deletes
+    steam-<appid>.log each time it starts, so a helper Proton starts right after a crash
+    wiped the log of the crash itself."""
+    if env.get("PROTON_LOG") != "1" or env.get("PROTON_LOG_DIR"):
+        return env
+    import time
+    base = Path(env.get("HOME") or "/root") / "droiddeck-proton-logs"
+    verb = command[1] if len(command) > 1 else "run"
+    name = "%s-%s-%d" % (time.strftime("%Y%m%d-%H%M%S"), re.sub(r"[^A-Za-z0-9]", "", verb)[:24] or "run", os.getpid())
+    folder = base / name
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "command.txt").write_text(" ".join(command) + "\n")
+        old = sorted((d for d in base.iterdir() if d.is_dir()), key=lambda d: d.name)
+        for stale in old[:-LOG_DIRS_KEPT]:
+            for f in stale.iterdir():
+                f.unlink()
+            stale.rmdir()
+    except OSError as error:
+        print("droiddeck-game-env: no per-launch log folder (%s)" % error, file=sys.stderr)
+        return env
+    env["PROTON_LOG_DIR"] = str(folder)
+    return env
+
+
 def with_media_debug(env):
     """With PROTON_LOG=1, also log what the video stack does: GStreamer warnings and Wine's
     Media Foundation / winedmo / GStreamer-glue warnings. A WINEDEBUG or GST_DEBUG the user set
@@ -392,6 +421,7 @@ def main():
     env = force_ssbs(command, env)
     env = with_ffmpeg(env)
     env = with_media_debug(env)
+    env = with_log_dir(command, env)
     env = with_mali_video(env)
     env = with_hide_exts(env)
     sync = load_sync()
