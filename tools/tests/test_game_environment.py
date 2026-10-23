@@ -99,6 +99,15 @@ class GameEnvironmentTest(unittest.TestCase):
         self.assertEqual(MODULE["apply_config"](env, config), {"KEEP": "inherited", "CUSTOM": "shared", "EMPTY": ""})
         self.assertEqual(env["REMOVE"], "inherited")
 
+    def test_a_games_own_variables_apply_only_to_that_game(self):
+        config = {"version": 1, "shared": {"A": "shared"},
+                  "games": {"1118240": {"A": "game", "PROTON_USE_WINED3D": "1"}}}
+        import contextlib, io
+        with contextlib.redirect_stderr(io.StringIO()):
+            lake = MODULE["apply_config"]({}, config, {}, "1118240")
+        self.assertEqual(lake, {"A": "game", "PROTON_USE_WINED3D": "1"})
+        self.assertEqual(MODULE["apply_config"]({}, config, {}, "413150"), {"A": "shared"})
+
     def test_launch_options_written_as_arguments_reach_the_environment(self):
         lift = MODULE["lift_environment_arguments"]
         # Steam appends launch options after the executable: proton, verb, exe, then the options.

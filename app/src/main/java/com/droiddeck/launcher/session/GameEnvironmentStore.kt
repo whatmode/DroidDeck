@@ -57,6 +57,10 @@ object GameEnvironmentStore {
             TextureFiltering.autoLodBias(SessionState.upscaleRatio),
         )
         if (dxvk.isNotEmpty()) json.put(DXVK_CONFIG, dxvk)
+        val games = GameLaunchEnv.all(context)
+        if (games.isNotEmpty()) json.put("games", JSONObject().apply {
+            games.forEach { (id, entries) -> put(id, JSONObject().apply { entries.forEach { (k, v) -> put(k, v) } }) }
+        })
         write(File(LinuxRuntime.rootDir(context), GUEST_FILE), json.toString())
     }
 
