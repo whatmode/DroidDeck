@@ -113,6 +113,51 @@ third), so check for them before trusting any result.
 - `d3d11.zeroWorkgroupMemory` is a no-op in DXVK 3.1.1 (see above), so its presence in a run's
   `DXVK_CONFIG` is a red herring, not a variable under test.
 
+## The 2026-10-23-06 D1 run: D1 applied, and the reboot is a GPU fault
+
+**Getting the bundle out of fex.net.** The share page is a SPA and the `fs*.fex.net/download/...`
+URL returns HTML on its own. Fetch the anonymous token and send it as the `token` **cookie** - an
+`Authorization` header returns 410:
+
+```
+TOK=$(curl -s https://api.fex.net/api/v1/config/anonymous | jq -r .anonymous.anonym_token)
+URL=$(curl -s https://api.fex.net/api/v1/file/share/<link> | jq -r '.tree.children[0].download_url')
+curl -L -H "Cookie: token=$TOK" "$URL" -o session.zip
+```
+
+- **D1 applied this time.** `DISABLE_GAMESCOPE_WSI=1` was written in the `%command%` form, so it
+  reached the game's environment (`console_log.txt`: `DISABLE_GAMESCOPE_WSI=1 ... waitforexitandrun
+  ... Lake.exe`, the knob before the executable), and the game's Proton log has **zero**
+  `[Gamescope WSI]` lines (2026-10-23-05 had eight). The 15 `[Gamescope WSI]` lines in
+  `session.log` belong to `steamsysinfo`, `explorer.exe` and `d3ddriverquery64.exe`, which run
+  before the game and do not get the knob. D1 renders.
+- **But the run is two-variable.** `device.txt` and `session.log` both name the selected driver as
+  `DroidDeck-panvk-glibc-knob-bc_mode-PANVK_BC_MODE_COMPUTE_zb150c7` - the T1 knob build, not the
+  baseline. This is D1 + T1 at once, so the render cannot be credited to the WSI layer alone.
+  Re-run D1 on the baseline, or read T1's own row, before concluding D-a.
+- **The reboot is a GPU fault, not memory or thermal.** The Proton log ends with
+  `MESA: error: kbase: CSF group 0 fatal error: status 0x00c00488 (exception 0x88)`, then
+  `Presenter: vkWaitForPresentKHR failed: VK_ERROR_DEVICE_LOST` and five
+  `DxvkSubmissionQueue: Command submission failed: VK_ERROR_DEVICE_LOST`; the app logs
+  `DroidDeckWayland: [error] GPU device lost (VK_ERROR_DEVICE_LOST in present): the compositor has
+  stopped presenting`. `crash.log` is empty (nothing crashed in userspace) and `device.txt` shows
+  thermal `NONE` with 2.8 GB free, so the device went down on the GPU fault.
+- **Decode the exception with panthor's tables** (`drivers/gpu/drm/panthor/panthor_device.h`):
+  `CS_EXCEPTION_TYPE(x) = x & 0xff`, so `0x00c00488` is type `0x88` =
+  `DRM_PANTHOR_EXCEPTION_GPU_SHAREABILITY_FAULT` (data `0x00c004`). A *shareability* fault is a
+  memory-attribute fault - the GPU touched a mapping with a shareability it does not permit - so
+  this points at the coherency/attribute class the T5/T6/T7 rows test, not the BC/format class.
+- **The zip carries no kernel log.** `crash.log` is the Android crash buffer only, and it is empty.
+  Ask for `dmesg` (or a `mali_kbase` trace) alongside a fault; the faulting job and address live
+  there, not in the app's files.
+- **A display-mode flap storm runs alongside it.** `app.log` holds 2242 `perf: display` lines in
+  ~3 minutes, alternating `60 → 120 Hz (mode 1)` and `120 → 120 Hz (mode 255)` about every 40 ms.
+  `PerfMode.apply` writes `window.attributes.preferredDisplayModeId`, which fires `onDisplayChanged`
+  → `followPanelRefresh` → `applyOutputPacing` → `PerfMode.apply` again; its only guard is
+  `preferredDisplayModeId != best.modeId`, and that never converges because the value read back
+  alternates between two mode ids that both report 120 Hz. Treat any pacing-sensitive reading from
+  this run with care, and fix the loop before the next one.
+
 ## The white frame is not in `mali-gl/patches` (baseline A/B, 2026-10-22)
 
 Two sessions, same env, `PANVK_DEBUG=no_crc` in `shared` (so it applied):

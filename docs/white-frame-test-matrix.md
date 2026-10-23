@@ -180,6 +180,20 @@ Before spending a launch, confirm the knob is really in the game process's envir
 and modifier it negotiates.
 **Still white →** D-a is out. Go to D2.
 
+**2026-10-23-06 ran it correctly and rendered.** The knob was in the `%command%` form, so it
+reached the game's environment, and the game's Proton log has zero `[Gamescope WSI]` lines (the 15
+in `session.log` are `steamsysinfo` / `explorer.exe` / `d3ddriverquery64.exe`, which run before the
+game). **But that run also selected the T1 knob driver**
+(`DroidDeck-panvk-glibc-knob-bc_mode-PANVK_BC_MODE_COMPUTE_zb150c7`), so it is D1 + T1 at once and
+cannot credit the render to the WSI layer alone. Re-run D1 on the baseline, or read T1's own row,
+before closing D-a.
+
+That run also ended in a **GPU fault**, not a clean exit: `CSF group 0 fatal error: status
+0x00c00488 (exception 0x88)` = `DRM_PANTHOR_EXCEPTION_GPU_SHAREABILITY_FAULT`, then
+`VK_ERROR_DEVICE_LOST` through present and submit, and the device went down. A shareability fault
+is a memory-attribute fault, which is the class T5/T6/T7 cover - so those rows are now the first
+T-tests to read, ahead of the BC/format rows.
+
 ### D2 — is it gamescope's composite, or the guest compositor at all?
 
 If D1 is white, the remaining difference is who composites. Run **steam mode** and reach the game
@@ -303,6 +317,22 @@ knob is not itself changing anything.
 |---|---|---|
 | renders | the fragment BC shadow or AFRC is at fault | read `csf-v11/150`/`151`; T3 splits storage format |
 | white | BC decode is not the cause | T4, then T5/T6, then T7 as an env test |
+
+T1 has now had one launch, and it rendered - but that launch also carried D1, and it ended in a
+`GPU_SHAREABILITY_FAULT` (`0x00c00488`). So T1 is *implicated, not confirmed*, and the fault makes
+the coherency rows the better next probe:
+
+| test | `profile_knob` | why it is next |
+|---|---|---|
+| T5 | `cached_before_coherent=true` | a shareability fault is a memory-attribute fault; this is the attribute class |
+| T6 | `wb_mmap=false` | same class, the write-back mapping arm |
+| T7 | `PANVK_DEBUG=implicit_others_inv` | same class, needs no rebuild |
+| T4 | `wsi_afbc=false` | presentation-side; only if the coherency rows stay white |
+| T1 | `bc_mode=PANVK_BC_MODE_COMPUTE` | re-run on the baseline (no D1) to separate it from the WSI layer |
+| T8 | *(empty)* | control |
+
+Ask the tester for `dmesg` with any of these: the fault's job and address are in the kernel log,
+and the session zip does not carry one.
 
 ## Per-test checklist
 
