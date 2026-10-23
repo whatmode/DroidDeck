@@ -3,7 +3,6 @@ package com.droiddeck.launcher.session
 import android.content.Context
 import com.droiddeck.launcher.frontend.AddedGames
 import com.droiddeck.launcher.frontend.Library
-import com.droiddeck.launcher.stores.epic.EpicClient
 
 object NoSteamLaunch {
     const val PROTON_RUN = "/usr/local/bin/droiddeck-proton-run"
@@ -12,7 +11,6 @@ object NoSteamLaunch {
     class Command(val program: String, val args: List<String>, val name: String)
 
     fun scope(game: Library.SteamGame): String? = when {
-        game.library == Library.EPIC_LAUNCHER -> EpicClient.shortcutAppId.toString()
         game.library == Library.ADDED || game.appId > 0 -> game.profileKey
         else -> null
     }?.takeIf { it.isNotEmpty() && Regex("[1-9][0-9]*").matches(it) }
@@ -24,7 +22,6 @@ object NoSteamLaunch {
         SessionPrefs.noSteam(context, (appId and 0xFFFFFFFFL).toString())
 
     fun command(game: Library.SteamGame, added: AddedGames.Game?): Command? = when {
-        game.library == Library.EPIC_LAUNCHER -> Command(EPIC, listOf("run"), game.name)
         game.library == Library.ADDED -> added?.let { a -> a.steamAppId?.let { Command(PROTON_RUN, listOf("--app", it.toString()), a.name) } ?: addedCommand(a) }
         game.appId > 0 -> Command(PROTON_RUN, listOf("--app", game.appId.toString()), game.name)
         else -> null
