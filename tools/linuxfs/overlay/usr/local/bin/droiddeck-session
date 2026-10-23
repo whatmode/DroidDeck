@@ -108,6 +108,16 @@ if [ -n "${BL_VK_DRIVER:-}" ]; then
     export VK_DRIVER_FILES="$BL_VK_DRIVER"
     export VK_ICD_FILENAMES="$BL_VK_DRIVER"
     echo "== vulkan driver: imported $bl_icd_lib (via $BL_VK_DRIVER)"
+    # A PanVK test build named -importclear-<mask> imports dma-bufs without those MEM_IMPORT
+    # flags. The mali-gl GL stack (Xwayland, Steam's window) reads the same variable, so set it
+    # for the whole session: otherwise only the Vulkan side imports buffers the new way.
+    case $bl_icd_lib in
+      *-importclear-0x[0-9a-fA-F]*)
+        bl_mask=${bl_icd_lib##*-importclear-}; bl_mask=${bl_mask%%[!0-9a-fA-Fx]*}
+        export PANVK_KBASE_IMPORT_CLEAR=${PANVK_KBASE_IMPORT_CLEAR:-$bl_mask}
+        echo "== vulkan driver: PANVK_KBASE_IMPORT_CLEAR=$PANVK_KBASE_IMPORT_CLEAR for the whole session"
+        unset bl_mask ;;
+    esac
   else
     echo "== vulkan driver: IGNORING $BL_VK_DRIVER (manifest or ${bl_icd_lib:-library} unreadable); using the runtime's own"
   fi
