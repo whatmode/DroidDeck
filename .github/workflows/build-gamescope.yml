@@ -36,10 +36,11 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          gh release create "${{ inputs.tag }}" --latest=false --prerelease=false --title "${{ inputs.tag }}" --notes "gamescope 3.16.29 with tools/gamescope/patches; staged by the apk over /usr/local/bin/gamescope. sha256 $(cut -d' ' -f1 gamescope.tzst.sha256)" gamescope.tzst gamescope.tzst.sha256 || gh release upload "${{ inputs.tag }}" gamescope.tzst gamescope.tzst.sha256 --clobber
-          gh release edit "${{ inputs.tag }}" --latest=false --prerelease=false
+          gh release create "$TAG" --latest=false --prerelease=false --title "$TAG" --notes "gamescope 3.16.29 with tools/gamescope/patches; staged by the apk over /usr/local/bin/gamescope. sha256 $(cut -d' ' -f1 gamescope.tzst.sha256)" gamescope.tzst gamescope.tzst.sha256 || gh release upload "$TAG" gamescope.tzst gamescope.tzst.sha256 --clobber
+          gh release edit "$TAG" --latest=false --prerelease=false
       - name: Publish on a fork
         # A fork has no workflow_dispatch access from the app's tooling; publish each push under a
         # tag of its own so tools/gamescope/release.env can point at it.
