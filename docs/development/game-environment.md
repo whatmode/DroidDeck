@@ -25,6 +25,13 @@ The order is inherited process environment, then the selected FEX preset and
 built-in settings, then the shared edits. Values are literal strings, with no
 shell expansion; quotes are only needed when the consuming program expects them.
 
+For a one-off diagnostic, Steam's own per-app launch options work and are not a
+per-game profile: `NAME=value %command%` puts the words in the game's
+environment. The `%command%` matters, because Steam appends launch options after
+the executable, so bare `NAME=value` arrives as an argument that nothing reads.
+`droiddeck-game-env` also moves bare `NAME=value` words into the environment and
+says so on stderr, but prefer the `%command%` form.
+
 ## Defaults
 
 The initial configuration enables Mesa shader caching with

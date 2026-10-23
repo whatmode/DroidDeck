@@ -12,8 +12,27 @@
 > build, one imported driver, one launch. The reading rules and the checklist still apply.
 
 Every test below is **one launch, one share**. The zip holds one session only, so send one zip per
-test. Each test lists the complete per-game environment block; do not carry values over between
+test. Each test lists the complete environment block it needs; do not carry values over between
 tests, because a leftover key silently changes the run.
+
+## How a tester sets a knob (there is no environment editor)
+
+The app has **no environment editor and no per-game profiles**: a game has only its Proton build and
+its driver bundle. So every env var below goes in **Lake's own Steam launch options**, in Steam's
+documented form:
+
+```
+NAME=value %command%
+```
+
+`%command%` is what makes the words an environment variable. Written bare, they land after the
+executable and become arguments that nothing reads -- which is exactly how the 2026-10-23-05 D1 run
+was invalidated (see D1 below). `droiddeck-game-env` now also lifts bare `NAME=value` words into the
+environment and prints "moved into the environment: ...", so a bare word is no longer silently
+dropped, but write the `%command%` form anyway.
+
+The tests that are **driver builds** (`profile_knob`) need no env var at all: dispatch the build,
+import the zip, launch.
 
 ## Why these and not the extension list
 
@@ -57,7 +76,7 @@ that keeps the feature and still moves the path (T1).
 ## Extension bisection (E-tests)
 
 These need **no rebuild**. `DROIDDECK_HIDE_EXTS` names a comma-separated list; the layer hides those
-device extensions from DXVK. Set it in the per-game environment and launch once, exactly like the
+device extensions from DXVK. Put it in Lake's launch options and launch once, exactly like the
 T-tests. `droiddeck-game-env` derives `DROIDDECK_HIDE_EXTS_ENABLE=1` from it, so only one variable
 is set. The layer prints what it hid to stderr, which lands in `session.log`.
 
@@ -138,24 +157,24 @@ Two sub-hypotheses, both Mali-specific:
 
 One launch, **no rebuild and no layer**. The FROG layer's manifest gates it on
 `disable_environment: {"DISABLE_GAMESCOPE_WSI": "1"}`, so the knob is read from the environment
-**only**:
+**only**. There is no environment editor in the app, so it goes in Lake's Steam launch options in
+the `%command%` form:
 
 ```
-DISABLE_GAMESCOPE_WSI=1
+DISABLE_GAMESCOPE_WSI=1 %command%
 ```
 
-Put it in the game's environment (the per-game/shared environment the app publishes), not in
-Steam's launch options. **2026-10-23-05 set it in the launch options and it did not work**: Steam
-appends launch options after the executable, so it arrived as the argv token
+**2026-10-23-05 typed it bare, without `%command%`, and it did not work**: Steam appends launch
+options after the executable, so it arrived as the argv token
 `Lake.exe' DISABLE_GAMESCOPE_WSI=1` and the FROG layer never saw it -- the Proton log still has all
 eight `[Gamescope WSI]` lines, including `Creating swapchain for xid: ... format:
 VK_FORMAT_R8G8B8A8_UNORM ... flip: true`. So that launch **does not refute D-a; the test never
-ran.** `droiddeck-game-env` now lifts `NAME=value` launch options into the environment and logs
+ran.** `droiddeck-game-env` now lifts bare `NAME=value` launch options into the environment and logs
 "moved into the environment: ...", which is the line to look for.
 
 Before spending a launch, confirm the knob is really in the game process's environment
 (`/proc/<pid>/environ`, or the session log's process dump). Re-run D1 with the knob in the
-environment:
+`%command%` form:
 
 **Renders →** D-a. The WSI layer's swapchain is the bug, and the next step is to log the format
 and modifier it negotiates.
@@ -180,7 +199,7 @@ already injects), and each is one launch. Run them **first** — they are the ch
 the brief's theory 1, and the first two are things zink's GL path would not do, which is exactly the
 "something DXVK uses that zink doesn't" shape of the bug.
 
-Set the value in the per-game environment for Lake:
+Set the value in Lake's launch options:
 
 | test | `DXVK_CONFIG` | reading |
 |---|---|---|
@@ -202,7 +221,7 @@ nothing.
 Each test is a **driver build**, not an env var. Dispatch `panvk-icd-build.yml` with the
 `profile_knob` input below, import the resulting `...-knob-...` zip as the Linux Vulkan driver, and
 launch once. The knob is folded into the zip name and `meta.json`, so the driver row names the test.
-Leave the game environment at the frozen baseline above: no `PANVK_DEBUG`, no `PANVK_BC_AFRC`.
+Leave the environment at the frozen baseline above: no `PANVK_DEBUG`, no `PANVK_BC_AFRC`.
 
 ### T1 — is it the fragment-pass BC shadow?
 
@@ -291,8 +310,8 @@ knob is not itself changing anything.
    baseline for T7, which is still an env var).
 2. Import the `...-knob-...` zip as the Linux Vulkan driver and select it. Check the driver row's
    name: it carries the knob, so it names the test.
-3. Confirm the game environment holds no `PANVK_DEBUG` / `PANVK_BC_AFRC` key under `games.1118240`
-   or `shared` (except for T7, whose value is `implicit_others_inv`).
+3. Confirm Lake's launch options hold no `PANVK_DEBUG` / `PANVK_BC_AFRC` (except for T7, whose
+   value is `implicit_others_inv`).
 4. Launch once. Let it reach the menu.
 5. Share the session, one zip per test.
 6. Say which test it was.
@@ -300,8 +319,10 @@ knob is not itself changing anything.
 ## Rules that keep a run valid
 
 - One launch per share. A zip holds one session; a "two-scenario" zip cannot exist.
-- Never leave a `null` per-game override for a shared key. A null deletes the shared value and the
-  run silently loses its whole environment.
+- Write env knobs in the `NAME=value %command%` form. Bare words become arguments and do nothing,
+  and a run that did nothing looks exactly like a run that tested something (D1, 2026-10-23-05).
+- Never leave a knob from the previous test in Lake's launch options. There is one shared
+  environment, so a leftover key silently changes the next run too.
 - If the game dies at startup instead of rendering, that is a **launch failure, not a result**. Send
   the DXVK line and it will be read as one.
 
@@ -322,9 +343,10 @@ mismatch clips mid-tones to white while dark features stay dark, which is the ex
 D-tests above exist because of that error, and they are now the cheapest test in the file.
 
 I then read the 2026-10-23-05 log as "D1 failed, so the WSI layer is refuted". That was wrong too.
-The knob went into Steam's launch options, which Steam appends after the executable, so it reached
-the game as an argument and the FROG layer -- which reads `DISABLE_GAMESCOPE_WSI` from the
-environment, via its manifest's `disable_environment` gate -- never saw it. The Proton log still
-contains the layer's full `[Gamescope WSI]` startup, so the layer was active for that whole run.
-D-a is untested, not refuted. `droiddeck-game-env` now lifts `NAME=value` launch options into the
-environment so this cannot silently happen again, and it prints what it moved.
+The knob went into Steam's launch options **without `%command%`**, which Steam appends after the
+executable, so it reached the game as an argument and the FROG layer -- which reads
+`DISABLE_GAMESCOPE_WSI` from the environment, via its manifest's `disable_environment` gate -- never
+saw it. The Proton log still contains the layer's full `[Gamescope WSI]` startup, so the layer was
+active for that whole run. D-a is untested, not refuted. `droiddeck-game-env` now lifts bare
+`NAME=value` launch options into the environment so this cannot silently happen again, and it prints
+what it moved.

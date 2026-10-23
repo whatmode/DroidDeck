@@ -56,11 +56,21 @@ buffer. Both modes present into the app's native compositor, so the compositor i
 Do not dismiss the presentation path because the vignette proves the game's post-processing ran. A
 format or transfer-function mismatch clips mid-tones to white while dark features stay dark, which
 is exactly "white with a vignette". The cheapest test is `DISABLE_GAMESCOPE_WSI=1`, which the FROG
-layer reads from its manifest's `disable_environment` gate -- **as an environment variable**. It
-must actually be in the game process's environment; typing it into Steam's launch options does
-**not** work, because Steam appends those after the executable and they arrive as arguments
-(2026-10-23-05: passed as an argument, layer stayed active, the run proves nothing). Confirm it in
-`/proc/<pid>/environ`, or put it in the environment the game inherits.
+layer reads from its manifest's `disable_environment` gate -- **as an environment variable**.
+
+The app has no environment editor any more (see below), so the route is Lake's own Steam launch
+options, in Steam's documented `NAME=value %command%` form:
+
+```
+DISABLE_GAMESCOPE_WSI=1 %command%
+```
+
+The `%command%` is what makes it an environment variable. Without it, Steam appends the words after
+the executable and they arrive as arguments, where nothing reads them: on 2026-10-23-05 the knob was
+typed bare, the layer stayed active for the whole run, and the result was read as "D1 refuted" when
+the test had not run at all. `droiddeck-game-env` now lifts bare `NAME=value` words into the
+environment too and logs what it moved, so check for that line, and confirm the knob in
+`/proc/<pid>/environ` before trusting a launch either way.
 
 ## The shipped RC4 ICD is not reproducible from `panvk-kbase-v0.1.0-rc4`
 
@@ -91,12 +101,13 @@ third), so check for them before trusting any result.
   session dir covers only that launch, whatever the tester says it contains. `device.txt` names the
   selected driver from `meta.json` ("Linux driver") and `session.log` names the imported
   `linux_vulkan_drivers/<id>`; read both to tell the patched ICD from the baseline one.
-- **A knob set in Steam's launch options is an argument, not an environment variable.** Steam
-  appends a game's launch options after its executable, so `NAME=value` typed there arrives as
-  argv and nothing reads it -- not Proton, not DXVK, not gamescope, not a Vulkan layer. On
-  2026-10-23-05 `DISABLE_GAMESCOPE_WSI=1` was passed that way, the FROG layer stayed active (its
+- **A knob set in Steam's launch options is an argument, not an environment variable -- unless it
+  is written in Steam's `%command%` form.** Steam appends launch options after the executable, so
+  bare `NAME=value` words arrive as argv and nothing reads them: not Proton, not DXVK, not
+  gamescope, not a Vulkan layer. Only `NAME=value %command%` puts them in the environment. On
+  2026-10-23-05 `DISABLE_GAMESCOPE_WSI=1` was passed bare, the FROG layer stayed active (its
   `[Gamescope WSI]` lines are in the Proton log), and the "D1 refuted" reading was wrong: the test
-  never ran. `droiddeck-game-env` now moves such tokens into the environment and logs
+  never ran. `droiddeck-game-env` now moves bare tokens into the environment and logs
   "moved into the environment: ...", so check for that line; for an older zip, grep the log for
   the knob's own evidence (the layer's lines, the driver's) rather than for the string itself.
 - `d3d11.zeroWorkgroupMemory` is a no-op in DXVK 3.1.1 (see above), so its presence in a run's
@@ -242,6 +253,11 @@ exactly two user-selectable things: its Proton build and its driver bundle.
 - Per-game FEX preset and sync backend are gone with the profiles. Start-without-Steam moved from
   `DROIDDECK_NO_STEAM` in the environment to the `noSteamGames` set in the `session` prefs; it is
   still a per-game toggle (the game settings card), but it no longer rides the environment file.
+- Diagnostics use Steam's own per-app launch options in the `NAME=value %command%` form, which
+  `droiddeck-proton-run`'s `split_options()` and Steam itself both define as "before `%command%` is
+  the environment, after it is the program's arguments". That is Steam's UI, not a DroidDeck
+  environment editor, so it does not reintroduce the path this section removes: nothing in the app
+  writes a per-game key to `game-environment.json`.
 - Deleted with the feature: `GameProfileManager`, `GameProfileFollowState`,
   `GameProfileRefreshState`, `GameProfileInventoryCache`, `SelectedGameProfile`,
   `LatestRequestCoordinator`, `TextureFilteringPrefs`, `ComponentsManager.gameComponents`/
