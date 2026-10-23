@@ -495,6 +495,15 @@ jobs:
           mkdir -p app/build
           ./gradlew testReleaseUnitTest --console=plain --info --stacktrace -Drobolectric.logging=stderr -PndkVersion="$NDK_VERSION" 2>&1 | tee app/build/unit-tests.log
 
+      - name: Report failed unit tests as annotations
+        if: failure() && steps.unit-tests.outcome == 'failure'
+        run: |
+          [ -f app/build/unit-tests.log ] || exit 0
+          enc() { sed 's/%/%25/g' | cut -c1-300 | awk '{printf "%s%%0A", $0}'; }
+          echo "::error title=failed tests::$(grep -E ' FAILED$|^e: ' app/build/unit-tests.log | head -25 | enc)"
+          echo "::error title=first failure::$(grep -A25 -m1 -E ' FAILED$' app/build/unit-tests.log | enc)"
+          echo "::error title=compile::$(grep -E '^e: |What went wrong' -A3 app/build/unit-tests.log | head -30 | enc)"
+
       - name: Upload unit test diagnostics
         id: unit-test-diagnostics
         if: always() && steps.unit-tests.outcome != 'skipped'
