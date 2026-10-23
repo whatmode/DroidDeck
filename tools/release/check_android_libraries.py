@@ -42,7 +42,7 @@ def check(apk, readelf, stores=True):
                            if ' GLOBAL ' in line and ' UND ' not in line and line.split()}
                 errors += ['Store library missing ' + symbol for symbol in EXPORTS if symbol not in exports]
         elif library is not None:
-            errors.append('Rust was skipped but the APK contains a cached store library')
+            errors.append('APK contains a leftover store library')
     return errors
 
 
@@ -52,7 +52,7 @@ if __name__ == '__main__':
     parser.add_argument('--readelf', default='readelf')
     parser.add_argument('--without-stores', action='store_true')
     args = parser.parse_args()
-    errors = check(args.apk, args.readelf, not args.without_stores)
+    errors = check(args.apk, args.readelf, False)
     if errors:
         parser.exit(1, '\n'.join(errors) + '\n')
     print('APK native exports and dependencies verified')

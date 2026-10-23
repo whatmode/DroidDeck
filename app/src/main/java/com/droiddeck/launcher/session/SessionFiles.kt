@@ -66,9 +66,6 @@ object SessionFiles {
             "usr/local/bin/droiddeck-desktop-bookmarks" to "usr/local/bin/droiddeck-desktop-bookmarks",
             "usr/local/bin/droiddeck-steam-shim" to "usr/local/bin/droiddeck-steam-shim",
             "usr/local/bin/droiddeck-steam-shortcuts" to "usr/local/bin/droiddeck-steam-shortcuts",
-            "usr/local/bin/droiddeck-store-launch" to "usr/local/bin/droiddeck-store-launch",
-            "usr/local/bin/droiddeck-epic" to "usr/local/bin/droiddeck-epic",
-            "usr/local/bin/droiddeck-epic-steam" to "usr/local/bin/droiddeck-epic-steam",
             "usr/local/bin/droiddeck-open-url" to "usr/local/bin/droiddeck-open-url",
             "usr/local/bin/droiddeck-steam-games" to "usr/local/bin/droiddeck-steam-games",
             "usr/local/bin/droiddeck-pad-defaults" to "usr/local/bin/droiddeck-pad-defaults",
@@ -142,15 +139,11 @@ object SessionFiles {
             "usr/local/bin/gamescope" to "usr/local/bin/gamescope",
             // mali-gl stack for Mali (kbase) phones; droiddeck-session unpacks it on Mali only.
             "opt/mali-gl.tgz" to "opt/mali-gl.tgz",
-            // EA client (Maxima) for the EA store tab.
-            "usr/local/lib/droiddeck-ea/droiddeck-ea" to "usr/local/lib/droiddeck-ea/droiddeck-ea",
-            "usr/local/lib/droiddeck-ea/maxima-bootstrap" to "usr/local/lib/droiddeck-ea/maxima-bootstrap",
-            "usr/local/lib/droiddeck-ea/droiddeck-ea-wine" to "usr/local/lib/droiddeck-ea/droiddeck-ea-wine",
         ) + listOf("libavutil.so.56", "libavcodec.so.58", "libavformat.so.58", "libavfilter.so.7", "libswscale.so.5", "libswresample.so.3", "LICENSE", "VERSION")
             .map { "usr/local/lib/droiddeck-ffmpeg/$it" to "usr/local/lib/droiddeck-ffmpeg/$it" }.toTypedArray() + arrayOf(
             "usr/local/lib/droiddeck/uruntime" to "usr/local/lib/droiddeck/uruntime",
             "usr/local/share/licenses/uruntime/LICENSE" to "usr/local/share/licenses/uruntime/LICENSE",
-        ) + mangoapp + listOf("comet", "GalaxyCommunication.exe", "update-permissions.exe", "LICENSE", "version").map { "usr/local/lib/droiddeck-comet/$it" to "usr/local/lib/droiddeck-comet/$it" } + msitools.map { it to it } + vr + fexPreloads).filter { (asset, _) ->
+        ) + mangoapp + msitools.map { it to it } + vr + fexPreloads).filter { (asset, _) ->
             val dir = asset.substringBeforeLast('/')
             runCatching { context.assets.list("linuxfs/$dir")?.contains(asset.substringAfterLast('/')) == true }.getOrDefault(false)
         }

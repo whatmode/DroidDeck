@@ -37,7 +37,6 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.lerp
-import com.droiddeck.launcher.stores.Store
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -90,7 +89,6 @@ internal object StoresMotion {
     fun drop() {
         step?.let { step = null; it.onDismiss() }
         stepOpen = false
-        signIn = null
     }
 
     fun fold() { stepOpen = false }
@@ -99,14 +97,6 @@ internal object StoresMotion {
         if (step === a) step = null
         a.onDismiss()
     }
-
-    var signIn by mutableStateOf<SignInFlood?>(null)
-
-    val pulses = androidx.compose.runtime.mutableStateMapOf<Store, Int>()
-
-    fun pulse(store: Store) { pulses[store] = (pulses[store] ?: 0) + 1 }
-
-    val dots = HashMap<Store, Rect>()
 
     var heroAt by mutableStateOf<Rect?>(null)
 
@@ -136,11 +126,6 @@ internal class StepAsk(
     val handle: @Composable () -> Unit,
     val content: @Composable StepOutScope.() -> Unit,
 )
-
-internal class SignInFlood(val store: Store, val from: Rect, val start: Color, val color: Color) {
-    var away by mutableStateOf(false)
-    var drainTo by mutableStateOf<Rect?>(null)
-}
 
 @Composable
 internal fun FlightLayer(origin: Offset) {

@@ -44,12 +44,6 @@ import com.droiddeck.launcher.files.InAppFilePicker
 import com.droiddeck.launcher.frontend.Library
 import com.droiddeck.launcher.agent.AgentGuest
 import com.droiddeck.launcher.frontend.LibraryCache
-import com.droiddeck.launcher.stores.Store
-import com.droiddeck.launcher.stores.StoreAchievements
-import com.droiddeck.launcher.stores.StoreGameSidecar
-import com.droiddeck.launcher.stores.StoreLaunchRequests
-import com.droiddeck.launcher.stores.epic.EpicClient
-import com.droiddeck.launcher.ui.SessionAchievements
 import com.droiddeck.launcher.gpu.Cardboard
 import com.droiddeck.launcher.gpu.FrameGen
 import com.droiddeck.launcher.gpu.HeadTracker
@@ -601,7 +595,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
                         kotlinx.coroutines.delay(3000)
                     }
                 }
-                LaunchedEffect(drawerOpen, achievementsOpen, AgentGuest.focusRevision, StoreAchievements.revision) {
+                LaunchedEffect(drawerOpen, achievementsOpen, AgentGuest.focusRevision) {
                     if (!drawerOpen && !achievementsOpen) return@LaunchedEffect
                     val found = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                         runCatching { resolveAchievementsInFront() }
@@ -800,10 +794,6 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
                         sessionOverlay.requestFocus()
                     }
                 }
-                achievementsInFront?.takeIf { achievementsOpen }?.let { inFront ->
-                    SessionAchievements(inFront.game, inFront.title, onClose = ::closeAchievements)
-                }
-                com.droiddeck.launcher.ui.AchievementNotificationOverlay()
                 if (SessionState.suspended) SessionPausedOverlay(
                     title = pausedTitle(),
                     onResume = { SessionService.resume(this@SessionActivity) },
@@ -846,24 +836,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     private fun closeAchievements() { achievementsOpen = false }
 
-    private fun resolveAchievementsInFront(): AchievementsInFront? {
-        if (!SessionState.running || SessionState.mode != SessionService.MODE_STEAM) return null
-        val snapshot = AgentGuest.focus(this) ?: return null
-        val games = LibraryCache.load(this)
-        val byKey = games.mapNotNull { g -> g.profileKey.toLongOrNull()?.let { it to g } }.toMap()
-        val windows = snapshot.optJSONArray("focusableApps")?.let { list -> List(list.length()) { list.optLong(it) } }.orEmpty()
-        val focusedId = snapshot.optLong("focusedApp").takeUnless { snapshot.isNull("focusedApp") }
-        val appId = com.droiddeck.launcher.session.SessionAchievementGame.activeAppId(focusedId, windows, byKey.keys) ?: return null
-        val focused = byKey[appId] ?: return null
-        val store = Store.byId(focused.source) ?: return null
-        val id = focused.storeId ?: return null
-        val source = StoreAchievements.forSource(store.id) ?: return null
-        val sidecar = StoreGameSidecar.find(this, store, id) ?: return null
-        val game = StoreAchievements.Game.of(sidecar)
-        val list = source.cached(this, game) ?: (source.fetch(this, game) as? StoreAchievements.Result.Found)?.list ?: return null
-        if (list.isEmpty()) return null
-        return AchievementsInFront(game, sidecar.title, list.count { it.unlocked } to list.size)
-    }
+    private fun resolveAchievementsInFront(): AchievementsInFront? = null
 
     private fun togglePcKeyboard() {
         drawerOpen = false
@@ -1768,7 +1741,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
         val now = android.os.SystemClock.uptimeMillis()
         if (now - padMouseCheckedAt < PAD_MOUSE_CHECK_MS) return padMouseOn
         padMouseCheckedAt = now
-        val on = !pointerLocked && EpicClient.launcherFocused(this) && !EpicClient.playing(this)
+        val on = false
         if (padMouseOn && !on) padMouse.reset()
         if (!padMouseOn && on) padBridge?.releaseAll()
         padMouseOn = on
@@ -2896,4 +2869,4 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 }
 
-private class AchievementsInFront(val game: StoreAchievements.Game, val title: String, val progress: Pair<Int, Int>?)
+private class AchievementsInFront(val title: String, val progress: Pair<Int, Int>?)

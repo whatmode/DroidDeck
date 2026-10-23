@@ -390,11 +390,6 @@ internal fun SessionDrawer(open: Boolean, requestedPage: SessionDrawerPage, cont
                     }
                     StopSessionButton(modifier = focus.track(page, "stop").onGloballyPositioned { stopCoords = it }) { host.open = null; confirmStop = true }
                 }
-                a.onAchievements?.let { show ->
-                    DrawerAchievementsRow(a.achievementsProgress, Modifier.padding(top = if (short) 6.dp else 10.dp).then(focus.track(page, "achievements"))) {
-                        host.open = null; show()
-                    }
-                }
 
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
