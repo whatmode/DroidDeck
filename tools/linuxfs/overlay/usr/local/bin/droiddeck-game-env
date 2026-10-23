@@ -309,6 +309,29 @@ def with_hide_exts(env):
     return env
 
 
+ENV_ARGUMENT = re.compile(r"([A-Z][A-Z0-9_]*)=(.+)")
+
+
+def lift_environment_arguments(command, env):
+    """Steam appends a game's launch options after its executable, so `NAME=value` typed there
+    reaches the game as an argument, where nothing reads it. Proton, DXVK, gamescope and the
+    Vulkan layers all read their knobs from the environment, so move those tokens into it and
+    say so. This is what a tester means by `NAME=value` in the launch options, and silently
+    dropping it turns a diagnostic launch into a no-op that still looks like a real result.
+    The arguments themselves are left in place: a game may take one of its own."""
+    lifted = []
+    for token in command[3:]:
+        match = ENV_ARGUMENT.fullmatch(token)
+        if not match or match.group(1) in env:
+            continue
+        env[match.group(1)] = match.group(2)
+        lifted.append(token)
+    if lifted:
+        print("droiddeck-game-env: launch options were set as arguments and nothing reads them there; "
+              "moved into the environment: %s" % " ".join(lifted), file=sys.stderr)
+    return env
+
+
 def with_media_debug(env):
     """With PROTON_LOG=1, also log what the video stack does: GStreamer warnings and Wine's
     Media Foundation / winedmo / GStreamer-glue warnings. A WINEDEBUG or GST_DEBUG the user set
@@ -329,8 +352,8 @@ def main():
     mic_enabled = env.get("BL_MIC_ENABLED")
     mark_install_scripts(command, env)
     app_id = game_id(env)
+    waiting = len(command) > 1 and command[1] == "waitforexitandrun"
     if app_id:
-        waiting = len(command) > 1 and command[1] == "waitforexitandrun"
         fixes = {}
         if waiting:
             command = skip_red_launcher(command)
@@ -357,6 +380,8 @@ def main():
             print("droiddeck-game-env: invalid configuration; using inherited environment", file=sys.stderr)
     if mic_enabled == "0":
         env["BANNER_AUDIO_DIRECT_MIC"] = "0"
+    if waiting:
+        env = lift_environment_arguments(command, env)
     env = force_ssbs(command, env)
     env = with_ffmpeg(env)
     env = with_media_debug(env)

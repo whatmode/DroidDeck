@@ -55,9 +55,12 @@ buffer. Both modes present into the app's native compositor, so the compositor i
 
 Do not dismiss the presentation path because the vignette proves the game's post-processing ran. A
 format or transfer-function mismatch clips mid-tones to white while dark features stay dark, which
-is exactly "white with a vignette". The cheapest test is `DISABLE_GAMESCOPE_WSI=1` for the game
-(no rebuild, no layer); the open question is whether it reaches a Proton game Steam launches
-itself, so check `/proc/<pid>/environ` rather than assuming.
+is exactly "white with a vignette". The cheapest test is `DISABLE_GAMESCOPE_WSI=1`, which the FROG
+layer reads from its manifest's `disable_environment` gate -- **as an environment variable**. It
+must actually be in the game process's environment; typing it into Steam's launch options does
+**not** work, because Steam appends those after the executable and they arrive as arguments
+(2026-10-23-05: passed as an argument, layer stayed active, the run proves nothing). Confirm it in
+`/proc/<pid>/environ`, or put it in the environment the game inherits.
 
 ## The shipped RC4 ICD is not reproducible from `panvk-kbase-v0.1.0-rc4`
 
@@ -76,9 +79,10 @@ itself, so check `/proc/<pid>/environ` rather than assuming.
   and disables transaction elimination (CRC) tile write-out. Worth a launch before blaming the
   compiler: `csf-v11/019` is a CRC class where tiles stayed CRC-skipped and read back stale.
 
-## Reading a log zip: two traps that silently invalidate an A/B run
+## Reading a log zip: three traps that silently invalidate an A/B run
 
-Both were hit on the 2026-10-22-03 session, so check for them before trusting any result.
+All three were hit on a real session (2026-10-22-03 for the first two, 2026-10-23-05 for the
+third), so check for them before trusting any result.
 
 - There are no per-game environment overrides any more. `game-environment.json` carries a single
   `shared` map, so a diagnostic env var in `shared` reaches every game, and there is no UI row that
@@ -87,6 +91,14 @@ Both were hit on the 2026-10-22-03 session, so check for them before trusting an
   session dir covers only that launch, whatever the tester says it contains. `device.txt` names the
   selected driver from `meta.json` ("Linux driver") and `session.log` names the imported
   `linux_vulkan_drivers/<id>`; read both to tell the patched ICD from the baseline one.
+- **A knob set in Steam's launch options is an argument, not an environment variable.** Steam
+  appends a game's launch options after its executable, so `NAME=value` typed there arrives as
+  argv and nothing reads it -- not Proton, not DXVK, not gamescope, not a Vulkan layer. On
+  2026-10-23-05 `DISABLE_GAMESCOPE_WSI=1` was passed that way, the FROG layer stayed active (its
+  `[Gamescope WSI]` lines are in the Proton log), and the "D1 refuted" reading was wrong: the test
+  never ran. `droiddeck-game-env` now moves such tokens into the environment and logs
+  "moved into the environment: ...", so check for that line; for an older zip, grep the log for
+  the knob's own evidence (the layer's lines, the driver's) rather than for the string itself.
 - `d3d11.zeroWorkgroupMemory` is a no-op in DXVK 3.1.1 (see above), so its presence in a run's
   `DXVK_CONFIG` is a red herring, not a variable under test.
 

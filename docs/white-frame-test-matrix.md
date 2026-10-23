@@ -136,19 +136,26 @@ Two sub-hypotheses, both Mali-specific:
 
 ### D1 — is it the gamescope WSI layer?
 
-One launch, **no rebuild and no layer**. Set the per-game environment for Lake:
+One launch, **no rebuild and no layer**. The FROG layer's manifest gates it on
+`disable_environment: {"DISABLE_GAMESCOPE_WSI": "1"}`, so the knob is read from the environment
+**only**:
 
 ```
 DISABLE_GAMESCOPE_WSI=1
 ```
 
-The FROG layer reads this and stands down, so DXVK falls back to plain Wayland WSI against
-gamescope. This knob is already used in this repo (`droiddeck-steam-x64`,
-`droiddeck-x64-webhelper`, `droiddeck-appimage-run`), so it is known to work, but those uses are
-for the Steam process tree. Whether it reaches a Proton game that Steam launches itself is the open
-question, and it is the one thing to check before spending the launch: confirm the game process has
-it in `/proc/<pid>/environ` (the session log's process dump can show this), or set it in the
-environment that the game inherits rather than relying on it being exported earlier.
+Put it in the game's environment (the per-game/shared environment the app publishes), not in
+Steam's launch options. **2026-10-23-05 set it in the launch options and it did not work**: Steam
+appends launch options after the executable, so it arrived as the argv token
+`Lake.exe' DISABLE_GAMESCOPE_WSI=1` and the FROG layer never saw it -- the Proton log still has all
+eight `[Gamescope WSI]` lines, including `Creating swapchain for xid: ... format:
+VK_FORMAT_R8G8B8A8_UNORM ... flip: true`. So that launch **does not refute D-a; the test never
+ran.** `droiddeck-game-env` now lifts `NAME=value` launch options into the environment and logs
+"moved into the environment: ...", which is the line to look for.
+
+Before spending a launch, confirm the knob is really in the game process's environment
+(`/proc/<pid>/environ`, or the session log's process dump). Re-run D1 with the knob in the
+environment:
 
 **Renders →** D-a. The WSI layer's swapchain is the bug, and the next step is to log the format
 and modifier it negotiates.
@@ -313,3 +320,11 @@ I also argued that the vignette exonerated the presentation path, on the grounds
 swapchain format could not leave dark features dark. That was wrong: a format or transfer-function
 mismatch clips mid-tones to white while dark features stay dark, which is the exact symptom. The
 D-tests above exist because of that error, and they are now the cheapest test in the file.
+
+I then read the 2026-10-23-05 log as "D1 failed, so the WSI layer is refuted". That was wrong too.
+The knob went into Steam's launch options, which Steam appends after the executable, so it reached
+the game as an argument and the FROG layer -- which reads `DISABLE_GAMESCOPE_WSI` from the
+environment, via its manifest's `disable_environment` gate -- never saw it. The Proton log still
+contains the layer's full `[Gamescope WSI]` startup, so the layer was active for that whole run.
+D-a is untested, not refuted. `droiddeck-game-env` now lifts `NAME=value` launch options into the
+environment so this cannot silently happen again, and it prints what it moved.

@@ -99,6 +99,19 @@ class GameEnvironmentTest(unittest.TestCase):
         self.assertEqual(MODULE["apply_config"](env, config), {"KEEP": "inherited", "CUSTOM": "shared", "EMPTY": ""})
         self.assertEqual(env["REMOVE"], "inherited")
 
+    def test_launch_options_written_as_arguments_reach_the_environment(self):
+        lift = MODULE["lift_environment_arguments"]
+        # Steam appends launch options after the executable: proton, verb, exe, then the options.
+        command = ["/proton", "waitforexitandrun", "/game/Lake.exe", "DISABLE_GAMESCOPE_WSI=1", "--fullscreen"]
+        self.assertEqual(lift(command, {})["DISABLE_GAMESCOPE_WSI"], "1")
+        # The token stays in argv, so a game that wants it still sees it.
+        self.assertEqual(command[3:], ["DISABLE_GAMESCOPE_WSI=1", "--fullscreen"])
+        # An inherited variable wins, as it does for every other override.
+        self.assertEqual(lift(["p", "w", "e", "PROTON_LOG=1"], {"PROTON_LOG": "0"})["PROTON_LOG"], "0")
+        # Non-options and lower-case game arguments are left alone.
+        self.assertEqual(lift(["p", "w", "e", "renderer=vulkan", "--flag"], {}), {})
+        self.assertEqual(lift(["p", "w", "e"], {}), {})
+
     def test_the_sync_choice_reaches_the_games_setup_runs(self):
         env = {"BL_SYNC": "1", "BL_SYNC_FALLBACK": "1", "BL_FSYNC_FIRST": "0", "OTHER": "kept"}
         config = {"version": 1, "shared": {"BL_SYNC": "0", "BL_FSYNC_FIRST": "1", "PROTON_NO_ESYNC": "1", "FEX_TSOENABLED": "1"}}
