@@ -27,6 +27,10 @@ on:
         description: 'one panvk_kbase_profile_for() field to override, name=value (empty = none; needs patch 0005)'
         required: false
         default: ''
+      report_lost:
+        description: 'print why the device was lost and the pending kernel CSF notifications (1 = on)'
+        required: false
+        default: '1'
 
 permissions:
   contents: write
@@ -52,6 +56,7 @@ jobs:
       ZENITHBLUE_REF: ${{ inputs.zenithblue_ref || '150c7cdd5b1f22f1994741a1a75577063d96a265' }}
       PANVK_PATCH_NUMBERS: ${{ inputs.patch_numbers }}
       PANVK_PROFILE_KNOB: ${{ inputs.profile_knob }}
+      PANVK_REPORT_LOST: ${{ inputs.report_lost || '1' }}
     steps:
       - uses: actions/checkout@v4
 

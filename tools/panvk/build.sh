@@ -90,6 +90,12 @@ if [ -n "$KNOB" ]; then
   log "profile knob: $KNOB"
   VARIANT="$VARIANT-knob-$(printf '%s' "$KNOB" | tr -c 'A-Za-z0-9._-' '-')"
 fi
+# PANVK_REPORT_LOST=1 makes a lost device print why (tools/panvk/report-lost.py): the reason
+# vk_queue_set_lost() records, plus every kernel CSF notification still pending on the fd.
+if [ "${PANVK_REPORT_LOST:-0}" = "1" ] && [ "${PANVK_BASELINE:-0}" != "1" ]; then
+  python3 "$HERE/report-lost.py" "$MESA" | tee -a "$OUT/summary.txt" || { log "REPORT-LOST FAILED"; exit 1; }
+  VARIANT="$VARIANT-lostlog"
+fi
 B=$WORK/build-icd
 rm -rf "$B"
 if ! meson setup "$B" "$MESA" \
