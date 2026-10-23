@@ -94,6 +94,78 @@ forever" pattern is what a poisoned cache looks like, and it was already refuted
 `MESA_SHADER_CACHE_DISABLE=true` changed nothing, and deleting DXVK's state cache changed nothing.
 Clearing caches now would only add a variable to a run that has to be comparable.
 
+## Desktop mode is a working control (D-tests)
+
+**The menu renders correctly in desktop mode.** That is the first working control in this
+investigation, and it re-localises the bug.
+
+The two modes differ in exactly one place. In `droiddeck-session`, desktop mode (`lxqt`) reaches
+`exec /usr/local/bin/droiddeck-desktop` at line 243, which is **before** `mali_gl_setup` (line 260)
+and before the gamescope block (lines 291-296). So desktop mode never starts gamescope:
+
+| | desktop mode | steam mode |
+|---|---|---|
+| guest compositor | **KWin** (`--wayland-display wayland-0 --socket wayland-1`) | **gamescope** (`--backend wayland`) |
+| `mali_gl_setup` | not run | run (`WLR_XWAYLAND`, `PAN_MESA_DEBUG=gl3`, `/opt/mali-gl/lib`) |
+| gamescope WSI layer | absent | present (`-e`, `libVkLayer_FROG_gamescope_wsi_aarch64.so`) |
+| linux-dmabuf source | KWin's | gamescope's, hand-built by patch 0121 |
+| composite of the game's dma-buf | KWin, **software** (`GALLIUM_DRIVER=llvmpipe`, `LIBGL_ALWAYS_SOFTWARE=1`) | gamescope, **on PanVK** |
+| ends at | the app's native compositor (`wayland-0`) | the app's native compositor (`wayland-0`) |
+
+Both modes present into the app's native compositor, so the compositor is still common and still
+exonerated. What differs is gamescope: its WSI layer, its linux-dmabuf tranche, and its GPU-side
+composite of the game's buffer.
+
+### This revives the presentation theory
+
+An earlier note here dismissed presentation because the vignette proves the game's post-processing
+ran. That was too quick. A format or transfer-function mismatch at the swapchain boundary produces
+exactly this symptom: dark features (the vignette) stay dark while mid-tones clip to white, so the
+frame reads as "white with a vignette" without the scene itself being white. Desktop mode rendering
+correctly, with the only difference being who owns the swapchain and the composite, is evidence for
+that, not against it.
+
+Two sub-hypotheses, both Mali-specific:
+
+- **D-a: the gamescope WSI layer's swapchain.** The FROG layer picks the swapchain format and
+  modifier that DXVK renders into. Steam mode only.
+- **D-b: gamescope's own import and composite of the game's dma-buf.** Patch `0121` builds the
+  linux-dmabuf v4 tranche by hand and names the formats itself, and its own header says it is
+  **not device-tested** on this GPU. A wrong advertised format or modifier means the buffer is
+  misread when gamescope samples it.
+
+### D1 — is it the gamescope WSI layer?
+
+One launch, **no rebuild and no layer**. Set the per-game environment for Lake:
+
+```
+DISABLE_GAMESCOPE_WSI=1
+```
+
+The FROG layer reads this and stands down, so DXVK falls back to plain Wayland WSI against
+gamescope. This knob is already used in this repo (`droiddeck-steam-x64`,
+`droiddeck-x64-webhelper`, `droiddeck-appimage-run`), so it is known to work, but those uses are
+for the Steam process tree. Whether it reaches a Proton game that Steam launches itself is the open
+question, and it is the one thing to check before spending the launch: confirm the game process has
+it in `/proc/<pid>/environ` (the session log's process dump can show this), or set it in the
+environment that the game inherits rather than relying on it being exported earlier.
+
+**Renders →** D-a. The WSI layer's swapchain is the bug, and the next step is to log the format
+and modifier it negotiates.
+**Still white →** D-a is out. Go to D2.
+
+### D2 — is it gamescope's composite, or the guest compositor at all?
+
+If D1 is white, the remaining difference is who composites. Run **steam mode** and reach the game
+through KWin instead of gamescope. The supported route is already wired: launch the desktop session
+(`BL_DESKTOP=1`) and start the game from Steam's desktop UI, which is the path that renders
+correctly. Compare its `session.log` against a steam-mode one.
+
+**Renders →** gamescope's composite or its linux-dmabuf tranche (D-b). Read patch `0121`'s
+format list first, then log what gamescope advertises.
+**Still white →** the working desktop case is a different *renderer* configuration, not a
+compositor difference, and the mode comparison must be redone from the logs.
+
 ## DXVK-side tests (Z-tests)
 
 These need **no rebuild and no layer**: DXVK reads `DXVK_CONFIG` (the `dxvkConfig` field the app
@@ -236,3 +308,8 @@ bug; then step the draws to find the first one that produces white and read that
 
 I suggested `PANVK_DEBUG=no_bc_emul` and `PANVK_DEBUG=no_gs` in the PR comments. Both clear a
 DXVK-required feature and would have failed at startup. The matrix above replaces that advice.
+
+I also argued that the vignette exonerated the presentation path, on the grounds that a wrong
+swapchain format could not leave dark features dark. That was wrong: a format or transfer-function
+mismatch clips mid-tones to white while dark features stay dark, which is the exact symptom. The
+D-tests above exist because of that error, and they are now the cheapest test in the file.
