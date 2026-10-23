@@ -522,6 +522,7 @@ internal fun LaunchSettings(s: FrontEndState, a: FrontEndActions, host: MenuHost
         }
         if (controller != null) add { m -> SettingCard(stringResource(R.string.setup_card_controls), stringResource(R.string.setup_card_controls_hint), "card:controls", m, controller.onMapping) }
         if (steamCard != null) add(steamCard)
+        if (game != null && steamScope != null) add { m -> Box(m) { LaunchEnvCard(host, game, steamScope) } }
         if (wincompKey != null) add { m ->
             SettingCard(
                 stringResource(R.string.wincomp_title),
@@ -546,6 +547,45 @@ internal fun LaunchSettings(s: FrontEndState, a: FrontEndActions, host: MenuHost
     }
 }
 
+
+@Composable
+private fun LaunchEnvCard(host: MenuHost, game: com.droiddeck.launcher.frontend.Library.SteamGame, scope: String) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var text by remember(scope) { mutableStateOf(com.droiddeck.launcher.session.GameLaunchEnv.text(context, scope)) }
+    var editing by remember(scope) { mutableStateOf(false) }
+    val entries = com.droiddeck.launcher.session.GameLaunchEnv.parse(text)
+    val key = "launch-env"
+    SettingCard(
+        stringResource(R.string.game_env_card),
+        if (entries.isEmpty()) stringResource(R.string.game_env_none) else com.droiddeck.launcher.session.GameLaunchEnv.format(entries),
+        "card:$key", Modifier.fillMaxSize(),
+    ) { host.open = if (host.open == key) null else key }
+    AnchoredMenu(host.open == key, onDismiss = { if (host.open == key) host.open = null },
+        title = stringResource(R.string.game_env_menu_title, game.name), note = stringResource(R.string.game_env_note)) { first ->
+        val details = listOf(R.string.game_env_wined3d, R.string.game_env_cache_sync, R.string.game_env_uncached)
+        com.droiddeck.launcher.session.GameLaunchEnv.presets.forEachIndexed { i, (name, value) ->
+            MenuItem(
+                stringResource(details[i]), checked = entries[name] == value,
+                detail = "$name=$value", focusRequester = if (i == 0) first else null,
+            ) {
+                com.droiddeck.launcher.session.GameLaunchEnv.toggle(context, scope, name, value)
+                text = com.droiddeck.launcher.session.GameLaunchEnv.text(context, scope)
+            }
+        }
+        MenuItem(stringResource(R.string.game_env_edit), checked = false, detail = stringResource(R.string.game_env_edit_detail)) {
+            host.open = null
+            editing = true
+        }
+        if (entries.isNotEmpty()) MenuItem(stringResource(R.string.game_env_clear), checked = false) {
+            com.droiddeck.launcher.session.GameLaunchEnv.setText(context, scope, "")
+            text = ""
+        }
+    }
+    if (editing) TextEntryDialog(stringResource(R.string.game_env_edit), text, onDismiss = { editing = false }) { typed ->
+        com.droiddeck.launcher.session.GameLaunchEnv.setText(context, scope, typed)
+        text = com.droiddeck.launcher.session.GameLaunchEnv.text(context, scope)
+    }
+}
 
 @Composable
 private fun NoSteamCard(host: MenuHost, game: com.droiddeck.launcher.frontend.Library.SteamGame, scope: String) {

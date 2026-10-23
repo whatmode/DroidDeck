@@ -388,6 +388,16 @@
     <string name="game_steam_with">Starts with Steam</string>
     <string name="game_steam_without">Starts without Steam</string>
     <string name="game_settings_card">Settings</string>
+    <string name="game_env_card">Environment</string>
+    <string name="game_env_none">None</string>
+    <string name="game_env_menu_title">Environment for %1$s</string>
+    <string name="game_env_note">Set when the game starts, also from Steam. No need to type them into Steam\'s launch options.</string>
+    <string name="game_env_wined3d">Use WineD3D (OpenGL) instead of DXVK</string>
+    <string name="game_env_cache_sync">Driver test: cache sync through the kernel</string>
+    <string name="game_env_uncached">Driver test: uncached shared memory</string>
+    <string name="game_env_edit">Edit variables</string>
+    <string name="game_env_edit_detail">NAME=value, separated by spaces</string>
+    <string name="game_env_clear">Clear all</string>
     <string name="game_settings_menu_title">%1$s Settings</string>
     <string name="comp_default_live">%1$s now runs every game that has not picked its own Proton in Steam.</string>
     <string name="comp_default_next">%1$s will run every game that has not picked its own Proton, from the next time Steam starts.</string>
