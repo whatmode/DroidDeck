@@ -131,7 +131,10 @@ object SessionFiles {
                 // Bisection: hides the device extensions named in DROIDDECK_HIDE_EXTS (loaded only
                 // with DROIDDECK_HIDE_EXTS_ENABLE=1, which droiddeck-game-env derives from it).
                 "usr/local/lib/droiddeck-vklayers/libVkLayer_droiddeck_hideext.so" to "usr/local/lib/droiddeck-vklayers/libVkLayer_droiddeck_hideext.so",
-                "usr/local/lib/droiddeck-vklayers/VK_LAYER_DROIDDECK_hideext.json" to "usr/share/vulkan/implicit_layer.d/droiddeck_hideext.json")
+                "usr/local/lib/droiddeck-vklayers/VK_LAYER_DROIDDECK_hideext.json" to "usr/share/vulkan/implicit_layer.d/droiddeck_hideext.json",
+                // Mali: GPU-only resources out of IO-coherent memory (loaded only with DROIDDECK_MALI_MEMORY=1).
+                "usr/local/lib/droiddeck-vklayers/libVkLayer_droiddeck_malimem.so" to "usr/local/lib/droiddeck-vklayers/libVkLayer_droiddeck_malimem.so",
+                "usr/local/lib/droiddeck-vklayers/VK_LAYER_DROIDDECK_malimem.json" to "usr/share/vulkan/implicit_layer.d/droiddeck_malimem.json")
         val fexPreloads = listOf("x86_64", "i386").flatMap { arch ->
             listOf("libblsession.so", "libfakeinput.so", "libfaultreport.so").map { "$arch/$it" to "usr/local/lib/droiddeck-fex/$arch/$it" }
         } + listOf("libthunkaudit.so", "libvulkan-thunk.so", "libwebkitinput.so").map { "x86_64/$it" to "usr/local/lib/droiddeck-fex/x86_64/$it" }
