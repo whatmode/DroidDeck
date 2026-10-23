@@ -153,10 +153,15 @@ curl -L -H "Cookie: token=$TOK" "$URL" -o session.zip
 - **A display-mode flap storm runs alongside it.** `app.log` holds 2242 `perf: display` lines in
   ~3 minutes, alternating `60 → 120 Hz (mode 1)` and `120 → 120 Hz (mode 255)` about every 40 ms.
   `PerfMode.apply` writes `window.attributes.preferredDisplayModeId`, which fires `onDisplayChanged`
-  → `followPanelRefresh` → `applyOutputPacing` → `PerfMode.apply` again; its only guard is
-  `preferredDisplayModeId != best.modeId`, and that never converges because the value read back
-  alternates between two mode ids that both report 120 Hz. Treat any pacing-sensitive reading from
-  this run with care, and fix the loop before the next one.
+  → `followPanelRefresh` → `applyOutputPacing` → `PerfMode.apply` again. The two lines are the same
+  120 Hz mode under two ids, and `selectMode` picked its winner with `maxByOrNull { it.refreshRate }`,
+  which returns whichever of the tied modes comes first in `supportedModes` - and that order follows
+  the current mode, so the winner flipped on every write and the `preferredDisplayModeId != best.modeId`
+  guard never matched. Fixed: the choice now keeps the current mode when it is already allowed and
+  as good, and otherwise breaks the tie on the mode id, so it cannot depend on the array order and
+  the guard converges. `PerfModeTest.twoIdsForTheSameRefreshDoNotAlternate` locks the old code out.
+  A deterministic simulation of the loop gave 50 writes in 50 iterations before and 1 write, then
+  stable, after.
 
 ## The white frame is not in `mali-gl/patches` (baseline A/B, 2026-10-22)
 

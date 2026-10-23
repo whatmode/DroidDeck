@@ -59,9 +59,20 @@ object PerfMode {
             it.physicalWidth == current.physicalWidth && it.physicalHeight == current.physicalHeight
         }
         val allowed = sameSize.filter { it.refreshRate <= cap + 0.5f }
-        return allowed.filter { cadenceFits(it.refreshRate, fpsLimit) }.maxByOrNull { it.refreshRate }
+        val best = allowed.filter { cadenceFits(it.refreshRate, fpsLimit) }.maxByOrNull { it.refreshRate }
             ?: allowed.maxByOrNull { it.refreshRate }
             ?: sameSize.minByOrNull { it.refreshRate }
+            ?: return null
+        // Two modes can share a size and a refresh (a panel often exposes one mode under two ids).
+        // maxByOrNull picks whichever comes first in supportedModes, and that order follows the
+        // current mode, so the "winner" flips on every write: the caller's guard never sees its own
+        // value and reapplies forever, once per onDisplayChanged. Keep the current mode when it is
+        // already allowed and as good, and otherwise break the tie on the id, which is unique, so
+        // the choice depends only on the modes and the limits, never on the array order.
+        if (allowed.any { it.modeId == current.modeId } && best.refreshRate <= current.refreshRate + 0.5f) {
+            return current
+        }
+        return sameSize.filter { it.refreshRate == best.refreshRate }.minByOrNull { it.modeId } ?: best
     }
 
     fun cadenceFits(hz: Float, fpsLimit: Int): Boolean {
