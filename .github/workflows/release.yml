@@ -19,7 +19,7 @@ concurrency:
 jobs:
   find:
     name: find the main build
-    if: github.ref == 'refs/heads/main'
+    if: github.repository == 'Droid-Deck/DroidDeck' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     outputs:
       run_id: ${{ steps.find.outputs.run_id }}
