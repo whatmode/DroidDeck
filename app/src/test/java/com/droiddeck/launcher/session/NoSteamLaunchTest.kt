@@ -1,6 +1,5 @@
 package com.droiddeck.launcher.session
 
-import com.droiddeck.launcher.core.GameEnvironment
 import com.droiddeck.launcher.frontend.AddedGames
 import com.droiddeck.launcher.frontend.Library
 import com.droiddeck.launcher.stores.epic.EpicClient
@@ -20,7 +19,7 @@ class NoSteamLaunchTest {
     private val context get() = RuntimeEnvironment.getApplication()
 
     @After fun clean() {
-        File(context.filesDir, "game-environment.json").delete()
+        context.getSharedPreferences("session", android.content.Context.MODE_PRIVATE).edit().clear().commit()
         NoSteamLaunch.names.clear()
     }
 
@@ -37,16 +36,16 @@ class NoSteamLaunchTest {
 
     @Test fun theSettingIsRememberedPerGame() {
         assertFalse(NoSteamLaunch.enabled(context, shortcut))
-        GameEnvironmentStore.setGameNoSteam(context, "2733369024", true)
+        SessionPrefs.setNoSteam(context, "2733369024", true)
         assertTrue(NoSteamLaunch.enabled(context, shortcut))
         assertTrue(NoSteamLaunch.enabled(context, 2733369024L))
         assertFalse(NoSteamLaunch.enabled(context, steamGame))
         assertFalse(NoSteamLaunch.enabled(context, launcher))
-        GameEnvironmentStore.setGameNoSteam(context, EpicClient.shortcutAppId.toString(), true)
+        SessionPrefs.setNoSteam(context, EpicClient.shortcutAppId.toString(), true)
         assertTrue(NoSteamLaunch.enabled(context, launcher))
-        GameEnvironmentStore.setGameNoSteam(context, "2733369024", false)
+        SessionPrefs.setNoSteam(context, "2733369024", false)
         assertFalse(NoSteamLaunch.enabled(context, shortcut))
-        assertTrue(GameEnvironment.gameNoSteam(GameEnvironmentStore.read(context), EpicClient.shortcutAppId.toString()))
+        assertTrue(SessionPrefs.noSteam(context, EpicClient.shortcutAppId.toString()))
     }
 
     @Test fun eachGameStartsInItsOwnProtonOrTheLauncherWithoutSteam() {

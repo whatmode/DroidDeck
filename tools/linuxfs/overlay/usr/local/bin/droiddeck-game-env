@@ -147,7 +147,7 @@ def win_components(compat, app_id):
         return ""
 
 
-def apply_config(env, config, app_id, fixes=None):
+def apply_config(env, config, fixes=None):
     if config.get("version") != 1:
         raise ValueError("unsupported environment configuration")
     result = env.copy()
@@ -156,7 +156,6 @@ def apply_config(env, config, app_id, fixes=None):
         if name == "WINEDLLOVERRIDES" and entries.get(name, env.get(name)):
             value = entries.get(name, env.get(name)) + ";" + value
         entries[name] = value
-    entries.update(config.get("games", {}).get(app_id, {}))
     for name, value in entries.items():
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
             raise ValueError("invalid environment name")
@@ -166,10 +165,7 @@ def apply_config(env, config, app_id, fixes=None):
             result[name] = value
         else:
             raise ValueError("invalid environment value")
-    game_dxvk = config.get("dxvkConfigGames", {})
-    if not isinstance(game_dxvk, dict):
-        raise ValueError("invalid game dxvk configuration")
-    dxvk = game_dxvk.get(app_id, config.get("dxvkConfig"))
+    dxvk = config.get("dxvkConfig")
     if dxvk is not None:
         if not isinstance(dxvk, str) or "\0" in dxvk or len(dxvk) > 8192:
             raise ValueError("invalid dxvk configuration")
@@ -179,12 +175,10 @@ def apply_config(env, config, app_id, fixes=None):
     return result
 
 
-def sync_config(config, app_id):
-    games = config.get("games", {})
+def sync_config(config):
     return {
         "version": config.get("version"),
         "shared": {name: value for name, value in config.get("shared", {}).items() if name in SYNC_KEYS},
-        "games": {app_id: {name: value for name, value in games.get(app_id, {}).items() if name in SYNC_KEYS}},
     }
 
 
@@ -302,13 +296,6 @@ def with_mali_video(env):
     their ordinary texture path for video. DROIDDECK_HIDE_YCBCR=0 keeps them."""
     if os.path.exists("/dev/mali0") and not os.path.exists("/dev/kgsl-3d0"):
         env.setdefault("DROIDDECK_HIDE_YCBCR", "1")
-        # D3D11 leaves compute shared memory undefined, but desktop drivers hand it out zeroed and
-        # games rely on that (Unity's auto exposure: one garbage read and the picture stays white).
-        # Mali does not zero it, so DXVK does. DROIDDECK_DXVK_ZERO_WG=0 turns it off.
-        own = env.get("DXVK_CONFIG", "")
-        if env.get("DROIDDECK_DXVK_ZERO_WG") != "0" and "zeroWorkgroupMemory" not in own:
-            own = own.strip().rstrip(";").strip()
-            env["DXVK_CONFIG"] = (own + "; " if own else "") + "d3d11.zeroWorkgroupMemory = True"
     return env
 
 
@@ -350,12 +337,12 @@ def main():
             with path.open(encoding="utf-8") as source:
                 config = json.load(source)
             if waiting:
-                env = apply_config(env, config, app_id, fixes)
+                env = apply_config(env, config, fixes)
             else:
-                env = apply_config(env, sync_config(config, app_id), app_id)
+                env = apply_config(env, sync_config(config))
         except FileNotFoundError:
             if waiting:
-                env = apply_config(env, {"version": 1}, app_id, fixes)
+                env = apply_config(env, {"version": 1}, fixes)
         except (OSError, ValueError, TypeError, AttributeError):
             print("droiddeck-game-env: invalid configuration; using inherited environment", file=sys.stderr)
     if mic_enabled == "0":

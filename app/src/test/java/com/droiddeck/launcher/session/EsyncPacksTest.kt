@@ -669,7 +669,7 @@ class EsyncPacksTest {
         assertEquals(0, EsyncPacks.pruneFailures(null, index).length())
     }
 
-    @Test fun aPerGameFallbackOptInKeepsPackFetchingOn() {
+    @Test fun aSharedFallbackOptInKeepsPackFetchingOn() {
         val context = RuntimeEnvironment.getApplication()
         val settings = File(context.filesDir, "game-environment.json")
         settings.delete()
@@ -679,11 +679,9 @@ class EsyncPacksTest {
             val root = temp.newFolder("rootfs")
             EsyncPacks.store(root).mkdirs()
             assertEquals(0, EsyncPacks.fetchWanted(context, root))
-            GameEnvironmentStore.save(context, GameEnvironment.Config(games = mapOf("42" to mapOf("BL_SYNC_FALLBACK" to "1"))))
-            assertTrue(EsyncPacks.enabled(context))
             GameEnvironmentStore.save(context, GameEnvironment.Config(shared = mapOf("BL_SYNC_FALLBACK" to "1")))
             assertTrue(EsyncPacks.enabled(context))
-            GameEnvironmentStore.save(context, GameEnvironment.Config(games = mapOf("42" to mapOf("BL_SYNC_FALLBACK" to "0"))))
+            GameEnvironmentStore.save(context, GameEnvironment.Config(shared = mapOf("BL_SYNC_FALLBACK" to "0")))
             assertFalse(EsyncPacks.enabled(context))
             SessionPrefs.setSyncFallback(context, true)
             assertTrue(EsyncPacks.enabled(context))

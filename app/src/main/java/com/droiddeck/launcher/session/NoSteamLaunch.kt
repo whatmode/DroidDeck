@@ -1,7 +1,6 @@
 package com.droiddeck.launcher.session
 
 import android.content.Context
-import com.droiddeck.launcher.core.GameEnvironment
 import com.droiddeck.launcher.frontend.AddedGames
 import com.droiddeck.launcher.frontend.Library
 import com.droiddeck.launcher.stores.epic.EpicClient
@@ -16,17 +15,13 @@ object NoSteamLaunch {
         game.library == Library.EPIC_LAUNCHER -> EpicClient.shortcutAppId.toString()
         game.library == Library.ADDED || game.appId > 0 -> game.profileKey
         else -> null
-    }?.takeIf { it.isNotEmpty() && GameEnvironment.validScope(it) }
-
-    fun enabled(config: GameEnvironment.Config, game: Library.SteamGame): Boolean =
-        scope(game)?.let { GameEnvironment.gameNoSteam(config, it) } == true
+    }?.takeIf { it.isNotEmpty() && Regex("[1-9][0-9]*").matches(it) }
 
     fun enabled(context: Context, game: Library.SteamGame): Boolean =
-        scope(game) != null && runCatching { enabled(GameEnvironmentStore.read(context), game) }.getOrDefault(false)
+        scope(game)?.let { SessionPrefs.noSteam(context, it) } == true
 
-    fun enabled(context: Context, appId: Long): Boolean = runCatching {
-        GameEnvironment.gameNoSteam(GameEnvironmentStore.read(context), (appId and 0xFFFFFFFFL).toString())
-    }.getOrDefault(false)
+    fun enabled(context: Context, appId: Long): Boolean =
+        SessionPrefs.noSteam(context, (appId and 0xFFFFFFFFL).toString())
 
     fun command(game: Library.SteamGame, added: AddedGames.Game?): Command? = when {
         game.library == Library.EPIC_LAUNCHER -> Command(EPIC, listOf("run"), game.name)

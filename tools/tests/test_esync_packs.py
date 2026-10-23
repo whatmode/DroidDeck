@@ -1041,8 +1041,8 @@ class LauncherTest(SyncTestCase):
         tool = make_tool(self.tools, "Proton Experimental (ARM64)")
         config = self.home / ".config/droiddeck/game-environment.json"
         config.parent.mkdir(parents=True)
-        config.write_text(json.dumps({"version": 1, "shared": {"PROTON_NO_NTSYNC": "1", "CUSTOM": "shared"},
-                                      "games": {"42": {"WINEESYNC": "3", "BL_SYNC_FALLBACK": "1"}}}))
+        config.write_text(json.dumps({"version": 1, "shared": {"PROTON_NO_NTSYNC": "1", "CUSTOM": "shared",
+                                                               "WINEESYNC": "3", "BL_SYNC_FALLBACK": "1"}}))
         env = {"PATH": os.defpath, "HOME": str(self.home), "STEAM_COMPAT_DATA_PATH": "/compatdata/42", "BL_SYNC": "1",
                "BL_SYNC_MIN_NOFILE": "1"}
 

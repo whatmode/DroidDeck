@@ -1,0 +1,70 @@
+pan/bi: restore the forced-TLS access hint on register-allocator spills
+
+Thread-local storage on Valhall is per-thread scratch space that the register
+allocator spills to and refills from. Those accesses must carry the hardware
+"force" memory-access hint (Mali's "force access in discarded threads"): a
+thread that has already been killed by a discard/demote can still be the one
+another thread's spilled value is read back from, so the load/store has to
+happen regardless of the thread's liveness.
+
+Commit 43ffcf06 ("pan/bi,nir: Divide memory_access from segments") moved the
+hint out of the segment encoding into a per-instruction field. The NIR
+load/store path sets it (bi_emit_load/bi_emit_store), but the register
+allocator builds its spill stores and refill loads through bi_store_tl() and
+bi_load_tl() and left the new field at zero. Those instructions are then
+emitted as plain global accesses, so spilled values can be read as garbage
+when the spilling thread's liveness and the reloading thread's differ.
+
+Under DXVK this shows up as wrong colour output from shaders that spill: the
+register allocator spills large D3D-generated pixel shaders aggressively
+(Unity's lighting/exposure/post-processing shaders among them), and a bad
+refill produces NaN/Inf that tonemaps to white and is then held by the
+temporal exposure/TAA history, so the whole frame stays white.
+
+Restore the hint on both helpers.
+
+Ported from upstream Mesa 33e67876 ("pan/bi: Restore VA_MEMORY_ACCESS_FORCE
+for spills and refills"), which is not in the pinned Mesa tree.
+
+diff --git a/src/panfrost/compiler/bifrost/bi_ra.c b/src/panfrost/compiler/bifrost/bi_ra.c
+--- a/src/panfrost/compiler/bifrost/bi_ra.c
++++ b/src/panfrost/compiler/bifrost/bi_ra.c
+@@ -728,26 +728,31 @@ bi_tls_ptr(bool hi)
+ bi_instr *
+ bi_load_tl(bi_builder *b, unsigned bits, bi_index dst, unsigned offset)
+ {
++   bi_instr *I;
+    if (b->shader->arch >= 9) {
+       assert(offset < 0x8000);  /* valhall has 16 bit signed offset */
+-      return bi_load_to(b, bits, dst, bi_tls_ptr(false), bi_tls_ptr(true),
+-                        BI_SEG_TL, offset);
++      I = bi_load_to(b, bits, dst, bi_tls_ptr(false), bi_tls_ptr(true),
++                     BI_SEG_TL, offset);
+    } else {
+-      return bi_load_to(b, bits, dst, bi_imm_u32(offset), bi_zero(), BI_SEG_TL,
+-                        0);
++      I = bi_load_to(b, bits, dst, bi_imm_u32(offset), bi_zero(), BI_SEG_TL, 0);
+    }
++   I->mem_access = VA_MEMORY_ACCESS_FORCE;
++
++   return I;
+ }
+
+ void
+ bi_store_tl(bi_builder *b, unsigned bits, bi_index src, unsigned offset)
+ {
++   bi_instr *I;
+    if (b->shader->arch >= 9) {
+       assert(offset < 0x8000);  /* valhall has 16 bit signed offset */
+-      bi_store(b, bits, src, bi_tls_ptr(false), bi_tls_ptr(true), BI_SEG_TL,
+-               offset);
++      I = bi_store(b, bits, src, bi_tls_ptr(false), bi_tls_ptr(true), BI_SEG_TL,
++                   offset);
+    } else {
+-      bi_store(b, bits, src, bi_imm_u32(offset), bi_zero(), BI_SEG_TL, 0);
++      I = bi_store(b, bits, src, bi_imm_u32(offset), bi_zero(), BI_SEG_TL, 0);
+    }
++   I->mem_access = VA_MEMORY_ACCESS_FORCE;
+ }
+
+ static void
