@@ -43,6 +43,22 @@
   `tools/panvk/build.sh` (`.github/workflows/panvk-icd-build.yml`) and imported into the app as a
   Linux Vulkan driver zip.
 
+## The white frame: desktop mode is the working control
+
+The menu renders correctly in desktop mode. `droiddeck-session` execs `droiddeck-desktop` at line
+243, before `mali_gl_setup` (260) and before the gamescope block (291-296), so desktop mode runs
+**KWin** as the guest compositor and never starts gamescope. Steam mode runs gamescope, and
+gamescope is the only difference: its WSI layer (`-e`,
+`libVkLayer_FROG_gamescope_wsi_aarch64.so`), its hand-built linux-dmabuf tranche (patch `0121`,
+whose own header says it is not device-tested on this GPU) and its GPU-side composite of the game
+buffer. Both modes present into the app's native compositor, so the compositor itself is common.
+
+Do not dismiss the presentation path because the vignette proves the game's post-processing ran. A
+format or transfer-function mismatch clips mid-tones to white while dark features stay dark, which
+is exactly "white with a vignette". The cheapest test is `DISABLE_GAMESCOPE_WSI=1` for the game
+(no rebuild, no layer); the open question is whether it reaches a Proton game Steam launches
+itself, so check `/proc/<pid>/environ` rather than assuming.
+
 ## The shipped RC4 ICD is not reproducible from `panvk-kbase-v0.1.0-rc4`
 
 - The vendor tag `panvk-kbase-v0.1.0-rc4` resolves to commit `5b87b74d` (2026-10-16), and the
