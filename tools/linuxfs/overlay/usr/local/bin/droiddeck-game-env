@@ -312,6 +312,25 @@ def with_mali_video(env):
     return env
 
 
+def with_vk_bisection(env):
+    """Load the optional implicit layer that hides D3D-relevant Vulkan extensions. The list itself
+    stays in DROIDDECK_HIDE_EXTS so the layer can report it. The explicit instance-layer entry makes
+    activation work with Android loaders that do not auto-enable an implicit layer from its marker."""
+    layer = "VK_LAYER_DROIDDECK_hideexts"
+    selected = env.get("DROIDDECK_HIDE_EXTS", "").strip()
+    layers = [value for value in re.split(r"[:;,]", env.get("VK_INSTANCE_LAYERS", "")) if value and value != layer]
+    if selected and selected != "0":
+        env["DROIDDECK_HIDE_EXTS_ENABLE"] = "1"
+        layers.append(layer)
+    else:
+        env.pop("DROIDDECK_HIDE_EXTS_ENABLE", None)
+    if layers:
+        env["VK_INSTANCE_LAYERS"] = ":".join(layers)
+    else:
+        env.pop("VK_INSTANCE_LAYERS", None)
+    return env
+
+
 def with_media_debug(env):
     """With PROTON_LOG=1, also log what the video stack does: GStreamer warnings and Wine's
     Media Foundation / winedmo / GStreamer-glue warnings. A WINEDEBUG or GST_DEBUG the user set
@@ -363,6 +382,7 @@ def main():
     env = force_ssbs(command, env)
     env = with_ffmpeg(env)
     env = with_media_debug(env)
+    env = with_vk_bisection(env)
     env = with_mali_video(env)
     sync = load_sync()
     launch, launch_env = select_sync(command, env, sync)
