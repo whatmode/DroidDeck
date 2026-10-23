@@ -22,8 +22,10 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: build-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # One build per PR or branch: a newer push cancels the one it replaces instead of running
+  # alongside it. Manual (workflow_dispatch) runs keep their own group.
+  group: build-${{ github.event.pull_request.number || (github.event_name == 'push' && github.ref) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 env:
   PRELOAD_CACHE_VERSION: v6
