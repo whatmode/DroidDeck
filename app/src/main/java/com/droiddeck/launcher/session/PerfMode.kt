@@ -21,7 +21,16 @@ object PerfMode {
                 val cur = display.mode
                 val cap = minOf(peakRefreshCap(a), refreshLimit.takeIf { it > 0 }?.toFloat() ?: Float.POSITIVE_INFINITY)
                 val best = selectMode(display.supportedModes, cur, fpsLimit, cap)
-                if (best != null && a.window.attributes.preferredDisplayModeId != best.modeId) {
+                // The panel can report the mode it runs in under another id than the one asked for
+                // (asking for 120 Hz mode 1 reads back as mode 255), so comparing ids alone rewrote
+                // the preference on every onDisplayChanged and the display flapped between 60 and
+                // 120 Hz every few frames. Keep a preference that already asks for the same size
+                // and refresh as the best mode.
+                val asked = display.supportedModes.firstOrNull { it.modeId == a.window.attributes.preferredDisplayModeId }
+                val alreadyAsked = best != null && asked != null &&
+                    asked.physicalWidth == best.physicalWidth && asked.physicalHeight == best.physicalHeight &&
+                    kotlin.math.abs(asked.refreshRate - best.refreshRate) < 0.5f
+                if (best != null && !alreadyAsked && a.window.attributes.preferredDisplayModeId != best.modeId) {
                     a.window.attributes = a.window.attributes.apply { preferredDisplayModeId = best.modeId }
                     "display ${cur.refreshRate.toInt()} → ${best.refreshRate.toInt()} Hz (mode ${best.modeId})"
                 } else "display ${cur.refreshRate.toInt()} Hz"
