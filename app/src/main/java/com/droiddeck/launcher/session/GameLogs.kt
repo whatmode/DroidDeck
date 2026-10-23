@@ -39,7 +39,14 @@ object GameLogs {
             home.listFiles { f -> f.isFile && f.name.matches(PROTON_LOG) && f.lastModified() >= since }
                 .orEmpty().sortedByDescending { it.lastModified() }
                 .forEach { add("proton/${it.name}", it) }
-            add("proton/game-environment.json", File(home, ".config/droiddeck/game-environment.json"))
+            // One folder per Proton start (droiddeck-game-env sets PROTON_LOG_DIR), newest first,
+            // so a crash's log survives a helper Proton started after it.
+            File(home, "droiddeck-proton-logs").listFiles { f -> f.isDirectory && f.lastModified() >= since }
+                .orEmpty().sortedByDescending { it.name }.take(12)
+                .forEach { dir ->
+                    dir.listFiles { f -> f.isFile }.orEmpty().forEach { add("proton/launches/${dir.name}/${it.name}", it) }
+                }
+            add("proton/game-environment.json",File(home, ".config/droiddeck/game-environment.json"))
             protonMedia(context, out)?.let { add("proton/media-stack.txt", it) }
 
             val steamapps = File(SessionPrefs.activeSteamRoot(context), "steamapps")
