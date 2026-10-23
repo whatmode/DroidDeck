@@ -1,0 +1,20 @@
+{
+    "file_format_version": "1.2.0",
+    "layer": {
+        "name": "VK_LAYER_DROIDDECK_malimem",
+        "type": "GLOBAL",
+        "library_path": "/usr/local/lib/droiddeck-vklayers/libVkLayer_droiddeck_malimem.so",
+        "api_version": "1.3.0",
+        "implementation_version": "1",
+        "description": "Keeps GPU-only resources out of IO-coherent memory on Mali/kbase (GPU atomics there raise GPU_SHAREABILITY_FAULT)",
+        "functions": {
+            "vkNegotiateLoaderLayerInterfaceVersion": "DroidDeckMaliMem_NegotiateLoaderLayerInterfaceVersion"
+        },
+        "enable_environment": {
+            "DROIDDECK_MALI_MEMORY": "1"
+        },
+        "disable_environment": {
+            "DROIDDECK_MALI_MEMORY_DISABLE": "1"
+        }
+    }
+}

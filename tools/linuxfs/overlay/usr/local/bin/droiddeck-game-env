@@ -296,6 +296,13 @@ def with_mali_video(env):
     their ordinary texture path for video. DROIDDECK_HIDE_YCBCR=0 keeps them."""
     if os.path.exists("/dev/mali0") and not os.path.exists("/dev/kgsl-3d0"):
         env.setdefault("DROIDDECK_HIDE_YCBCR", "1")
+        # GPU atomics on PanVK's IO-coherent memory raise GPU_SHAREABILITY_FAULT and reset the
+        # GPU; VK_LAYER_DROIDDECK_malimem keeps DXVK's GPU resources out of it.
+        # DROIDDECK_MALI_MEMORY=0 turns it off.
+        env.setdefault("DROIDDECK_MALI_MEMORY", "1")
+        # Through gamescope's WSI layer DXVK games present white on Mali (Lake); presenting
+        # through Xwayland renders. DISABLE_GAMESCOPE_WSI=0 keeps the layer.
+        env.setdefault("DISABLE_GAMESCOPE_WSI", "1")
     return env
 
 
