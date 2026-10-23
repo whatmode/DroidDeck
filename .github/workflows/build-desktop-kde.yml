@@ -52,9 +52,10 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.tag != ''
         env:
           GH_TOKEN: ${{ steps.components-token.outputs.token }}
+          TAG: ${{ inputs.tag }}
         run: |
-          if gh release view '${{ inputs.tag }}' -R Droid-Deck/DroidDeck-Components >/dev/null 2>&1; then
-            echo "::error::${{ inputs.tag }} is already published, and published tags are never replaced: use a new tag"
+          if gh release view "$TAG" -R Droid-Deck/DroidDeck-Components >/dev/null 2>&1; then
+            echo "::error::$TAG is already published, and published tags are never replaced: use a new tag"
             exit 1
           fi
       - name: Build
@@ -79,9 +80,9 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.components-token.outputs.token }}
           GH_REPO: Droid-Deck/DroidDeck-Components
+          TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          TAG='${{ inputs.tag }}'
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "::error::$TAG is already published in DroidDeck-Components, and published tags are never replaced: use a new tag"
             exit 1
