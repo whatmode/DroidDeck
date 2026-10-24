@@ -19,7 +19,10 @@ annotate() {
   done
 }
 trap annotate EXIT
-pacman -Sy --noconfirm --needed gcc mesa vulkan-swrast libglvnd libx11 xorg-server-xvfb \
+grep -q '^DisableSandbox' /etc/pacman.conf || sed -i 's/^\[options\]/[options]\nDisableSandbox/' /etc/pacman.conf
+{ for m in https://ca.us.mirror.archlinuxarm.org https://fl.us.mirror.archlinuxarm.org https://de3.mirror.archlinuxarm.org https://nl.mirror.archlinuxarm.org; do echo "Server = $m/\$arch/\$repo"; done; cat /etc/pacman.d/mirrorlist; } > /etc/pacman.d/mirrorlist.new
+mv /etc/pacman.d/mirrorlist.new /etc/pacman.d/mirrorlist
+pacman -Syu --noconfirm --needed gcc mesa vulkan-swrast libglvnd libx11 xorg-server-xvfb \
   xorg-xwayland weston xorg-xdpyinfo >/tmp/pacman.log 2>&1 || { echo "pacman failed"; tail -15 /tmp/pacman.log; exit 1; }
 echo "== mesa $(pacman -Q mesa), $(pacman -Q xorg-xwayland)"
 OUT=/tmp/glx; mkdir -p $OUT
