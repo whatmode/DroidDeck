@@ -91,42 +91,6 @@ __attribute__((constructor)) static void bl_webhelper_kopper(void) {
   unsetenv("LIBGL_KOPPER_DISABLE");
 }
 
-/* The updated client also sets LIBGL_KOPPER_DISABLE=true in its own process ("setting
- * LIBGL_KOPPER_DISABLE=true for steamwebhelper ...") before its vgui2 surface sets up GLX. Mesa's
- * GLX then has no way to draw with Zink on a DRI3-less Xwayland, loads no driver, and
- * glXChooseVisual finds nothing: "glXChooseVisual failed", Steam exits with rc 1. The update UI,
- * started before the variable is set, draws fine. So with BL_WEBHELPER_KOPPER=1 the variable
- * reads as unset in every process, however and whenever it is set. getenv walks environ itself
- * (as glibc's does) so it is safe before any constructor has run. */
-extern char **environ;
-
-static char *bl_env_lookup(const char *name) {
-  if (!name || !*name || !environ) return NULL;
-  size_t len = strlen(name);
-  for (char **e = environ; *e; e++)
-    if (!strncmp(*e, name, len) && (*e)[len] == '=') return *e + len + 1;
-  return NULL;
-}
-
-static int bl_kopper_forced(const char *name) {
-  if (!name || strcmp(name, "LIBGL_KOPPER_DISABLE")) return 0;
-  const char *want = bl_env_lookup("BL_WEBHELPER_KOPPER");
-  return want && !strcmp(want, "1");
-}
-
-char *getenv(const char *name) {
-  if (!bl_kopper_forced(name)) return bl_env_lookup(name);
-  static int told;
-  if (!told && bl_env_lookup(name)) {
-    told = 1;
-    char msg[160];
-    int n = snprintf(msg, sizeof(msg), "droiddeck: LIBGL_KOPPER_DISABLE ignored in %s (pid %d): Zink keeps Kopper\n",
-                     program_invocation_short_name ? program_invocation_short_name : "?", (int)getpid());
-    if (n > 0 && write(2, msg, (size_t)n) < 0) { }
-  }
-  return NULL;
-}
-
 /* BL_WEBHELPER_STDERR=<file>: every steamwebhelper process appends its stderr there. Steam
  * drops the webhelper's output, so a webhelper that dies at start (Mesa/Zink errors, Chromium's
  * own crash report) otherwise leaves nothing behind. */

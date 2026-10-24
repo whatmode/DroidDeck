@@ -207,6 +207,9 @@ mali_gl_setup() {
     export BL_WEBHELPER_XTHREADS=${BL_WEBHELPER_XTHREADS:-1}
     # Name the real cause behind "Fatal IO error 11 on X server" (see the preload's xcbtrace.c).
     export BL_XCB_TRACE=${BL_XCB_TRACE:-1}
+    # The updated client exits on "glXChooseVisual failed" while a separate GL program (glprobe)
+    # and its own update UI find visuals: report the GL state from inside the exiting client.
+    export BL_STEAM_GLX_REPORT=${BL_STEAM_GLX_REPORT:-1}
     echo "== mali-gl: venus single driver ($(cat "$dir/VERSION" 2>/dev/null)): gamescope $BL_GAMESCOPE_BIN, Xwayland -shm, GL on Zink over the bridge"
     return 0
   fi
