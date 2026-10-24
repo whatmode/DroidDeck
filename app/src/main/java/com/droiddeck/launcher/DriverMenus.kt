@@ -42,6 +42,9 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
     private val releaseProgress = HashMap<String, Int>()
     var linuxSelected by mutableStateOf("")
     val gpu: GpuInfo = GpuInfo.detect()
+    // Turnip is the Adreno driver: on any other GPU (Mali) its bundled builds, imported
+    // AdrenoTools zips, downloads and Turnip pairs are only clutter, so the lists leave them out.
+    private val hideTurnip = !com.droiddeck.launcher.core.DeviceSupport.adreno()
     var mode by mutableStateOf(SessionPrefs.GPU_DRIVERS_AUTO)
     var pairRows by mutableStateOf<List<PairRow>>(emptyList())
     var pairBusy by mutableStateOf<String?>(null)
@@ -150,10 +153,12 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
                 if (auto == "system") activity.getString(R.string.drivers_system_vulkan) else activity.getString(R.string.drivers_bundled, td.displayName(auto)),
                 false,
             ))
-            for (id in td.visibleBundled()) add(DriverRow(id, td.displayName(id), td.driverVersion(id), true, DriverRow.BUNDLED))
-            for (id in td.enumerateImported()) add(bundleRow(id, linux = false) ?: DriverRow(id, td.displayName(id), td.driverVersion(id), true, origin(id)))
+            if (!hideTurnip) {
+                for (id in td.visibleBundled()) add(DriverRow(id, td.displayName(id), td.driverVersion(id), true, DriverRow.BUNDLED))
+                for (id in td.enumerateImported()) add(bundleRow(id, linux = false) ?: DriverRow(id, td.displayName(id), td.driverVersion(id), true, origin(id)))
+            }
         }
-        canRestoreBundled = td.hiddenBundled().isNotEmpty()
+        canRestoreBundled = !hideTurnip && td.hiddenBundled().isNotEmpty()
         androidSelected = SessionPrefs.androidDriver(activity)
         activeBundle = DriverBundle.active(activity)?.label
         restartPending = CompositorHost.isStarted && CompositorHost.displayChoice.let { it != null && it != androidSelected }
@@ -180,7 +185,7 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
         val td = TurnipDriver(activity)
         val pairs = DriverPairs.from(TurnipReleases.cached(activity))
         val recommended = if (QuestExperimental.isSupported()) null else DriverPairs.recommendedKey(gpu, pairs)
-        pairRows = pairs.map { p ->
+        pairRows = if (hideTurnip) emptyList() else pairs.map { p ->
             val bundle = p.bundle?.let { installedBundle(it) }
             val displayId = if (p.bundle != null) bundle?.androidId else p.display?.let { TurnipReleases.installedId(activity, it, td::isInstalled) }
             val linuxId = if (p.bundle != null) bundle?.linuxId else p.linux?.let { TurnipReleases.installedId(activity, it, lm::isInstalled) }
@@ -375,16 +380,20 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
         val name = activity.displayNameOf(uri)
         Thread({
             var bundle: DriverBundle.Bundle? = null
+            // The driver just imported and which list it went to, so it becomes the current one.
+            var importedId: String? = null
+            var importedLinux = false
             val problem = try {
                 when {
                     DriverBundle.isBundle(activity, uri) -> bundle = DriverBundle.install(activity, uri)
-                    linux == true -> LinuxVulkanDriverManager(activity).installDriver(uri, name)
-                    linux == false -> TurnipDriver(activity).installFromZip(uri, name)
+                    linux == true -> { importedId = LinuxVulkanDriverManager(activity).installDriver(uri, name); importedLinux = true }
+                    linux == false -> importedId = TurnipDriver(activity).installFromZip(uri, name)
                     else -> try {
-                        TurnipDriver(activity).installFromZip(uri, name)
+                        importedId = TurnipDriver(activity).installFromZip(uri, name)
                     } catch (display: IllegalArgumentException) {
                         try {
-                            LinuxVulkanDriverManager(activity).installDriver(uri, name)
+                            importedId = LinuxVulkanDriverManager(activity).installDriver(uri, name)
+                            importedLinux = true
                         } catch (runtime: IllegalArgumentException) {
                             // Say why the runtime importer refused it too: that is the half a
                             // glibc driver (Turnip -Linux, PanVK) is meant for.
@@ -403,6 +412,15 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
                 activity.getString(R.string.drivers_import_failed, e.message)
             }
             ui.post {
+                // An imported driver is meant to be used: make it the current one (a bundle
+                // selects itself in useBundle). Re-importing a driver under the same name keeps
+                // it selected instead of leaving the session on the built-in default.
+                val id = importedId
+                if (problem == null && bundle == null && !id.isNullOrEmpty()) {
+                    if (importedLinux) SessionPrefs.setLinuxDriver(activity, id) else SessionPrefs.setAndroidDriver(activity, id)
+                    pairModeOpen = false
+                    setMode(auto = false, mix = true)
+                }
                 val done = bundle?.let { useBundle(it) }
                     ?: name?.let { activity.getString(R.string.comp_imported, it) } ?: activity.getString(R.string.drivers_imported_unnamed)
                 android.widget.Toast.makeText(
@@ -461,6 +479,7 @@ internal class DriverMenus(private val activity: Activity, private val ui: Handl
     fun refreshReleaseRows() {
         val check = TurnipReleases.cached(activity)
         fun rows(linux: Boolean) = check?.assets.orEmpty()
+            .filter { !hideTurnip || (linux && !it.bundle && !it.name.contains("turnip", ignoreCase = true)) }
             .filter { it.bundle || it.linux == linux }
             .filter { a -> installedIdOf(a) == null }
             .map { a ->

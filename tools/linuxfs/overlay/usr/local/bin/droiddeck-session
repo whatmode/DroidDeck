@@ -929,7 +929,7 @@ BUSCONF
         _bl_auto_file=$HOME/.droiddeck-mali-cef-auto
         if [ "${BL_VENUS_SINGLE:-0}" = 1 ]; then
           _bl_mali_variants=(gl vulkan cpu)
-          _bl_auto_file=$HOME/.droiddeck-venus-cef-gpu
+          _bl_auto_file=$HOME/.droiddeck-venus-cef-gpu2
         fi
         _bl_mali_idx=$(cat "$_bl_auto_file" 2>/dev/null || echo 0)
         case "$_bl_mali_idx" in ''|*[!0-9]*) _bl_mali_idx=0 ;; esac
@@ -955,7 +955,13 @@ BUSCONF
       # report) in Steam's log folder, which the logs zip carries.
       if [ "${BL_VENUS_SINGLE:-0}" = 1 ]; then
         export BL_WEBHELPER_STDERR=$steam_root/logs/webhelper_stderr.txt
-        mkdir -p "$steam_root/logs" && : > "$BL_WEBHELPER_STDERR"
+        # Kept across starts (each webhelper writes a dated header), so the logs zip of a later
+        # session still holds what an earlier start's webhelper said; trimmed to its last 3 MB.
+        mkdir -p "$steam_root/logs"
+        if [ "$(stat -c %s "$BL_WEBHELPER_STDERR" 2>/dev/null || echo 0)" -gt 4194304 ]; then
+          tail -c 3145728 "$BL_WEBHELPER_STDERR" > "$BL_WEBHELPER_STDERR.new" && mv "$BL_WEBHELPER_STDERR.new" "$BL_WEBHELPER_STDERR"
+        fi
+        echo "==== session start $(date '+%F %T'), Steam UI variant $_bl_mali_cef" >> "$BL_WEBHELPER_STDERR"
       fi
       case "${_bl_mali_cef%%+*}" in
         cpu)
