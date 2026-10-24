@@ -1,0 +1,33 @@
+diff --git a/src/venus/vkr_image.c b/src/venus/vkr_image.c
+index 2b627e3..1ae6bb3 100644
+--- a/src/venus/vkr_image.c
++++ b/src/venus/vkr_image.c
+@@ -32,6 +32,28 @@ vkr_dispatch_vkCreateImage(struct vn_dispatch_context *dispatch,
+     */
+ 
+    vkr_image_create_and_add(dispatch->data, args);
++
++   if (args->ret != VK_SUCCESS) {
++      /* Say what was refused: imported buffers whose layout the driver rejects decide
++       * whether a compositor can show other programs' windows through the bridge. */
++      const VkImageCreateInfo *info = args->pCreateInfo;
++      const VkImageDrmFormatModifierExplicitCreateInfoEXT *explicit_info = vkr_find_struct(
++         info->pNext, VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT);
++      vkr_log("vkCreateImage -> %d: %ux%u format %d tiling %d usage 0x%x flags 0x%x", args->ret,
++              info->extent.width, info->extent.height, info->format, info->tiling, info->usage,
++              info->flags);
++      if (explicit_info) {
++         for (uint32_t i = 0; i < explicit_info->drmFormatModifierPlaneCount; i++) {
++            const VkSubresourceLayout *l = &explicit_info->pPlaneLayouts[i];
++            vkr_log("  modifier 0x%llx plane %u: offset %llu size %llu rowPitch %llu arrayPitch %llu "
++                    "depthPitch %llu",
++                    (unsigned long long)explicit_info->drmFormatModifier, i,
++                    (unsigned long long)l->offset, (unsigned long long)l->size,
++                    (unsigned long long)l->rowPitch, (unsigned long long)l->arrayPitch,
++                    (unsigned long long)l->depthPitch);
++         }
++      }
++   }
+ }
+ 
+ static void
