@@ -63,9 +63,13 @@ setup libepoxy -Degl=yes -Dglx=no -Dx11=false -Dtests=false -Ddocs=false
 ninja -C "$WORK/build-libepoxy" install
 
 fetch virglrenderer "$VIRGLRENDERER_REPO" "$VIRGLRENDERER_REF"
-setup virglrenderer -Dplatforms=egl -Dvenus=true -Drender-server=false -Dvideo=false -Dtests=false \
+echo "== virglrenderer meson_options:"; grep -n "option(" "$WORK/virglrenderer/meson_options.txt" | cut -c1-160
+echo "== virglrenderer gbm/platform lines:"; grep -n "gbm\|platforms\|with_egl\|with_glx\|epoxy" "$WORK/virglrenderer/meson.build" | cut -c1-160
+# Android has no DRM render node or GBM, so no EGL/GLX platform: this server only runs Venus.
+# On a configure failure, print the meson options and the lines around the error for the CI log.
+setup virglrenderer -Dplatforms= -Dvenus=true -Drender-server=false -Dvideo=false -Dtests=false \
   -Dfuzzer=false -Dminigbm_allocation=false -Dcheck-gl-errors=false
-ninja -C "$WORK/build-virglrenderer" install
+ninja -C "$WORK/build-virglrenderer" install || { echo "== virglrenderer build failed"; exit 1; }
 
 mkdir -p "$OUT/venus-server"
 cp "$PREFIX/bin/virgl_test_server" "$OUT/venus-server/"

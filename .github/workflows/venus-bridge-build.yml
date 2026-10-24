@@ -37,7 +37,8 @@ jobs:
         if: failure()
         run: |
           enc() { sed 's/%/%25/g' | cut -c1-300 | awk '{printf "%s%%0A", $0}'; }
-          echo "::error title=server tail::$(tail -45 /tmp/server.log | enc)"
+          echo "::error title=server tail::$(tail -60 /tmp/server.log | enc)"
+          echo "::error title=server meson info::$(sed -n '/== virglrenderer meson_options/,/^Running\|^The Meson/p' /tmp/server.log | head -80 | enc)"
           echo "::error title=server errors::$(grep -nE 'ERROR|error:|Error|not found|undefined' /tmp/server.log | tail -30 | enc)"
       - name: Package
         run: tar -C out -czf venus-server-android-arm64.tar.gz venus-server
