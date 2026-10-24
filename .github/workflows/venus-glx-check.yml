@@ -1,0 +1,24 @@
+name: Venus GLX check
+
+# Steam client GLX start-up on Zink without DRI3 (see tools/tests/glx), in Arch Linux ARM like
+# the phone's rootfs, before a session change that touches it ships.
+on:
+  push:
+    branches: [venus-bridge]
+    paths:
+      - 'tools/tests/glx/**'
+      - 'tools/linuxfs/preload/**'
+      - '.github/workflows/venus-glx-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  glx:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: GLX start-up cases
+        run: docker run --rm -v "$PWD:/work" -w /work menci/archlinuxarm:base-devel bash tools/tests/glx/run-in-arch.sh
