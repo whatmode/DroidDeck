@@ -67,6 +67,7 @@ Sixteen more of Armada's patches are DRM/lease/HDR-on-KMS work for a native disp
 app's Wayland-hosted gamescope never reaches, or need a newer gamescope than the runtime has.
 - `0124-tolerate-a-device-without-semaphore-fds.patch` - this app: `VK_KHR_external_semaphore_fd`
 - `0125-log-imported-buffer-layouts.patch` - this app: logs the per-plane offset and stride of imported window buffers
+- `0126-linear-only-dmabuf-modifiers.patch` - this app: GAMESCOPE_DMABUF_LINEAR_ONLY=1 offers clients linear dma-bufs only (Venus bridge: Mali reports AFBC row pitch 0)
   becomes optional. A remoted driver (Mesa's venus over vtest, which carries DroidDeck's bridge to
   Android's Mali driver) has no semaphore file descriptors; they only back explicit-sync timelines,
   which need a DRM render node anyway, so timelines are simply unavailable without them.

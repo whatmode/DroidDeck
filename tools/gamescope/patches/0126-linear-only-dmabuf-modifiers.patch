@@ -1,0 +1,31 @@
+From 71ea5d8c2d8b081fca4916d85a7eb771e8598df2 Mon Sep 17 00:00:00 2001
+From: droiddeck <ci@droiddeck>
+Date: Sat, 24 Oct 2026 14:17:05 +0000
+Subject: [PATCH] 0126
+
+---
+ src/rendervulkan.cpp | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/rendervulkan.cpp b/src/rendervulkan.cpp
+index e318d9e..35dbc3c 100644
+--- a/src/rendervulkan.cpp
++++ b/src/rendervulkan.cpp
+@@ -2960,6 +2960,14 @@ bool vulkan_init_format(VkFormat format, uint32_t drmFormat)
+ 				continue;
+ 			}
+ 
++			// GAMESCOPE_DMABUF_LINEAR_ONLY=1: offer clients linear buffers only. Through the
++			// Venus bridge, Android's Mali driver may pick a compressed (AFBC) layout for a
++			// client's swapchain and report its row pitch as 0; wlroots then rejects the
++			// buffer ("invalid stride 0 for plane 0") and drops the client's connection.
++			static const bool s_bLinearOnly = getenv( "GAMESCOPE_DMABUF_LINEAR_ONLY" ) && atoi( getenv( "GAMESCOPE_DMABUF_LINEAR_ONLY" ) );
++			if ( s_bLinearOnly && modifier != DRM_FORMAT_MOD_LINEAR )
++				continue;
++
+ 			// The deferred backend exposes all sample-able formats as supported modifiers.
+ 			if ( !g_bAllowDeferredBackend )
+ 			{
+-- 
+2.43.0
+

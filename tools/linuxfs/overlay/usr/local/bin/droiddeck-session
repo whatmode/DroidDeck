@@ -183,6 +183,9 @@ mali_gl_setup() {
     BL_GAMESCOPE_BIN=$dir/bin/gamescope
     BL_MALI_GL_ACTIVE=1
     export BL_VENUS_SINGLE=1
+    # Mali may give a client's swapchain a compressed layout whose row pitch reads as 0, which
+    # wlroots refuses ("invalid stride 0 for plane 0") by dropping the client (Steam).
+    export GAMESCOPE_DMABUF_LINEAR_ONLY=${GAMESCOPE_DMABUF_LINEAR_ONLY:-1}
     echo "== mali-gl: venus single driver ($(cat "$dir/VERSION" 2>/dev/null)): gamescope $BL_GAMESCOPE_BIN, Xwayland -shm, GL on Zink over the bridge"
     return 0
   fi
@@ -936,6 +939,9 @@ BUSCONF
           echo "== steam: Mali GPU, CEF draws in software (-cef-disable-gpu)" ;;
         vulkan)
           _bl_cef=(-cef-force-gpu -cef-use-gl=angle -cef-use-angle=vulkan)
+          # Steam does not hand -cef-use-angle to the webhelper's GPU thread (its log showed
+          # ANGLE's GL renderer); pass Chromium's own switches through the webhelper preload.
+          [ "${BL_VENUS_SINGLE:-0}" = 1 ] && export BL_WEBHELPER_ARGS="${BL_WEBHELPER_ARGS:---no-zygote --in-process-gpu -AudioServiceOutOfProcess} --use-gl=angle --use-angle=vulkan"
           echo "== steam: Mali GPU, CEF draws through ANGLE on Vulkan (PanVK directly)" ;;
         *)
           _bl_cef=(-cef-force-gpu -cef-use-gl=angle -cef-use-angle=gl)
