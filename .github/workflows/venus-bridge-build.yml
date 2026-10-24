@@ -41,11 +41,15 @@ jobs:
           echo "::error title=server meson info::$(sed -n '/== virglrenderer meson_options/,/^Running\|^The Meson/p' /tmp/server.log | head -80 | enc)"
           echo "::error title=server errors::$(grep -nE 'ERROR|error:|Error|not found|undefined' /tmp/server.log | tail -30 | enc)"
       - name: Package
-        run: tar -C out -czf venus-server-android-arm64.tar.gz venus-server
+        run: |
+          tar -C out -czf venus-server-android-arm64.tar.gz venus-server
+          mv out/virglrenderer-src.tar.gz .
       - uses: actions/upload-artifact@v4
         with:
           name: venus-server
-          path: venus-server-android-arm64.tar.gz
+          path: |
+            venus-server-android-arm64.tar.gz
+            virglrenderer-src.tar.gz
 
   guest:
     runs-on: ubuntu-24.04-arm
