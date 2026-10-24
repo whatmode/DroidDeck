@@ -22,7 +22,7 @@ trap annotate EXIT
 grep -q '^DisableSandbox' /etc/pacman.conf || sed -i 's/^\[options\]/[options]\nDisableSandbox/' /etc/pacman.conf
 { for m in https://ca.us.mirror.archlinuxarm.org https://fl.us.mirror.archlinuxarm.org https://de3.mirror.archlinuxarm.org https://nl.mirror.archlinuxarm.org; do echo "Server = $m/\$arch/\$repo"; done; cat /etc/pacman.d/mirrorlist; } > /etc/pacman.d/mirrorlist.new
 mv /etc/pacman.d/mirrorlist.new /etc/pacman.d/mirrorlist
-pacman -Syu --noconfirm --needed gcc mesa vulkan-swrast vulkan-tools vulkan-headers libglvnd libx11 xorg-server-xvfb \
+pacman -Syu --noconfirm --needed gcc mesa vulkan-swrast vulkan-tools vulkan-headers strace libglvnd libx11 xorg-server-xvfb \
   xorg-xwayland weston xorg-xdpyinfo >/tmp/pacman.log 2>&1 || { echo "pacman failed"; tail -15 /tmp/pacman.log; exit 1; }
 echo "== mesa $(pacman -Q mesa), $(pacman -Q xorg-xwayland)"
 OUT=/tmp/glx; mkdir -p $OUT
@@ -51,7 +51,11 @@ run_cases() {
   echo "== X extensions on $DISPLAY: $(xdpyinfo | sed -n '/number of extensions/,/default screen/p' | grep -v 'default screen\|number of' | tr -s ' \n' ' ')"
   check ok   "$1: control, llvmpipe (no Zink)" -u MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER=llvmpipe -- --
   check ok   "$1: Zink, Kopper on" -- --
-  [ -n "${shown:-}" ] || { shown=1; echo "---- full log of that case:"; head -60 $OUT/log; MESA_LOADER_DRIVER_OVERRIDE=zink vulkaninfo --summary 2>&1 | grep -i "deviceName\|deviceType\|driverName" | head; }
+  [ -n "${shown:-}" ] || { shown=1; echo "---- that case again, verbose, with the files it opens:";
+    MESA_DEBUG=1 MESA_LOG_LEVEL=debug ZINK_DEBUG=noreorder strace -f -e trace=openat -o $OUT/strace timeout 60 $OUT/glxcheck > $OUT/vlog 2>&1
+    grep -v "glXChooseVisual(" $OUT/vlog | head -40
+    grep -E "gallium|dri|vulkan|icd|layer|lvp|GLX" $OUT/strace | grep -v ENOENT | sed 's/^[0-9]* *//' | cut -c1-160 | head -30
+    vulkaninfo --summary 2>&1 | grep -i "deviceName\|deviceType\|driverName" | head; }
   check fail "$1: Zink, client sets LIBGL_KOPPER_DISABLE (Steam today, no preload)" -- --steam-env
   check ok   "$1: same, session preload with BL_WEBHELPER_KOPPER=1" LD_PRELOAD=$OUT/libblsession.so BL_WEBHELPER_KOPPER=1 -- --steam-env
   check fail "$1: same preload, BL_WEBHELPER_KOPPER unset (the fix is opt-in)" LD_PRELOAD=$OUT/libblsession.so -- --steam-env
