@@ -1,5 +1,9 @@
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <time.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -84,4 +88,32 @@ __attribute__((constructor)) static void bl_webhelper_kopper(void) {
   if (!want || strcmp(want, "1")) return;
   if (!program_invocation_short_name || strcmp(program_invocation_short_name, "steamwebhelper")) return;
   unsetenv("LIBGL_KOPPER_DISABLE");
+}
+
+/* BL_WEBHELPER_STDERR=<file>: every steamwebhelper process appends its stderr there. Steam
+ * drops the webhelper's output, so a webhelper that dies at start (Mesa/Zink errors, Chromium's
+ * own crash report) otherwise leaves nothing behind. */
+__attribute__((constructor)) static void bl_webhelper_stderr(void) {
+  const char *file = getenv("BL_WEBHELPER_STDERR");
+  if (!file || !*file) return;
+  if (!program_invocation_short_name || strcmp(program_invocation_short_name, "steamwebhelper")) return;
+  int fd = open(file, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+  if (fd < 0) return;
+  char head[256];
+  char type[64] = "browser";
+  int in = open("/proc/self/cmdline", O_RDONLY | O_CLOEXEC);
+  if (in >= 0) {
+    char buf[4096];
+    ssize_t n = read(in, buf, sizeof(buf) - 1);
+    close(in);
+    if (n > 0) {
+      buf[n] = 0;
+      for (char *p = buf; p < buf + n; p += strlen(p) + 1)
+        if (!strncmp(p, "--type=", 7)) { snprintf(type, sizeof(type), "%s", p + 7); break; }
+    }
+  }
+  int len = snprintf(head, sizeof(head), "==== steamwebhelper pid %d (%s) started at %ld\n", (int)getpid(), type, (long)time(NULL));
+  if (len > 0 && write(fd, head, (size_t)len) < 0) { }
+  dup2(fd, 2);
+  close(fd);
 }
