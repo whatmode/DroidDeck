@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -116,4 +117,19 @@ __attribute__((constructor)) static void bl_webhelper_stderr(void) {
   if (len > 0 && write(fd, head, (size_t)len) < 0) { }
   dup2(fd, 2);
   close(fd);
+}
+
+/* BL_WEBHELPER_XTHREADS=1: make Xlib thread-safe in steamwebhelper before anything opens a
+ * display. Chromium, Zink/Kopper and the gamescope WSI layer all talk to the X server from
+ * their own threads; on an Xlib that was not told, crossed replies end the process with
+ * "Fatal IO error 11 (Resource temporarily unavailable) on X server :0", and Steam quits after
+ * restarting the webhelper a few times. */
+__attribute__((constructor)) static void bl_webhelper_xthreads(void) {
+  const char *want = getenv("BL_WEBHELPER_XTHREADS");
+  if (!want || strcmp(want, "1")) return;
+  if (!program_invocation_short_name || strcmp(program_invocation_short_name, "steamwebhelper")) return;
+  void *x11 = dlopen("libX11.so.6", RTLD_NOW | RTLD_GLOBAL);
+  if (!x11) return;
+  int (*init_threads)(void) = (int (*)(void))dlsym(x11, "XInitThreads");
+  if (init_threads) init_threads();
 }
