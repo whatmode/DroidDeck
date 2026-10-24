@@ -43,7 +43,7 @@ public class LinuxVulkanDriverManager {
      * Ported from SPLATPLAYS/DroidDeck (51bd995).
      */
     private static final List<String> LIB_PREFIXES = Collections.unmodifiableList(Arrays.asList(
-            "libvulkan_freedreno", "libvulkan_panvk", "libvulkan_panfrost", "libvulkan_lvp"));
+            "libvulkan_freedreno", "libvulkan_panvk", "libvulkan_panfrost", "libvulkan_lvp", "libvulkan_virtio"));
 
     public static boolean isRuntimeDriverName(String name) {
         if (name == null || !name.endsWith(".so")) return false;

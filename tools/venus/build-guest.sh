@@ -20,7 +20,9 @@ SO="$WORK/build-mesa/src/virtio/vulkan/libvulkan_virtio.so"
 ICD=$(ls "$WORK"/build-mesa/src/virtio/vulkan/virtio_icd.*.json | head -1)
 D="$OUT/venus-guest"
 rm -rf "$D"; mkdir -p "$D"
-cp "$SO" "$D/libvulkan_virtio.so"
+# Shipped under a name DroidDeck's importer already accepts (APKs before the bridge only take
+# libvulkan_freedreno/panvk/panfrost/lvp); meta.json's backend marks it as the venus ICD.
+cp "$SO" "$D/libvulkan_panvk.so"
 cp "$ICD" "$D/virtio_icd.aarch64.json"
 SHA=$(git -C "$WORK/mesa" rev-parse HEAD)
 python3 - "$D/meta.json" "$SHA" "$MESA_REF" <<'PY'
@@ -32,11 +34,11 @@ json.dump({
     "name": "DroidDeck-venus-bridge " + ref,
     "driverVersion": ref + " " + sha[:8],
     "libc": "glibc",
-    "libraryName": "libvulkan_virtio.so",
+    "libraryName": "libvulkan_panvk.so",
     "abi": "linux-aarch64-glibc",
     "backend": "venus-vtest",
     "sourceCommit": sha,
 }, open(out, "w"), indent=2)
 PY
-(cd "$D" && sha256sum libvulkan_virtio.so > SHA256SUMS.txt && zip -q "$OUT/Venus-Bridge-guest-${MESA_REF}-${SHA:0:8}.zip" *)
+(cd "$D" && sha256sum libvulkan_panvk.so > SHA256SUMS.txt && zip -q "$OUT/Venus-Bridge-guest-${MESA_REF}-${SHA:0:8}.zip" *)
 ls -la "$OUT"
