@@ -569,7 +569,7 @@ class SessionService : Service() {
         if (com.droiddeck.launcher.gpu.VenusBridge.isVenus(this, linuxDriverId)) {
             val up = com.droiddeck.launcher.gpu.VenusBridge.start(this, SessionState.logDirectory?.let { File(it, "venus-server.log") })
             Log.i(TAG, "venus bridge: server " + if (up) "up" else "NOT running")
-            guest.add("VN_DEBUG=vtest")
+            guest.add("VN_DEBUG=vtest,init,result")
             guest.add("BL_VENUS=" + if (up) "1" else "0")
         }
         tuDebug(linuxDriverId)?.let { guest.add("TU_DEBUG=$it") }
