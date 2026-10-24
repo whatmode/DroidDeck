@@ -1,0 +1,42 @@
+From 870e8318330677a3e53a62c3e5b9870f635685bd Mon Sep 17 00:00:00 2001
+From: droiddeck <ci@droiddeck>
+Date: Sat, 24 Oct 2026 16:30:45 +0000
+Subject: [PATCH] wsi: log and patch zero row pitches
+
+---
+ src/vulkan/wsi/wsi_common_drm.c | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/src/vulkan/wsi/wsi_common_drm.c b/src/vulkan/wsi/wsi_common_drm.c
+index 663820c..1041138 100644
+--- a/src/vulkan/wsi/wsi_common_drm.c
++++ b/src/vulkan/wsi/wsi_common_drm.c
+@@ -746,6 +746,25 @@ wsi_create_native_image_mem(const struct wsi_swapchain *chain,
+       image->offsets[0] = 0;
+    }
+ 
++   /* DroidDeck: a driver that reports no row pitch (Android's Mali driver through Venus did)
++    * gets the buffer refused by the compositor ("invalid stride 0 for plane 0"), which drops
++    * the program's Wayland connection. Say which image it was and derive a pitch from the
++    * plane size, so the buffer at least gets through. */
++   for (uint32_t p = 0; p < image->num_planes; p++) {
++      if (image->row_pitches[p])
++         continue;
++      const uint32_t h = info->create.extent.height ? info->create.extent.height : 1;
++      fprintf(stderr, "wsi: zero row pitch: plane %u, modifier 0x%llx, format %d, %ux%u, "
++              "tiling %d, usage 0x%x, flags 0x%x, size %llu, offset %llu\n", p,
++              (unsigned long long)image->drm_modifier, info->create.format,
++              info->create.extent.width, info->create.extent.height, info->create.tiling,
++              info->create.usage, info->create.flags,
++              (unsigned long long)image->sizes[p], (unsigned long long)image->offsets[p]);
++      image->row_pitches[p] = (uint32_t)(image->sizes[p] / h) & ~63u;
++      if (!image->row_pitches[p])
++         image->row_pitches[p] = ALIGN_POT(info->create.extent.width * 4, 64);
++   }
++
+    return VK_SUCCESS;
+ }
+ 
+-- 
+2.43.0
+
