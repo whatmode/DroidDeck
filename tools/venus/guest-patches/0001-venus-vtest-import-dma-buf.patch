@@ -1,0 +1,172 @@
+From 7c04766b783d68404769a12427eae3edfe7be875 Mon Sep 17 00:00:00 2001
+From: droiddeck <ci@droiddeck>
+Date: Sat, 24 Oct 2026 11:43:09 +0000
+Subject: [PATCH] venus: import dma-bufs over vtest
+
+---
+ src/virtio/vtest/vtest_protocol.h     |   6 ++
+ src/virtio/vulkan/vn_renderer_vtest.c | 110 +++++++++++++++++++++++++-
+ 2 files changed, 114 insertions(+), 2 deletions(-)
+
+diff --git a/src/virtio/vtest/vtest_protocol.h b/src/virtio/vtest/vtest_protocol.h
+index 1bd515c..d46572a 100644
+--- a/src/virtio/vtest/vtest_protocol.h
++++ b/src/virtio/vtest/vtest_protocol.h
+@@ -77,6 +77,12 @@
+ #define VCMD_SYNC_WRITE 22
+ #define VCMD_SYNC_WAIT 23
+ #define VCMD_SUBMIT_CMD2 24
++/* DroidDeck: import a dma-buf as a blob resource. Payload: size lo, size hi; then the
++ * dma-buf travels as SCM_RIGHTS on one extra byte. Reply: the resource id, 0 on failure. */
++#define VCMD_RESOURCE_IMPORT_DMABUF 25
++#define VCMD_RES_IMPORT_DMABUF_SIZE 2
++#define VCMD_RES_IMPORT_DMABUF_SIZE_LO 0
++#define VCMD_RES_IMPORT_DMABUF_SIZE_HI 1
+ 
+ /* since protocol version 4 */
+ #define VCMD_DRM_SYNC_CREATE 25
+diff --git a/src/virtio/vulkan/vn_renderer_vtest.c b/src/virtio/vulkan/vn_renderer_vtest.c
+index 9f81c1a..5f18dca 100644
+--- a/src/virtio/vulkan/vn_renderer_vtest.c
++++ b/src/virtio/vulkan/vn_renderer_vtest.c
+@@ -349,6 +349,60 @@ vtest_vcmd_resource_create_blob(struct vtest *vtest,
+    return res_id;
+ }
+ 
++static void
++vtest_send_fd(struct vtest *vtest, int fd)
++{
++   char cmsg_buf[CMSG_SPACE(sizeof(int))];
++   char dummy = 0;
++   memset(cmsg_buf, 0, sizeof(cmsg_buf));
++   struct msghdr msg = {
++      .msg_iov =
++         &(struct iovec){
++            .iov_base = &dummy,
++            .iov_len = sizeof(dummy),
++         },
++      .msg_iovlen = 1,
++      .msg_control = cmsg_buf,
++      .msg_controllen = sizeof(cmsg_buf),
++   };
++   struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
++   cmsg->cmsg_level = SOL_SOCKET;
++   cmsg->cmsg_type = SCM_RIGHTS;
++   cmsg->cmsg_len = CMSG_LEN(sizeof(int));
++   memcpy(CMSG_DATA(cmsg), &fd, sizeof(int));
++
++   if (sendmsg(vtest->sock_fd, &msg, 0) != 1) {
++      vn_log(vtest->instance, "sendmsg failed: %s", strerror(errno));
++      abort();
++   }
++}
++
++/* DroidDeck: hands a dma-buf to the server, which makes it a blob resource the host driver
++ * imports. Returns the resource id, 0 when the server could not import it. */
++static uint32_t
++vtest_vcmd_resource_import_dmabuf(struct vtest *vtest, VkDeviceSize size, int fd)
++{
++   uint32_t vtest_hdr[VTEST_HDR_SIZE];
++   uint32_t vcmd[VCMD_RES_IMPORT_DMABUF_SIZE];
++
++   vtest_hdr[VTEST_CMD_LEN] = VCMD_RES_IMPORT_DMABUF_SIZE;
++   vtest_hdr[VTEST_CMD_ID] = VCMD_RESOURCE_IMPORT_DMABUF;
++   vcmd[VCMD_RES_IMPORT_DMABUF_SIZE_LO] = (uint32_t)size;
++   vcmd[VCMD_RES_IMPORT_DMABUF_SIZE_HI] = (uint32_t)(size >> 32);
++
++   vtest_write(vtest, vtest_hdr, sizeof(vtest_hdr));
++   vtest_write(vtest, vcmd, sizeof(vcmd));
++   vtest_send_fd(vtest, fd);
++
++   vtest_read(vtest, vtest_hdr, sizeof(vtest_hdr));
++   assert(vtest_hdr[VTEST_CMD_LEN] == 1);
++   assert(vtest_hdr[VTEST_CMD_ID] == VCMD_RESOURCE_IMPORT_DMABUF);
++
++   uint32_t res_id;
++   vtest_read(vtest, &res_id, sizeof(res_id));
++   return res_id;
++}
++
+ static void
+ vtest_vcmd_resource_unref(struct vtest *vtest, uint32_t res_id)
+ {
+@@ -775,6 +829,58 @@ vtest_bo_create_from_device_memory(
+    return VK_SUCCESS;
+ }
+ 
++static VkResult
++vtest_bo_create_from_dma_buf(struct vn_renderer *renderer,
++                             VkDeviceSize size,
++                             int fd,
++                             VkMemoryPropertyFlags flags,
++                             struct vn_renderer_bo **out_bo)
++{
++   struct vtest *vtest = (struct vtest *)renderer;
++
++   const off_t fd_size = lseek(fd, 0, SEEK_END);
++   lseek(fd, 0, SEEK_SET);
++   if (fd_size <= 0 || (VkDeviceSize)fd_size < size) {
++      vn_log(vtest->instance, "dma-buf %d is %lld bytes, %llu wanted", fd,
++             (long long)fd_size, (unsigned long long)size);
++      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
++   }
++
++   /* the bo keeps its own reference for mapping and export */
++   const int bo_fd = os_dupfd_cloexec(fd);
++   if (bo_fd < 0)
++      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
++
++   mtx_lock(&vtest->sock_mutex);
++   const uint32_t res_id =
++      vtest_vcmd_resource_import_dmabuf(vtest, (VkDeviceSize)fd_size, fd);
++   mtx_unlock(&vtest->sock_mutex);
++   if (!res_id) {
++      vn_log(vtest->instance, "server could not import dma-buf %d (%lld bytes)",
++             fd, (long long)fd_size);
++      close(bo_fd);
++      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
++   }
++
++   uint32_t blob_flags = VCMD_BLOB_FLAG_SHAREABLE;
++   if (flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
++      blob_flags |= VCMD_BLOB_FLAG_MAPPABLE;
++
++   struct vtest_bo *bo = util_sparse_array_get(&vtest->bo_array, res_id);
++   *bo = (struct vtest_bo){
++      .base = {
++         .refcount = VN_REFCOUNT_INIT(1),
++         .res_id = res_id,
++         .mmap_size = (blob_flags & VCMD_BLOB_FLAG_MAPPABLE) ? (size ? size : (VkDeviceSize)fd_size) : 0,
++      },
++      .res_fd = bo_fd,
++      .blob_flags = blob_flags,
++   };
++
++   *out_bo = &bo->base;
++   return VK_SUCCESS;
++}
++
+ static void
+ vtest_shmem_destroy_now(struct vn_renderer *renderer,
+                         struct vn_renderer_shmem *_shmem)
+@@ -927,7 +1033,7 @@ vtest_init_renderer_info(struct vtest *vtest)
+    info->pci.vendor_id = VTEST_PCI_VENDOR_ID;
+    info->pci.device_id = VTEST_PCI_DEVICE_ID;
+ 
+-   info->has_dma_buf_import = false;
++   info->has_dma_buf_import = true; /* DroidDeck: VCMD_RESOURCE_IMPORT_DMABUF */
+    info->has_external_sync = false;
+    info->has_implicit_fencing = false;
+ 
+@@ -1067,7 +1173,7 @@ vtest_init(struct vtest *vtest)
+ 
+    vtest->base.bo_ops.create_from_device_memory =
+       vtest_bo_create_from_device_memory;
+-   vtest->base.bo_ops.create_from_dma_buf = NULL;
++   vtest->base.bo_ops.create_from_dma_buf = vtest_bo_create_from_dma_buf;
+    vtest->base.bo_ops.destroy = vtest_bo_destroy;
+    vtest->base.bo_ops.export_dma_buf = vtest_bo_export_dma_buf;
+    vtest->base.bo_ops.map = vtest_bo_map;
+-- 
+2.43.0
+

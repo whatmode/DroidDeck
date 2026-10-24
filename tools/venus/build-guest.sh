@@ -8,6 +8,13 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/source.env"
 WORK=${VENUS_WORK:-$(mktemp -d)}
 [ -d "$WORK/mesa" ] || git clone -q --depth 1 --branch "$MESA_REF" "$MESA_REPO" "$WORK/mesa"
+# DroidDeck changes to the guest ICD (vtest dma-buf import, so a compositor can show other
+# programs' windows).
+for p in "$HERE"/guest-patches/*.patch; do
+  [ -e "$p" ] || continue
+  echo "== applying $(basename "$p")"
+  git -C "$WORK/mesa" apply --whitespace=nowarn "$p"
+done
 tar -C "$WORK/mesa" -czf "$OUT/mesa-virtio-src.tar.gz" src/virtio src/vulkan/runtime src/vulkan/wsi include/drm-uapi
 echo "== venus vtest socket handling:"
 grep -n "getenv\|SOCKET\|socket_name\|sun_path" "$WORK/mesa/src/virtio/vulkan/vn_renderer_vtest.c" | head -20 || true
