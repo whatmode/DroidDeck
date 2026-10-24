@@ -1,0 +1,21 @@
+diff --git a/src/rendervulkan.cpp b/src/rendervulkan.cpp
+index c3152a9..e318d9e 100644
+--- a/src/rendervulkan.cpp
++++ b/src/rendervulkan.cpp
+@@ -4737,9 +4737,15 @@ static struct wlr_texture *renderer_texture_from_buffer( struct wlr_renderer *wl
+ 		static int s_nTex = 0;
+ 		struct wlr_dmabuf_attributes dmabuf = {0};
+ 		bool bDmabuf = wlr_buffer_get_dmabuf( buf, &dmabuf );
+-		if ( s_nTex++ < 8 )
++		if ( s_nTex++ < 64 )
++		{
+ 			vk_log.infof( "mali-gl: texture_from_buffer %dx%d dmabuf %d format 0x%x modifier 0x%lx planes %d",
+ 				buf->width, buf->height, (int)bDmabuf, dmabuf.format, (unsigned long)dmabuf.modifier, dmabuf.n_planes );
++			// The layout a driver has to accept to import the buffer (rows, offsets).
++			for ( int i = 0; bDmabuf && i < dmabuf.n_planes && i < 4; i++ )
++				vk_log.infof( "mali-gl:   plane %d: fd %d offset %u stride %u (%%64=%u)",
++					i, dmabuf.fd[i], dmabuf.offset[i], dmabuf.stride[i], dmabuf.stride[i] % 64 );
++		}
+ 	}
+ 	VulkanWlrTexture_t *tex = new VulkanWlrTexture_t();
+ 	wlr_texture_init( &tex->base, wlr_renderer, &texture_impl, buf->width, buf->height );
