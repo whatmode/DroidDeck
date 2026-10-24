@@ -1327,7 +1327,7 @@ BUSCONF
         (
           _bw_logs="$steam_root/logs"
           declare -A _bw_off=() _bw_seen=() _bw_name=() _bw_gl=() _bw_snap=()
-          for _bw_f in cef_log.txt webhelper.txt webhelper_js.txt console_log.txt steamui_html.txt webhelper_stderr.txt; do
+          for _bw_f in cef_log.txt webhelper.txt webhelper_js.txt console_log.txt steamui_html.txt; do
             _bw_off[$_bw_f]=$(stat -c %s "$_bw_logs/$_bw_f" 2>/dev/null || echo 0)
           done
           _bw_prev=""
@@ -1361,17 +1361,6 @@ BUSCONF
                 [ -n "${_bw_snap[$_bw_p]:-}" ] && printf '%s\n' "${_bw_snap[$_bw_p]}" | sed "s/^/== boot +${_bw_t}s:   last threads of $_bw_p: /"
                 unset "_bw_snap[$_bw_p]" ;;
               esac
-            done
-            # Thread states of each webhelper browser process (where Steam's UI and, with
-            # --in-process-gpu, its GPU thread live): name, state, kernel wait. (Not
-            # /proc/*/syscall: under proot reading it can block, which stalled this watcher.)
-            for _bw_p in $_bw_now; do
-              [ "${_bw_name[$_bw_p]:-}" = steamwebhelper ] || continue
-              _bw_snap[$_bw_p]=$(for _bw_t2 in /proc/$_bw_p/task/*; do
-                  printf '%s %s %s\n' "$(cat "$_bw_t2/comm" 2>/dev/null)" \
-                    "$(awk '{print $3}' "$_bw_t2/stat" 2>/dev/null)" \
-                    "$(timeout 1 cat "$_bw_t2/wchan" 2>/dev/null)"
-                done | sort | uniq -c | sort -rn | head -25)
             done
             _bw_prev=$_bw_now
             # Which GL/EGL/Mesa libraries each Steam process really mapped (mali-gl: is
