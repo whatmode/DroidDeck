@@ -66,9 +66,6 @@ object SessionFiles {
             "usr/local/bin/droiddeck-desktop-bookmarks" to "usr/local/bin/droiddeck-desktop-bookmarks",
             "usr/local/bin/droiddeck-steam-shim" to "usr/local/bin/droiddeck-steam-shim",
             "usr/local/bin/droiddeck-steam-shortcuts" to "usr/local/bin/droiddeck-steam-shortcuts",
-            "usr/local/bin/droiddeck-store-launch" to "usr/local/bin/droiddeck-store-launch",
-            "usr/local/bin/droiddeck-epic" to "usr/local/bin/droiddeck-epic",
-            "usr/local/bin/droiddeck-epic-steam" to "usr/local/bin/droiddeck-epic-steam",
             "usr/local/bin/droiddeck-open-url" to "usr/local/bin/droiddeck-open-url",
             "usr/local/bin/droiddeck-steam-games" to "usr/local/bin/droiddeck-steam-games",
             "usr/local/bin/droiddeck-pad-defaults" to "usr/local/bin/droiddeck-pad-defaults",
@@ -127,7 +124,14 @@ object SessionFiles {
                 "usr/share/vulkan/implicit_layer.d/droiddeck_vr.json") +
             // Mali: hides NV12 / YCbCr formats from games (loaded only with DROIDDECK_HIDE_YCBCR=1).
             listOf("usr/local/lib/droiddeck-vklayers/libVkLayer_droiddeck_noycbcr.so" to "usr/local/lib/droiddeck-vklayers/libVkLayer_droiddeck_noycbcr.so",
-                "usr/local/lib/droiddeck-vklayers/VK_LAYER_DROIDDECK_noycbcr.json" to "usr/share/vulkan/implicit_layer.d/droiddeck_noycbcr.json")
+                "usr/local/lib/droiddeck-vklayers/VK_LAYER_DROIDDECK_noycbcr.json" to "usr/share/vulkan/implicit_layer.d/droiddeck_noycbcr.json",
+                // Bisection: hides the device extensions named in DROIDDECK_HIDE_EXTS (loaded only
+                // with DROIDDECK_HIDE_EXTS_ENABLE=1, which droiddeck-game-env derives from it).
+                "usr/local/lib/droiddeck-vklayers/libVkLayer_droiddeck_hideext.so" to "usr/local/lib/droiddeck-vklayers/libVkLayer_droiddeck_hideext.so",
+                "usr/local/lib/droiddeck-vklayers/VK_LAYER_DROIDDECK_hideext.json" to "usr/share/vulkan/implicit_layer.d/droiddeck_hideext.json",
+                // Mali: GPU-only resources out of IO-coherent memory (loaded only with DROIDDECK_MALI_MEMORY=1).
+                "usr/local/lib/droiddeck-vklayers/libVkLayer_droiddeck_malimem.so" to "usr/local/lib/droiddeck-vklayers/libVkLayer_droiddeck_malimem.so",
+                "usr/local/lib/droiddeck-vklayers/VK_LAYER_DROIDDECK_malimem.json" to "usr/share/vulkan/implicit_layer.d/droiddeck_malimem.json")
         val fexPreloads = listOf("x86_64", "i386").flatMap { arch ->
             listOf("libblsession.so", "libfakeinput.so", "libfaultreport.so").map { "$arch/$it" to "usr/local/lib/droiddeck-fex/$arch/$it" }
         } + listOf("libthunkaudit.so", "libvulkan-thunk.so", "libwebkitinput.so").map { "x86_64/$it" to "usr/local/lib/droiddeck-fex/x86_64/$it" }
@@ -135,15 +139,11 @@ object SessionFiles {
             "usr/local/bin/gamescope" to "usr/local/bin/gamescope",
             // mali-gl stack for Mali (kbase) phones; droiddeck-session unpacks it on Mali only.
             "opt/mali-gl.tgz" to "opt/mali-gl.tgz",
-            // EA client (Maxima) for the EA store tab.
-            "usr/local/lib/droiddeck-ea/droiddeck-ea" to "usr/local/lib/droiddeck-ea/droiddeck-ea",
-            "usr/local/lib/droiddeck-ea/maxima-bootstrap" to "usr/local/lib/droiddeck-ea/maxima-bootstrap",
-            "usr/local/lib/droiddeck-ea/droiddeck-ea-wine" to "usr/local/lib/droiddeck-ea/droiddeck-ea-wine",
         ) + listOf("libavutil.so.56", "libavcodec.so.58", "libavformat.so.58", "libavfilter.so.7", "libswscale.so.5", "libswresample.so.3", "LICENSE", "VERSION")
             .map { "usr/local/lib/droiddeck-ffmpeg/$it" to "usr/local/lib/droiddeck-ffmpeg/$it" }.toTypedArray() + arrayOf(
             "usr/local/lib/droiddeck/uruntime" to "usr/local/lib/droiddeck/uruntime",
             "usr/local/share/licenses/uruntime/LICENSE" to "usr/local/share/licenses/uruntime/LICENSE",
-        ) + mangoapp + listOf("comet", "GalaxyCommunication.exe", "update-permissions.exe", "LICENSE", "version").map { "usr/local/lib/droiddeck-comet/$it" to "usr/local/lib/droiddeck-comet/$it" } + msitools.map { it to it } + vr + fexPreloads).filter { (asset, _) ->
+        ) + mangoapp + msitools.map { it to it } + vr + fexPreloads).filter { (asset, _) ->
             val dir = asset.substringBeforeLast('/')
             runCatching { context.assets.list("linuxfs/$dir")?.contains(asset.substringAfterLast('/')) == true }.getOrDefault(false)
         }

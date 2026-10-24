@@ -1,0 +1,113 @@
+name: PanVK ICD build
+
+on:
+  push:
+    branches: [panvk-csf-tls-size]
+    paths:
+      - 'tools/panvk/**'
+      - 'mali-gl/patches/**'
+      - '.github/workflows/panvk-icd-build.yml'
+  workflow_dispatch:
+    inputs:
+      # Build a different vendor ref without editing this file. The default is the
+      # RC4-matching pin; the vendor's main is far ahead of it (csf-v11 197-212), so this
+      # is the A/B that separates "the pin is stale" from "a bug this repo must fix".
+      zenithblue_ref:
+        description: 'zenithblue ref to build (empty = the pinned RC4-matching ref)'
+        required: false
+        default: ''
+      patch_numbers:
+        description: 'mali-gl patch numbers to apply, space separated (empty = all; use "0002 0003 0004" for vendor main)'
+        required: false
+        default: ''
+      # 0005 moved the old per-game env switches into the compiled profile, so a behaviour
+      # bisection is now a rebuild. This sets one initializer field, e.g.
+      # bc_mode=PANVK_BC_MODE_COMPUTE or no_crc=true, and lands in the zip name and meta.json.
+      profile_knob:
+        description: 'one panvk_kbase_profile_for() field to override, name=value (empty = none; needs patch 0005)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: panvk-icd-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    env:
+      # The vendor tag for the shipped RC4 binary (panvk-kbase-v0.1.0-rc4) points at
+      # 5b87b74d, whose csf-v11 series stops at 186 -- but the vendor's own RC4 binary
+      # analysis finds strings that only 187-196 add, and the RC4 release notes say the
+      # source was never committed. Building 5b87b74d therefore does NOT reproduce the
+      # shipped driver, which invalidated the earlier "patches vs rebuild" A/B. Build the
+      # last vendor commit whose series matches what RC4 actually contains.
+      #
+      # A dispatch input overrides it, and is read from the environment rather than
+      # interpolated into the shell, so a ref string cannot inject commands.
+      ZENITHBLUE_REF: ${{ inputs.zenithblue_ref || '150c7cdd5b1f22f1994741a1a75577063d96a265' }}
+      PANVK_PATCH_NUMBERS: ${{ inputs.patch_numbers }}
+      PANVK_PROFILE_KNOB: ${{ inputs.profile_knob }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            ninja-build pkg-config bison flex python3-mako python3-yaml python3-ply python3-pip \
+            clang llvm-18-dev libclang-18-dev libclang-cpp18-dev libclc-18-dev llvm-spirv-18 \
+            libllvmspirvlib-18-dev spirv-tools glslang-tools libelf-dev zlib1g-dev libexpat1-dev \
+            libdrm-dev libwayland-dev wayland-protocols libwayland-egl-backend-dev \
+            libx11-dev libx11-xcb-dev libxext-dev libxfixes-dev libxcb-glx0-dev libxcb-shm0-dev \
+            libxcb-dri2-0-dev libxcb-dri3-dev libxcb-present-dev libxcb-sync-dev libxcb-randr0-dev \
+            libxcb-xfixes0-dev libxshmfence-dev libxxf86vm-dev libxrandr-dev zip >/dev/null
+          pip install --break-system-packages -q 'meson>=1.4'
+          meson --version
+
+      - name: Fetch the PanVK kbase series
+        run: |
+          set -euo pipefail
+          git init -q zb
+          git -C zb fetch -q --depth 1 https://github.com/zenithblue-oss/panvk-kbase-android "$ZENITHBLUE_REF"
+          git -C zb checkout -q FETCH_HEAD
+
+      - name: Build the patched ICD
+        run: bash tools/panvk/build.sh zb out
+
+      - name: Build the baseline ICD (vendor series, no mali-gl patches)
+        # build.sh refuses PANVK_PROFILE_KNOB under PANVK_BASELINE=1: the control has no 0005,
+        # so it stays at the vendor defaults.
+        run: PANVK_BASELINE=1 PANVK_WORK="$PWD/work-baseline" bash tools/panvk/build.sh zb out-baseline
+
+      - name: Upload the driver zips
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: panvk-icd
+          path: |
+            out/PanVK-Kbase-*.zip
+            out/summary.txt
+            out-baseline/PanVK-Kbase-*.zip
+            out-baseline/summary.txt
+
+      - name: Publish the driver zips as release assets
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=panvk-icd-latest
+          notes="Patched and baseline PanVK kbase glibc ICDs from ${GITHUB_SHA::7}. Import the zip as a Linux Vulkan driver in DroidDeck. The -baseline zip is the vendor series with none of the mali-gl patches; A/B the two to tell the patches apart from the rebuild."
+          if [ -n "${PANVK_PROFILE_KNOB}" ]; then
+            notes="$notes This run overrides panvk_kbase_profile_for() with ${PANVK_PROFILE_KNOB}, so its zip and driver row carry -knob- and it is NOT comparable to the plain patched build."
+          fi
+          gh release view "$tag" >/dev/null 2>&1 \
+            || gh release create "$tag" --prerelease --target "$GITHUB_SHA" --title "PanVK kbase ICD (test)" --notes "$notes"
+          gh release edit "$tag" --notes "$notes"
+          gh release upload "$tag" out/PanVK-Kbase-*.zip out-baseline/PanVK-Kbase-*.zip --clobber

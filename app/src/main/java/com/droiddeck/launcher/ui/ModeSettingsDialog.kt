@@ -560,7 +560,6 @@ internal fun ProtonOptions(
         note = stringResource(FexPreset.byId(fexPreset).detail), onPick = onFexPreset,
     )
     ToggleRow(host, "ssbs", stringResource(R.string.force_ssbs_title), stringResource(R.string.force_ssbs_hint), forceSsbs, onChange = onForceSsbs)
-    GameEnvironmentRow()
 }
 
 @Composable

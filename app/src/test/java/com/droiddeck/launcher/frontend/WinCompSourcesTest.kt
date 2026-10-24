@@ -2,8 +2,6 @@ package com.droiddeck.launcher.frontend
 
 import com.droiddeck.launcher.runtime.LinuxRuntime
 import com.droiddeck.launcher.session.WinComponents
-import com.droiddeck.launcher.stores.Store
-import com.droiddeck.launcher.stores.StoreGameSidecar
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
@@ -28,9 +26,6 @@ class WinCompSourcesTest {
 
     private fun game(folder: File?, source: String, appId: Int = 0x8123_4567.toInt(), library: String = Library.ADDED, name: String = "Game") =
         Library.SteamGame(appId, name, null, library, gameFiles = folder, source = source)
-
-    private fun sidecar(folder: File, store: Store, extra: Map<String, String>) =
-        StoreGameSidecar(store, "1", "Game", exe = "Game.exe", extra = extra).write(folder)
 
     private fun auto(findings: List<WinCompSources.Finding>) = findings.filter { it.auto }.map { it.component to it.origin }
 
@@ -71,36 +66,6 @@ class WinCompSourcesTest {
         assertEquals(listOf("vcredist2015_dll" to WinCompSources.Origin.STEAM, "d3dx9" to WinCompSources.Origin.STEAM), auto(findings))
         assertEquals(listOf("VC++ 2015", "Dota", "570"), findings.first().args)
     }
-
-    @Test fun gogTakesTheBuildsDependencies() {
-        val folder = tmp.newFolder("GogGame")
-        sidecar(folder, Store.GOG, mapOf(WinCompSources.GOG_DEPENDENCIES to "MSVC2017_x64,DirectX,ISI"))
-        val findings = WinCompSources.forGame(app, game(folder, "gog"))
-        assertEquals(listOf("vcredist2015" to WinCompSources.Origin.GOG, "d3dx9" to WinCompSources.Origin.GOG), auto(findings))
-        assertEquals(listOf("ISI"), findings.filter { it.component == null }.map { it.original })
-    }
-
-    @Test fun epicTakesTheManifestsPrerequisite() {
-        val folder = tmp.newFolder("EpicGame")
-        sidecar(folder, Store.EPIC, mapOf(WinCompSources.EPIC_PREREQ_PATH to "Engine/Extras/Redist/en-us/UEPrereqSetup_x64.exe", WinCompSources.EPIC_PREREQ_NAME to "UE Prerequisites"))
-        assertEquals(listOf("vcredist2022" to WinCompSources.Origin.EPIC, "d3dx9" to WinCompSources.Origin.EPIC), auto(WinCompSources.forGame(app, game(folder, "epic"))))
-    }
-
-    @Test fun amazonTakesFuelJsonsPostInstall() {
-        val folder = tmp.newFolder("AmazonGame")
-        sidecar(folder, Store.AMAZON, emptyMap())
-        File(folder, "fuel.json").writeText(JSONObject()
-            .put("Main", JSONObject().put("Command", "Game.exe"))
-            .put("PostInstall", org.json.JSONArray()
-                .put(JSONObject().put("Command", "_CommonRedist\\vcredist\\2015\\vc_redist.x64.exe").put("Args", org.json.JSONArray().put("/q")))
-                .put(JSONObject().put("Command", "_CommonRedist\\DirectX\\Jun2010\\DXSETUP.exe"))
-                .put(JSONObject().put("Command", "Tools\\Activate.exe")))
-            .toString())
-        val findings = WinCompSources.forGame(app, game(folder, "amazon"))
-        assertEquals(listOf("vcredist2015" to WinCompSources.Origin.AMAZON, "d3dx9" to WinCompSources.Origin.AMAZON), auto(findings))
-        assertEquals(listOf("Activate.exe"), findings.filter { it.component == null }.map { it.original })
-    }
-
 
     private fun appinfo(file: File, appId: Int) = writeAppinfo(file, appId)
 
@@ -311,62 +276,6 @@ class WinCompSourcesTest {
     }
 
 
-    @Test fun anOlderGogInstallGetsItsListFromTheStoreOnce() {
-        val folder = tmp.newFolder("DOOM I Enhanced")
-        StoreGameSidecar(Store.GOG, "2015545325", "DOOM", exe = "DOOM.exe", installVersion = "123").write(folder)
-        var fetches = 0
-        StoreListBackfill.fetcher = StoreListBackfill.Fetcher { _, sc -> fetches++; assertEquals("123", sc.installVersion); mapOf(WinCompSources.GOG_DEPENDENCIES to "MSVC2019_x64,DirectX") }
-        AutoComponents.online = { true }
-        try {
-            assertTrue(StoreListBackfill.fill(app, folder))
-            assertEquals("MSVC2019_x64,DirectX", StoreGameSidecar.read(folder)!!.extra[WinCompSources.GOG_DEPENDENCIES])
-            assertFalse(StoreListBackfill.fill(app, folder))
-            assertEquals(1, fetches)
-            assertEquals(listOf("vcredist2019" to WinCompSources.Origin.GOG, "d3dx9" to WinCompSources.Origin.GOG), auto(WinCompSources.forGame(app, game(folder, "gog"))))
-        } finally {
-            StoreListBackfill.fetcher = StoreListBackfill.storeFetcher
-            AutoComponents.online = { c -> AutoComponents.isOnline(c) }
-        }
-    }
-
-    @Test fun anOlderEpicInstallGetsItsPrerequisite() {
-        val folder = tmp.newFolder("DOOMBLADE")
-        StoreGameSidecar(Store.EPIC, "abc", "DOOMBLADE", exe = "DOOMBLADE.exe", extra = mapOf("namespace" to "ns", "catalogItemId" to "cat")).write(folder)
-        StoreListBackfill.fetcher = StoreListBackfill.Fetcher { _, _ ->
-            mapOf(WinCompSources.EPIC_PREREQ_NAME to "UE4 Prerequisites (x64)", WinCompSources.EPIC_PREREQ_PATH to "Engine/Extras/Redist/en-us/UE4PrereqSetup_x64.exe")
-        }
-        AutoComponents.online = { true }
-        try {
-            assertTrue(StoreListBackfill.fill(app, folder))
-            assertEquals("ns", StoreGameSidecar.read(folder)!!.extra["namespace"])
-            assertEquals(listOf("vcredist2022" to WinCompSources.Origin.EPIC, "d3dx9" to WinCompSources.Origin.EPIC), auto(WinCompSources.forGame(app, game(folder, "epic"))))
-        } finally {
-            StoreListBackfill.fetcher = StoreListBackfill.storeFetcher
-            AutoComponents.online = { c -> AutoComponents.isOnline(c) }
-        }
-    }
-
-    @Test fun aFailedFetchWaitsAWeekAndOfflineIsNoTry() {
-        val folder = tmp.newFolder("Metalstorm")
-        StoreGameSidecar(Store.EPIC, "m", "Metalstorm", exe = "M.exe").write(folder)
-        var fetches = 0
-        StoreListBackfill.fetcher = StoreListBackfill.Fetcher { _, _ -> fetches++; null }
-        try {
-            AutoComponents.online = { false }
-            assertFalse(StoreListBackfill.fill(app, folder))
-            assertEquals(0, fetches)
-            AutoComponents.online = { true }
-            assertFalse(StoreListBackfill.fill(app, folder))
-            assertFalse(StoreListBackfill.fill(app, folder))
-            assertEquals(1, fetches)
-            assertTrue(StoreListBackfill.needs(StoreGameSidecar.read(folder)!!))
-        } finally {
-            StoreListBackfill.fetcher = StoreListBackfill.storeFetcher
-            AutoComponents.online = { c -> AutoComponents.isOnline(c) }
-        }
-    }
-
-
     @Test fun anAppTheClientLearnsLaterIsReadOnceItsCacheIsWritten() {
         val file = SteamAppInfo.appinfoFile(app)
         appinfo(file, 1)
@@ -385,16 +294,6 @@ class WinCompSourcesTest {
         File(folder, "DOOMBLADE_Data/Managed/System.Net.Http.dll").writeText("x")
         assertTrue(DependencyDetector.detect(folder).isEmpty())
     }
-
-    @Test fun aListReadWholeIsNotFetchedAgainButAnUnmarkedEmptyOneIs() {
-        val read = tmp.newFolder("Read")
-        StoreGameSidecar(Store.EPIC, "a", "A", exe = "A.exe", extra = mapOf(WinCompSources.EPIC_PREREQ_NAME to "", WinCompSources.EPIC_PREREQ_PATH to "", WinCompSources.LIST_READ to "1")).write(read)
-        val older = tmp.newFolder("Older")
-        StoreGameSidecar(Store.EPIC, "b", "B", exe = "B.exe", extra = mapOf(WinCompSources.EPIC_PREREQ_NAME to "", WinCompSources.EPIC_PREREQ_PATH to "")).write(older)
-        assertFalse(StoreListBackfill.needs(StoreGameSidecar.read(read)!!))
-        assertTrue(StoreListBackfill.needs(StoreGameSidecar.read(older)!!))
-    }
-
 
     private fun manifest(dir: File, appId: Int, state: Int, time: Long) =
         File(dir, "appmanifest_$appId.acf").apply {

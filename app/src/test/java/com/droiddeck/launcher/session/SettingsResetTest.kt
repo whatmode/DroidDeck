@@ -37,7 +37,7 @@ class SettingsResetTest {
         FrameGen.set(app, FrameGen.Mode(FrameGen.ENGINE_WINFG, 3))
         prefs("steam_touch").edit().putBoolean("gyro", false).commit()
 
-        assertTrue(SettingsReset.resetAll(app, gameProfiles = false))
+        assertTrue(SettingsReset.resetAll(app))
 
         assertEquals("graphite", SessionPrefs.theme(app))
         assertTrue(SessionPrefs.noXalia(app))
@@ -64,7 +64,7 @@ class SettingsResetTest {
         SessionPrefs.setMicAsked(app)
         prefs("steam_touch").edit().putString("copiedLayout", "a:1,2").commit()
 
-        SettingsReset.resetAll(app, gameProfiles = false)
+        SettingsReset.resetAll(app)
 
         assertEquals("Foo", SessionPrefs.addedGameName(app, folder))
         assertEquals("$folder/foo.exe", SessionPrefs.addedGameExe(app, folder))
@@ -78,19 +78,10 @@ class SettingsResetTest {
         assertEquals("a:1,2", prefs("steam_touch").getString("copiedLayout", null))
     }
 
-    @Test fun gameTextureFilteringIsKeptUnlessGameProfilesAreReset() {
-        session.edit().putString("gameTextureFiltering", """{"440":{"anisotropy":16}}""").commit()
-        SettingsReset.resetAll(app, gameProfiles = false)
-        assertEquals(16, SessionPrefs.gameTextureFiltering(app, "440").anisotropy)
-
-        SettingsReset.resetAll(app, gameProfiles = true)
-        assertTrue(SessionPrefs.gameTextureFiltering(app).isEmpty())
-    }
-
     @Test fun perModeKeysAreSettings() {
         listOf("resolutionCap.steam", "displayResolution.desktop", "customRes.steam", "hdr.steam", "fpsLimit.desktop", "suspendPolicy.steam")
             .forEach { assertTrue(it, SettingsReset.isSessionSetting(it)) }
-        listOf("addedName:/x", "addedAppId:/x", "gpuAutoInstalled", "romsDir", "gameStorage", "micAsked", "gameTextureFiltering")
+        listOf("addedName:/x", "addedAppId:/x", "gpuAutoInstalled", "romsDir", "gameStorage", "micAsked", "gameTextureFiltering", "noSteamGames")
             .forEach { assertFalse(it, SettingsReset.isSessionSetting(it)) }
     }
 }

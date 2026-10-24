@@ -5,7 +5,6 @@ import android.content.pm.ActivityInfo
 import androidx.annotation.StringRes
 import com.droiddeck.launcher.R
 import com.droiddeck.launcher.core.CpuAllocationDefaults
-import com.droiddeck.launcher.core.GameEnvironment
 import com.droiddeck.launcher.core.TextureFiltering
 import com.droiddeck.launcher.core.ZramSupport
 import com.droiddeck.launcher.gpu.Cardboard
@@ -13,8 +12,6 @@ import com.droiddeck.launcher.gpu.ScreenEffects
 import org.json.JSONObject
 
 object SessionPrefs {
-    data class GameTextureFiltering(val anisotropy: Int? = null, val lodBias: String? = null)
-
     const val SUSPEND_AUTO = "auto"
     const val SUSPEND_NATIVE = "native"
     const val SUSPEND_MANUAL = "manual"
@@ -803,73 +800,23 @@ object SessionPrefs {
         publishGameEnvironment(context)
     }
 
-    fun gameTextureFiltering(context: Context, scope: String): GameTextureFiltering {
-        require(GameEnvironment.validScope(scope))
-        return gameTextureFiltering(context)[scope] ?: GameTextureFiltering()
+    /** App ids whose shortcut launches in Proton/FEX without the Steam client. */
+    fun noSteamGames(context: Context): Set<String> = runCatching {
+        JSONObject(prefs(context).getString("noSteamGames", null) ?: "{}")
+    }.getOrElse { JSONObject() }.let { json ->
+        buildSet { json.keys().forEach { if (json.optBoolean(it)) add(it) } }
     }
 
-    fun gameTextureFiltering(context: Context): Map<String, GameTextureFiltering> {
-        val json = runCatching {
-            JSONObject(prefs(context).getString("gameTextureFiltering", null) ?: "{}")
-        }.getOrElse { JSONObject() }
-        return buildMap {
-            json.keys().forEach { scope ->
-                if (!GameEnvironment.validScope(scope)) return@forEach
-                val entry = json.optJSONObject(scope) ?: return@forEach
-                val anisotropy = entry.optInt("anisotropy").takeIf {
-                    entry.has("anisotropy") && it in TextureFiltering.ANISOTROPY
-                }
-                val lodBias = entry.optString("lodBias").takeIf {
-                    entry.has("lodBias") && it in TextureFiltering.LOD_BIAS
-                }
-                if (anisotropy != null || lodBias != null) {
-                    put(scope, GameTextureFiltering(anisotropy, lodBias))
-                }
-            }
-        }
-    }
-
-    fun setGameTextureAnisotropy(context: Context, scope: String, value: Int?) {
-        require(value == null || value in TextureFiltering.ANISOTROPY)
-        updateGameTextureFiltering(context, scope) { it.copy(anisotropy = value) }
-    }
-
-    fun setGameTextureLodBias(context: Context, scope: String, choice: String?) {
-        require(choice == null || choice in TextureFiltering.LOD_BIAS)
-        updateGameTextureFiltering(context, scope) { it.copy(lodBias = choice) }
-    }
-
-    fun clearGameTextureFiltering(context: Context, scope: String) {
-        require(GameEnvironment.validScope(scope))
-        val choices = gameTextureFiltering(context).toMutableMap()
-        if (choices.remove(scope) == null) return
-        saveGameTextureFiltering(context, choices)
-        publishGameEnvironment(context)
-    }
-
-    private fun updateGameTextureFiltering(
-        context: Context,
-        scope: String,
-        change: (GameTextureFiltering) -> GameTextureFiltering,
-    ) {
-        require(GameEnvironment.validScope(scope))
-        val choices = gameTextureFiltering(context).toMutableMap()
-        val next = change(choices[scope] ?: GameTextureFiltering())
-        if (next.anisotropy == null && next.lodBias == null) choices.remove(scope) else choices[scope] = next
-        saveGameTextureFiltering(context, choices)
-        publishGameEnvironment(context)
-    }
-
-    private fun saveGameTextureFiltering(context: Context, choices: Map<String, GameTextureFiltering>) {
+    fun setNoSteam(context: Context, appId: String, on: Boolean) {
+        require(appId.matches(Regex("[1-9][0-9]*")))
+        val games = noSteamGames(context).toMutableSet()
+        if (on) games += appId else games -= appId
         val json = JSONObject()
-        choices.forEach { (id, choice) ->
-            json.put(id, JSONObject().apply {
-                choice.anisotropy?.let { put("anisotropy", it) }
-                choice.lodBias?.let { put("lodBias", it) }
-            })
-        }
-        prefs(context).edit().putString("gameTextureFiltering", json.toString()).apply()
+        games.sorted().forEach { json.put(it, true) }
+        prefs(context).edit().putString("noSteamGames", json.toString()).apply()
     }
+
+    fun noSteam(context: Context, appId: String): Boolean = appId in noSteamGames(context)
 
     private fun publishGameEnvironment(context: Context) {
         runCatching { GameEnvironmentStore.publish(context) }

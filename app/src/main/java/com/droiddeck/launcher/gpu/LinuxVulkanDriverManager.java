@@ -43,7 +43,7 @@ public class LinuxVulkanDriverManager {
      * Ported from SPLATPLAYS/DroidDeck (51bd995).
      */
     private static final List<String> LIB_PREFIXES = Collections.unmodifiableList(Arrays.asList(
-            "libvulkan_freedreno", "libvulkan_panvk", "libvulkan_panfrost", "libvulkan_lvp"));
+            "libvulkan_freedreno", "libvulkan_panvk", "libvulkan_panfrost", "libvulkan_lvp", "libvulkan_virtio"));
 
     public static boolean isRuntimeDriverName(String name) {
         if (name == null || !name.endsWith(".so")) return false;
@@ -227,6 +227,8 @@ public class LinuxVulkanDriverManager {
             meta.put("libc", "glibc");
             meta.put("minGlibc", minGlibc);
             meta.put("sourceLibraryName", soName);
+            String backend = zipMeta != null ? zipMeta.optString("backend", "") : "";
+            if (!backend.isEmpty()) meta.put("backend", backend);
             meta.put("apiVersion", apiVersion != null ? apiVersion : API_DEFAULT);
             meta.put("importedAt", System.currentTimeMillis());
             if (!FileUtils.writeString(new File(tmpDir, META_NAME), meta.toString(2))) throw new IOException("cannot write meta.json");

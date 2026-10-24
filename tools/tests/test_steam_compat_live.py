@@ -247,18 +247,24 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual((state["pending"], state.get("applied", 0)), (TOOL_11, 0))
         self.assertTrue(self.helper.request_waiting())
 
-    def test_per_game_customize_and_inherit_apply_live(self):
+    def test_a_steam_side_per_game_pick_is_preserved_live(self):
         page = FakePage({"0": TOOL, "10": TOOL, "11": TOOL_11}, [TOOL, TOOL_11])
-        (self.state / "games.json").write_text(json.dumps({
-            "version": 1,
-            "games": {
-                "10": {"valve": True, "dir": "Proton 11.0 (ARM64)"},
-                "11": None,
-            },
-        }))
         state = self.reconcile(page)
-        self.assertEqual(page.sets, [("10", TOOL_11), ("11", TOOL)])
-        self.assertEqual(state["auto"], {"11": TOOL})
+        self.assertEqual(page.sets, [])
+        self.assertEqual(page.mapping["11"], TOOL_11)
+        self.assertEqual(state["auto"], {"10": TOOL})
+
+    def test_a_native_title_stops_following_the_default_live(self):
+        page = FakePage({"0": TOOL, "10": TOOL, "11": TOOL_11}, [TOOL, TOOL_11])
+        (self.state / "state.json").write_text(json.dumps({"default": TOOL, "auto": {"10": TOOL}}))
+        original = COMPAT["native_targets"]
+        COMPAT["native_targets"] = lambda _root, _apps: {"10": None}
+        try:
+            state = self.reconcile(page)
+        finally:
+            COMPAT["native_targets"] = original
+        self.assertEqual(page.sets, [("10", "")])
+        self.assertEqual(state["auto"], {})
 
     def test_native_arm64_title_drops_auto_proton_once_and_keeps_explicit_choices(self):
         (self.steam / "steamapps/appmanifest_11.acf").unlink()
@@ -268,7 +274,8 @@ class ReconcileTest(unittest.TestCase):
         }))
         page = FakePage({"0": TOOL, "10": TOOL}, [TOOL, TOOL_11])
         original_native_targets = COMPAT["native_targets"]
-        COMPAT["native_targets"] = lambda _root, _apps: {"10": None}
+        native = {"10": None}
+        COMPAT["native_targets"] = lambda _root, _apps: dict(native)
         try:
             state = self.reconcile(page)
             self.assertEqual(page.sets, [("10", "")])
@@ -278,16 +285,6 @@ class ReconcileTest(unittest.TestCase):
             page.sets.clear()
             self.reconcile(page)
             self.assertEqual(page.sets, [])
-
-            (self.state / "games.json").write_text(json.dumps({
-                "version": 1,
-                "games": {"10": {"valve": True, "dir": "Proton 11.0 (ARM64)"}},
-            }))
-            state = self.reconcile(page)
-            self.assertEqual(page.sets, [("10", TOOL_11)])
-            self.assertEqual(page.mapping["10"], TOOL_11)
-            self.assertEqual(state["auto"], {})
-            (self.state / "games.json").unlink()
 
             page.sets.clear()
             page.mapping["10"] = "steamlinuxruntime_arm64"
@@ -441,19 +438,13 @@ class ReconcileTest(unittest.TestCase):
         finally:
             COMPAT["native_targets"] = original_native_targets
 
-    def test_missing_per_game_proton_stays_deferred_live(self):
+    def test_a_deferred_per_game_pick_is_left_in_place_live(self):
         page = FakePage({"0": TOOL, "10": "GE-Proton9-1", "11": TOOL_11}, [TOOL, TOOL_11])
-        (self.state / "games.json").write_text(json.dumps({
-            "version": 1,
-            "games": {
-                "10": {"valve": False, "dir": "GE-Proton9-1"},
-                "11": None,
-            },
-        }))
         state = self.reconcile(page)
-        self.assertEqual(page.sets, [("11", TOOL)])
+        self.assertEqual(page.sets, [])
         self.assertEqual(page.mapping["10"], "GE-Proton9-1")
-        self.assertEqual(state["auto"], {"11": TOOL})
+        self.assertEqual(page.mapping["11"], TOOL_11)
+        self.assertEqual(state["auto"], {})
 
     def test_file_mode_defers_to_the_live_helper(self):
         (self.state / "live.pid").write_text("%d\n" % os.getpid())

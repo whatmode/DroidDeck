@@ -926,34 +926,22 @@ def app_order(app):
     return (len(app), app)
 
 
-DEFERRED_GAME_TOOL = object()
 NATIVE_CHOICE = object()
 
 
-def plan_mapping(current, installed, runnable, default, auto, native=None, picks=(), overrides=None, managed=None,
+def plan_mapping(current, installed, runnable, default, auto, native=None, picks=(), managed=None,
                  native_choices=()):
     runnable = {n.lower() for n in runnable}
     installed = set(installed)
     picks = set(picks)
     native = native or {}
-    overrides = overrides or {}
     managed = set(auto) if managed is None else set(managed)
     native_choices = set(native_choices)
     changes, kept = {}, {}
     if current.get("0", "") != default:
         changes["0"] = default
-    for app in sorted((set(current) | installed | picks | set(auto) | set(overrides) | native_choices) - {"0"}, key=app_order):
+    for app in sorted((set(current) | installed | picks | set(auto) | native_choices) - {"0"}, key=app_order):
         name = current.get(app, "")
-        if app in overrides:
-            target = overrides[app]
-            if target is DEFERRED_GAME_TOOL:
-                continue
-            target = target or default
-            if name != target:
-                changes[app] = target
-            if overrides[app] is None:
-                kept[app] = target
-            continue
         mine = auto.get(app)
         target = native.get(app, default)
         if not name and app in native_choices:
@@ -1027,34 +1015,6 @@ def requested_tool(request, catalog):
         if tool["dir"] and tool["dir"] == request.get("dir") and tool["valve"] == bool(request.get("valve")):
             return tool["name"]
     return None
-
-
-def game_requests(directory=None):
-    value = read_json(state_path("games.json", directory))
-    if value.get("version") != 1 or not isinstance(value.get("games"), dict):
-        return {}
-    return value["games"]
-
-
-def requested_games(requests, catalog, runnable=None):
-    """App id -> requested tool, None for inherit, or DEFERRED_GAME_TOOL while unavailable."""
-    runnable = None if runnable is None else set(runnable)
-    resolved = {}
-    for app, request in requests.items():
-        if not isinstance(app, str) or not re.fullmatch(r"[1-9][0-9]*", app) or int(app) > 0xFFFFFFFF:
-            continue
-        if request is None:
-            resolved[app] = None
-            continue
-        if (not isinstance(request, dict) or not isinstance(request.get("dir"), str) or
-                not request["dir"] or not isinstance(request.get("valve"), bool)):
-            continue
-        tool = requested_tool(request, catalog)
-        if tool is None or runnable is not None and tool not in runnable:
-            resolved[app] = DEFERRED_GAME_TOOL
-        else:
-            resolved[app] = tool
-    return resolved
 
 
 def now_ms():
@@ -1208,14 +1168,13 @@ def register_default(config_path, apps=(), protect=(), default=None, catalog=Non
             else:
                 default = state.get("default") if state.get("default") in names else TOOL
         steam_root = os.path.dirname(os.path.dirname(os.path.abspath(config_path)))
-        overrides = requested_games(game_requests(directory), catalog)
         native = native_targets(steam_root, set(apps) | set(picks))
         if linux_tool != FEX_TOOL:
             native = {app: linux_tool if tool == FEX_TOOL else tool for app, tool in native.items()}
         changes, auto = plan_mapping(
             current, apps, names, default, followers(state, current),
             native, picks,
-            overrides, state.get("auto", {}).keys() if isinstance(state.get("auto"), dict) else (),
+            state.get("auto", {}).keys() if isinstance(state.get("auto"), dict) else (),
             state.get("native", ()))
         for app, tool in changes.items():
             set_mapping(tokens, mapping, app, tool)
