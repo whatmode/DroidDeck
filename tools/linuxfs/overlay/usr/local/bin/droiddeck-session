@@ -131,6 +131,15 @@ if [ -n "${BL_VENUS:-}" ]; then
   if command -v vulkaninfo >/dev/null 2>&1; then
     ( timeout 30 vulkaninfo --summary 2>&1 | sed 's/^/== venus vulkaninfo: /' | head -40 ) || true
   fi
+  # With the bridge, Android's driver reads the window buffers Mesa's GL driver draws (Steam,
+  # Xwayland). Mesa imports every buffer with BASE_MEM_IMPORT_SHARED (outer shareable); if
+  # Android's driver maps the same pages with another shareability, the GPU's L2 sees one
+  # cache line both ways and stops with exception 0x88 (GPU_SHAREABILITY_FAULT), which resets
+  # the GPU and takes SurfaceFlinger down. Import without it. ~/.droiddeck-import-shared keeps it.
+  if [ "$BL_VENUS" = 1 ] && [ ! -e "$HOME/.droiddeck-import-shared" ]; then
+    export PANVK_KBASE_IMPORT_CLEAR=${PANVK_KBASE_IMPORT_CLEAR:-0x40000}
+  fi
+  echo "== venus bridge: Mesa dma-buf imports clear ${PANVK_KBASE_IMPORT_CLEAR:-nothing}"
 fi
 export GAMESCOPE_FORCE_VULKAN_REALTIME=${BL_GAMESCOPE_REALTIME:-0}
 
