@@ -195,6 +195,8 @@ mali_gl_setup() {
     export GAMESCOPE_WSI_FORCE_BYPASS=${GAMESCOPE_WSI_FORCE_BYPASS:-1}
     # Thread-safe Xlib in the webhelper (see the preload): "Fatal IO error 11 on X server".
     export BL_WEBHELPER_XTHREADS=${BL_WEBHELPER_XTHREADS:-1}
+    # Name the real cause behind "Fatal IO error 11 on X server" (see the preload's xcbtrace.c).
+    export BL_XCB_TRACE=${BL_XCB_TRACE:-1}
     echo "== mali-gl: venus single driver ($(cat "$dir/VERSION" 2>/dev/null)): gamescope $BL_GAMESCOPE_BIN, Xwayland -shm, GL on Zink over the bridge"
     return 0
   fi
@@ -919,15 +921,15 @@ BUSCONF
         # gl+nowsi, vulkan+nowsi, gl and vulkan all died identically; keep one variant while the
         # scale factor is tested (the death follows "ThreadSetForceDeviceScaleFactors 1 * 1.49").
         _bl_mali_variants=(gl)
-        # One driver over the Venus bridge. GPU drawing (ANGLE on GL over Zink) first, the CPU
-        # second. ANGLE on Vulkan is left out: the gamescope WSI layer asserts on the null
-        # VkQueue ANGLE gets from vkGetDeviceQueue2 (vkroots.h:129, "Assertion `obj' failed")
-        # and takes the webhelper down. Its own position file, so earlier positions do not
-        # carry over.
+        # One driver over the Venus bridge. GPU drawing first: ANGLE on GL over Zink (died with
+        # "Fatal IO error 11 on X server", now traced by BL_XCB_TRACE), then ANGLE on Vulkan
+        # (a null VkQueue tripped the gamescope WSI layer; the guest driver now logs the queue
+        # lookup and returns the queue when only its flags differ), then the CPU. Its own
+        # position file, so earlier positions do not carry over.
         _bl_auto_file=$HOME/.droiddeck-mali-cef-auto
         if [ "${BL_VENUS_SINGLE:-0}" = 1 ]; then
-          _bl_mali_variants=(gl cpu)
-          _bl_auto_file=$HOME/.droiddeck-venus-cef-pos
+          _bl_mali_variants=(gl vulkan cpu)
+          _bl_auto_file=$HOME/.droiddeck-venus-cef-gpu
         fi
         _bl_mali_idx=$(cat "$_bl_auto_file" 2>/dev/null || echo 0)
         case "$_bl_mali_idx" in ''|*[!0-9]*) _bl_mali_idx=0 ;; esac
