@@ -24,16 +24,6 @@ grep -q '^DisableSandbox' /etc/pacman.conf || sed -i 's/^\[options\]/[options]\n
 mv /etc/pacman.d/mirrorlist.new /etc/pacman.d/mirrorlist
 pacman -Syu --noconfirm --needed gcc mesa vulkan-swrast vulkan-tools vulkan-headers strace libglvnd libx11 xorg-server-xvfb \
   xorg-xwayland weston xorg-xdpyinfo >/tmp/pacman.log 2>&1 || { echo "pacman failed"; tail -15 /tmp/pacman.log; exit 1; }
-# Mesa's GLX screen set-up, for reading which path a DRI3-less server leaves (temporary).
-if curl -sfL https://archive.mesa3d.org/mesa-26.2.5.tar.xz -o /tmp/mesa.tar.xz; then
-  tar -xJf /tmp/mesa.tar.xz -C /tmp mesa-26.2.5/src/glx 2>/dev/null
-  G=/tmp/mesa-26.2.5/src/glx
-  echo "== mesa src: DRI3 not available"; grep -rn "DRI3 not available" $G | head
-  echo "== mesa src: glxext.c screen setup"; grep -n "dri3\|drisw\|kopper\|zink\|glx_accel\|glx_direct\|inferred" $G/glxext.c | head -60
-  echo "== mesa src: drisw kopper"; grep -n "kopper\|zink\|inferred\|return NULL" $G/drisw_glx.c | head -60
-else
-  echo "== mesa source not reachable"
-fi
 echo "== mesa $(pacman -Q mesa), $(pacman -Q xorg-xwayland)"
 OUT=/tmp/glx; mkdir -p $OUT
 gcc -O2 -Wall -o $OUT/glxcheck tools/tests/glx/glxcheck.c -lGL -lX11 || exit 1
@@ -45,7 +35,9 @@ gcc -shared -fPIC -O2 -Wall -pthread -o $OUT/libblsession.so tools/linuxfs/prelo
 gcc -shared -fPIC -O2 -Wall -o $OUT/libgputype.so tools/tests/glx/gputype_layer.c || exit 1
 mkdir -p $OUT/layers && cp tools/tests/glx/gputype_layer.json $OUT/layers/
 export VK_LAYER_PATH=$OUT/layers VK_INSTANCE_LAYERS=VK_LAYER_DROIDDECK_gputype
-export MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink LIBGL_DEBUG=verbose
+# LIBGL_KOPPER_DRI2=true as the app sets it for the guest: without DRI3 multibuffer Mesa's GLX
+# otherwise drops Zink before trying Kopper (glxext.c, "DRI3 not available").
+export MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink LIBGL_DEBUG=verbose LIBGL_KOPPER_DRI2=true
 fails=0
 check() {  # expect(ok|fail) label env... -- args
   local expect=$1 label=$2; shift 2
