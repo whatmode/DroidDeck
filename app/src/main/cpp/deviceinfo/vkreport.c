@@ -131,11 +131,11 @@ Java_com_droiddeck_launcher_gpu_VulkanInfo_nativeReport(JNIEnv *env, jclass cls)
         goto done;
     }
 #define GET(name) PFN_##name name = (PFN_##name) gipa(instance, #name)
+#define GET2(name) PFN_##name name = (PFN_##name) gipa(instance, #name); if (!name) { put(&b, "missing " #name "\n"); goto probe_done; }
     GET(vkDestroyInstance); GET(vkEnumeratePhysicalDevices); GET(vkGetPhysicalDeviceProperties2);
     GET(vkGetPhysicalDeviceFeatures2); GET(vkEnumerateDeviceExtensionProperties);
     GET(vkGetPhysicalDeviceMemoryProperties); GET(vkGetPhysicalDeviceQueueFamilyProperties);
     GET(vkGetPhysicalDeviceExternalBufferProperties); GET(vkGetPhysicalDeviceFormatProperties);
-#undef GET
     VkPhysicalDevice devices[4];
     uint32_t count = 4;
     if (!vkEnumeratePhysicalDevices || vkEnumeratePhysicalDevices(instance, &count, devices) < 0) count = 0;
@@ -246,6 +246,55 @@ Java_com_droiddeck_launcher_gpu_VulkanInfo_nativeReport(JNIEnv *env, jclass cls)
             }
         }
     }
+    if (count > 0) {
+        /* Which linear row pitches the driver accepts for a dma_buf image with an explicit
+         * DRM_FORMAT_MOD_LINEAR layout: what a compositor importing other programs'
+         * buffers (gamescope through the Venus bridge) is held to. */
+        GET2(vkCreateDevice); GET2(vkDestroyDevice); GET2(vkCreateImage); GET2(vkDestroyImage);
+        GET2(vkGetImageSubresourceLayout);
+        float prio = 1.0f;
+        VkDeviceQueueCreateInfo q = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueCount = 1, .pQueuePriorities = &prio };
+        const char *dexts[] = { "VK_KHR_external_memory_fd", "VK_EXT_external_memory_dma_buf", "VK_EXT_image_drm_format_modifier", "VK_EXT_queue_family_foreign" };
+        VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount = 1, .pQueueCreateInfos = &q,
+                                   .enabledExtensionCount = 4, .ppEnabledExtensionNames = dexts };
+        VkDevice dev = VK_NULL_HANDLE;
+        VkResult dr = vkCreateDevice ? vkCreateDevice(devices[0], &dci, NULL, &dev) : VK_ERROR_INITIALIZATION_FAILED;
+        put(&b, "\n[linear image pitch probe] vkCreateDevice=%d\n", dr);
+        if (dr == VK_SUCCESS) {
+            static const uint32_t widths[] = { 1602, 1600, 1280, 333 };
+            for (size_t w = 0; w < sizeof(widths) / sizeof(*widths); w++) {
+                VkImageCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+                    .format = VK_FORMAT_B8G8R8A8_UNORM, .extent = { widths[w], 720, 1 }, .mipLevels = 1, .arrayLayers = 1,
+                    .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_LINEAR,
+                    .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT };
+                VkImage img = VK_NULL_HANDLE;
+                VkResult r1 = vkCreateImage(dev, &ici, NULL, &img);
+                VkSubresourceLayout lay = { 0 };
+                VkImageSubresource sub = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT };
+                if (r1 == VK_SUCCESS) { vkGetImageSubresourceLayout(dev, img, &sub, &lay); vkDestroyImage(dev, img, NULL); }
+                put(&b, "width %u: linear image -> %d, driver rowPitch %llu\n", widths[w], r1, (unsigned long long) lay.rowPitch);
+                const uint32_t tight = widths[w] * 4;
+                const uint32_t pitches[] = { tight, (tight + 15) & ~15u, (tight + 63) & ~63u, (tight + 127) & ~127u, (tight + 255) & ~255u, (uint32_t) lay.rowPitch };
+                for (size_t k = 0; k < sizeof(pitches) / sizeof(*pitches); k++) {
+                    if (!pitches[k]) continue;
+                    VkSubresourceLayout pl = { .offset = 0, .rowPitch = pitches[k] };
+                    VkImageDrmFormatModifierExplicitCreateInfoEXT mi = { .sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT,
+                        .drmFormatModifier = 0, .drmFormatModifierPlaneCount = 1, .pPlaneLayouts = &pl };
+                    VkExternalMemoryImageCreateInfo ei = { .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO, .pNext = &mi,
+                        .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT };
+                    VkImageCreateInfo ici2 = ici;
+                    ici2.pNext = &ei;
+                    ici2.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+                    VkImage img2 = VK_NULL_HANDLE;
+                    VkResult r2 = vkCreateImage(dev, &ici2, NULL, &img2);
+                    if (r2 == VK_SUCCESS) vkDestroyImage(dev, img2, NULL);
+                    put(&b, "  explicit LINEAR dma_buf image, rowPitch %u (%%64=%u %%256=%u) -> %d\n", pitches[k], pitches[k] % 64, pitches[k] % 256, r2);
+                }
+            }
+            vkDestroyDevice(dev, NULL);
+        }
+    }
+probe_done:
     if (vkDestroyInstance) vkDestroyInstance(instance, NULL);
 done:
     if (lib) dlclose(lib);
