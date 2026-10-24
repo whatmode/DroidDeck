@@ -188,6 +188,11 @@ mali_gl_setup() {
     export GAMESCOPE_DMABUF_LINEAR_ONLY=${GAMESCOPE_DMABUF_LINEAR_ONLY:-1}
     # Steam disables Kopper for its webhelper; without it Zink needs DRI3 (see the preload).
     export BL_WEBHELPER_KOPPER=${BL_WEBHELPER_KOPPER:-1}
+    # The gamescope WSI layer falls back to a plain X11 swapchain for a window it cannot hand
+    # to gamescope directly (another window over it: Steam's menus over Big Picture). Without
+    # DRI3 that swapchain never comes up and the webhelper sat in vkCreateSwapchainKHR until
+    # Steam killed it. Always hand windows to gamescope.
+    export GAMESCOPE_WSI_FORCE_BYPASS=${GAMESCOPE_WSI_FORCE_BYPASS:-1}
     echo "== mali-gl: venus single driver ($(cat "$dir/VERSION" 2>/dev/null)): gamescope $BL_GAMESCOPE_BIN, Xwayland -shm, GL on Zink over the bridge"
     return 0
   fi
@@ -1359,13 +1364,14 @@ BUSCONF
               esac
             done
             # Thread states of each webhelper browser process (where Steam's UI and, with
-            # --in-process-gpu, its GPU thread live): name, state, kernel wait, syscall.
+            # --in-process-gpu, its GPU thread live): name, state, kernel wait. (Not
+            # /proc/*/syscall: under proot reading it can block, which stalled this watcher.)
             for _bw_p in $_bw_now; do
               [ "${_bw_name[$_bw_p]:-}" = steamwebhelper ] || continue
               _bw_snap[$_bw_p]=$(for _bw_t2 in /proc/$_bw_p/task/*; do
-                  printf '%s %s %s %s\n' "$(cat "$_bw_t2/comm" 2>/dev/null)" \
+                  printf '%s %s %s\n' "$(cat "$_bw_t2/comm" 2>/dev/null)" \
                     "$(awk '{print $3}' "$_bw_t2/stat" 2>/dev/null)" \
-                    "$(cat "$_bw_t2/wchan" 2>/dev/null)" "$(cut -d' ' -f1 "$_bw_t2/syscall" 2>/dev/null)"
+                    "$(timeout 1 cat "$_bw_t2/wchan" 2>/dev/null)"
                 done | sort | uniq -c | sort -rn | head -25)
             done
             _bw_prev=$_bw_now
