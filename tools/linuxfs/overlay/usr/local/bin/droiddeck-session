@@ -176,7 +176,17 @@ mali_gl_setup() {
   if [ "${BL_VENUS:-0}" = 1 ] && [ "${BL_VENUS_GL:-zink}" = zink ] && [ ! -e "$HOME/.droiddeck-venus-mixed" ]; then
     local wrap=$HOME/.cache/droiddeck/Xwayland-shm
     mkdir -p "${wrap%/*}"
-    printf '#!/bin/sh\nLD_LIBRARY_PATH=%s/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} exec %s/bin/Xwayland "$@" -shm\n' "$dir" "$dir" > "$wrap"
+    # Without glamor Xwayland's GLX needs a software GL provider (swrast_dri.so) to list GL
+    # visuals; mali-gl ships only Panfrost, so its Xwayland offered none and Steam's client
+    # died on "glXChooseVisual failed". The system Xwayland finds the rootfs Mesa's provider;
+    # mali-gl's Xwayland is only the fallback, pointed at the rootfs drivers.
+    # -verbose 3 logs the GLX provider it settles on.
+    {
+      echo '#!/bin/sh'
+      echo 'if [ -x /usr/bin/Xwayland ]; then exec /usr/bin/Xwayland "$@" -shm -verbose 3; fi'
+      printf 'LIBGL_DRIVERS_PATH=/usr/lib/dri LD_LIBRARY_PATH=%s/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} exec %s/bin/Xwayland "$@" -shm -verbose 3\n' "$dir" "$dir"
+    } > "$wrap"
+    echo "== venus bridge: Xwayland $( [ -x /usr/bin/Xwayland ] && echo "/usr/bin/Xwayland (rootfs)" || echo "$dir/bin/Xwayland (mali-gl, rootfs GL drivers)"), -shm"
     chmod 755 "$wrap"
     export WLR_XWAYLAND=$wrap
     export MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink
