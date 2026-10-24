@@ -1,0 +1,4 @@
+/home/runner/work/DroidDeck/DroidDeck/mali-gl/test/tfptest.c: In function ‘on_alarm’:
+/home/runner/work/DroidDeck/DroidDeck/mali-gl/test/tfptest.c:30:4: warning: ignoring return value of ‘write’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+   30 |    write(1, buf, n);
+      |    ^~~~~~~~~~~~~~~~
