@@ -1347,6 +1347,9 @@ BUSCONF
         _bl_glprobed=1
         LIBGL_DEBUG=verbose MESA_DEBUG=1 timeout 40 /opt/mali-gl/bin/glprobe 2>&1 \
           | grep -v "FORMAT_NOT_SUPPORTED" | head -80 | sed 's/^/== glprobe: /' || true
+        # X extensions against SteamOS' Xwayland, the bridge's Vulkan device against all DXVK
+        # requires, and its queues: every known gap in one log.
+        timeout 90 droiddeck-venus-probe x11 vulkan 2>&1 | head -120 | sed 's/^/== probe: /' || true
       fi
       desktop_ui_pid=
       if [ "${BL_STEAM_UI:-}" = desktop ]; then

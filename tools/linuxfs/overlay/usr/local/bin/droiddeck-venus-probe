@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""droiddeck-venus-probe - what the programs in a Venus bridge session expect, against what this
+session provides, in one pass, so one logs zip shows every gap at once:
+
+  x11     X extensions on $DISPLAY against those SteamOS' Xwayland offers (a client that sends a
+          request for a missing extension loses its whole X connection)
+  vulkan  the Vulkan device the bridge exposes against everything DXVK requires
+  queues  its queue families (ANGLE, Zink and DXVK each ask for queues)
+
+GL/GLX/EGL is probed separately (mali-gl's glprobe). Output lines start with the section name.
+"""
+import os
+import re
+import socket
+import struct
+import subprocess
+import sys
+
+# Extensions SteamOS' Xwayland (with glamor) offers. Ones that only exist with a GPU-drawing
+# Xwayland are marked: their absence here is by design and must be handled by the client.
+STEAMOS_X_EXTENSIONS = [
+    "BIG-REQUESTS", "Composite", "DAMAGE", "DOUBLE-BUFFER", "DPMS", "DRI3", "Generic Event Extension",
+    "GLX", "MIT-SHM", "Present", "RANDR", "RECORD", "RENDER", "SECURITY", "SHAPE", "SYNC",
+    "X-Resource", "XC-MISC", "XFIXES", "XFree86-VidModeExtension", "XINERAMA", "XInputExtension",
+    "XKEYBOARD", "XTEST", "XVideo",
+]
+GPU_ONLY_X = {"DRI3"}
+
+# DXVK's required device features and extensions (src/dxvk/dxvk_device_info.cpp, getFeatureList:
+# every entry marked required).
+DXVK_FEATURES = [
+    "depthBiasClamp", "depthClamp", "dualSrcBlend", "fillModeNonSolid", "fragmentStoresAndAtomics",
+    "fullDrawIndexUint32", "geometryShader", "imageCubeArray", "independentBlend", "multiDrawIndirect",
+    "multiViewport", "occlusionQueryPrecise", "robustBufferAccess", "sampleRateShading", "samplerAnisotropy",
+    "shaderClipDistance", "shaderCullDistance", "shaderImageGatherExtended", "shaderInt16", "shaderInt64",
+    "shaderSampledImageArrayDynamicIndexing", "textureCompressionBC", "shaderDrawParameters",
+    "storageBuffer16BitAccess", "bufferDeviceAddress", "descriptorIndexing", "storageBuffer8BitAccess",
+    "descriptorBindingSampledImageUpdateAfterBind", "descriptorBindingUpdateUnusedWhilePending",
+    "descriptorBindingPartiallyBound", "hostQueryReset", "runtimeDescriptorArray", "samplerMirrorClampToEdge",
+    "scalarBlockLayout", "shaderInt8", "timelineSemaphore", "uniformBufferStandardLayout", "vulkanMemoryModel",
+    "inlineUniformBlock", "computeFullSubgroups", "dynamicRendering", "maintenance4",
+    "shaderDemoteToHelperInvocation", "shaderZeroInitializeWorkgroupMemory", "subgroupSizeControl",
+    "synchronization2", "depthClipEnable", "robustBufferAccess2", "nullDescriptor", "maintenance5", "maintenance6",
+]
+DXVK_EXTENSIONS = [
+    "VK_KHR_swapchain", "VK_KHR_load_store_op_none", "VK_EXT_robustness2", "VK_EXT_depth_clip_enable",
+    "VK_KHR_maintenance5", "VK_KHR_maintenance6",
+]
+
+
+def say(section, text):
+    print(f"{section}: {text}", flush=True)
+
+
+def xauth_cookie(num):
+    path = os.environ.get("XAUTHORITY") or os.path.expanduser("~/.Xauthority")
+    try:
+        data = open(path, "rb").read()
+    except OSError:
+        return b"", b""
+    i, first = 0, None
+    while i + 2 <= len(data):
+        try:
+            fields = []
+            i += 2  # family
+            for _ in range(4):
+                n = struct.unpack(">H", data[i:i + 2])[0]
+                fields.append(data[i + 2:i + 2 + n])
+                i += 2 + n
+        except struct.error:
+            break
+        _, number, name, cookie = fields
+        if name == b"MIT-MAGIC-COOKIE-1":
+            if number.decode("latin-1", "replace") == num:
+                return name, cookie
+            first = first or (name, cookie)
+    return first or (b"", b"")
+
+
+def x11_extensions(display):
+    """ListExtensions over the raw X11 protocol (no Xlib needed)."""
+    m = re.match(r"^:(\d+)", display or "")
+    if not m:
+        raise RuntimeError(f"DISPLAY {display!r} is not a local display")
+    num = m.group(1)
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(5)
+    for path in (f"/tmp/.X11-unix/X{num}", f"\0/tmp/.X11-unix/X{num}"):
+        try:
+            s.connect(path)
+            break
+        except OSError:
+            continue
+    else:
+        raise RuntimeError(f"cannot connect to X display :{num}")
+
+    def recvn(n):
+        buf = b""
+        while len(buf) < n:
+            chunk = s.recv(n - len(buf))
+            if not chunk:
+                raise RuntimeError("X server closed the connection")
+            buf += chunk
+        return buf
+
+    # Connection setup, little-endian, protocol 11.0, with the MIT cookie from XAUTHORITY when
+    # there is one for this display.
+    name, cookie = xauth_cookie(num)
+    pad = lambda b: b + b"\0" * ((-len(b)) % 4)
+    s.sendall(struct.pack("<BxHHHHxx", ord("l"), 11, 0, len(name), len(cookie)) + pad(name) + pad(cookie))
+    head = recvn(8)
+    status, _, _, _, extra = struct.unpack("<BBHHH", head)
+    recvn(extra * 4)
+    if status != 1:
+        raise RuntimeError(f"X connection refused (status {status})")
+    # ListExtensions: opcode 99, length 1.
+    s.sendall(struct.pack("<BxH", 99, 1))
+    reply = recvn(32)
+    if reply[0] != 1:
+        raise RuntimeError(f"ListExtensions failed (response type {reply[0]})")
+    count = reply[1]
+    length = struct.unpack("<I", reply[4:8])[0]
+    data = recvn(length * 4)
+    names, i = [], 0
+    for _ in range(count):
+        n = data[i]
+        names.append(data[i + 1:i + 1 + n].decode("latin-1"))
+        i += 1 + n
+    s.close()
+    return names
+
+
+def probe_x11():
+    try:
+        have = x11_extensions(os.environ.get("DISPLAY", ""))
+    except Exception as e:  # noqa: BLE001 - a probe reports, it does not fail
+        say("x11", f"could not list extensions: {e}")
+        return
+    say("x11", f"{len(have)} extensions: {' '.join(sorted(have))}")
+    missing = [e for e in STEAMOS_X_EXTENSIONS if e not in have]
+    for e in missing:
+        why = " (exists only with GPU drawing in Xwayland: clients must check before using it)" if e in GPU_ONLY_X else ""
+        say("x11", f"MISSING vs SteamOS: {e}{why}")
+    if not missing:
+        say("x11", "nothing missing vs SteamOS")
+
+
+def probe_vulkan():
+    try:
+        out = subprocess.run(["vulkaninfo"], capture_output=True, text=True, timeout=60).stdout
+    except Exception as e:  # noqa: BLE001
+        say("vulkan", f"vulkaninfo failed: {e}")
+        return
+    dev = re.search(r"deviceName\s*=\s*(.+)", out)
+    say("vulkan", f"device: {dev.group(1).strip() if dev else '?'}")
+    feats = {}
+    for name, val in re.findall(r"^\s*(\w+)\s*=\s*(true|false)\s*$", out, re.M):
+        feats[name] = feats.get(name, False) or val == "true"
+    exts = set(re.findall(r"^\s*(VK_\w+)\s*:\s*extension revision", out, re.M))
+    missing_f = [f for f in DXVK_FEATURES if not feats.get(f, False)]
+    unknown_f = [f for f in DXVK_FEATURES if f not in feats]
+    missing_e = [e for e in DXVK_EXTENSIONS if e not in exts]
+    for f in missing_f:
+        say("vulkan", f"DXVK needs feature {f}: {'not reported' if f in unknown_f else 'MISSING'}")
+    for e in missing_e:
+        say("vulkan", f"DXVK needs extension {e}: MISSING")
+    if not missing_f and not missing_e:
+        say("vulkan", "every feature and extension DXVK requires is there")
+    else:
+        say("vulkan", f"DXVK gaps: {len(missing_f)} feature(s), {len(missing_e)} extension(s)")
+    # Queue families as the device reports them.
+    for m in re.finditer(r"queueProperties\[(\d+)\]:.*?queueCount\s*=\s*(\d+).*?queueFlags\s*=\s*([^\n]+)", out, re.S):
+        say("queues", f"family {m.group(1)}: {m.group(2)} queue(s), {m.group(3).strip()}")
+    prot = feats.get("protectedMemory")
+    say("queues", f"protectedMemory {'yes' if prot else 'no'} (ANGLE creates protected queues when it is)")
+
+
+def main():
+    which = sys.argv[1:] or ["x11", "vulkan"]
+    if "x11" in which:
+        probe_x11()
+    if "vulkan" in which:
+        probe_vulkan()
+
+
+if __name__ == "__main__":
+    main()
