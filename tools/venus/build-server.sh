@@ -24,8 +24,10 @@ strip = '$TC/llvm-strip'
 pkg-config = 'pkg-config'
 
 [built-in options]
-c_args = ['-fPIC']
-cpp_args = ['-fPIC']
+c_args = ['-fPIC', '-I$HERE/android-shim']
+cpp_args = ['-fPIC', '-I$HERE/android-shim']
+c_link_args = ['-llog']
+cpp_link_args = ['-llog']
 
 [host_machine]
 system = 'android'
