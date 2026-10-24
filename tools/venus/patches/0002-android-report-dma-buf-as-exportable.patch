@@ -1,0 +1,61 @@
+diff --git a/src/venus/vkr_physical_device.c b/src/venus/vkr_physical_device.c
+index 077f0f6..dd080f1 100644
+--- a/src/venus/vkr_physical_device.c
++++ b/src/venus/vkr_physical_device.c
+@@ -735,6 +735,26 @@ vkr_dispatch_vkGetPhysicalDeviceFormatProperties2(
+                                           args->pFormatProperties);
+ }
+ 
++#ifdef __ANDROID__
++/* On the dma-heap path (see vkr_physical_device_init_memory_properties) dma_buf memory the
++ * guest wants to export is allocated from the heap and imported, so the host driver only has
++ * to import dma_buf for the guest to be able to export it. Report it as exportable.
++ */
++static void
++vkr_android_report_dma_buf_exportable(const struct vkr_physical_device *physical_dev,
++                                      VkExternalMemoryHandleTypeFlagBits handle_type,
++                                      VkExternalMemoryProperties *props)
++{
++   if (physical_dev->udmabuf_dev_fd < 0 ||
++       handle_type != VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT ||
++       !(props->externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT))
++      return;
++   props->externalMemoryFeatures |= VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT;
++   props->exportFromImportedHandleTypes |= VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
++   props->compatibleHandleTypes |= VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
++}
++#endif
++
+ static void
+ vkr_dispatch_vkGetPhysicalDeviceImageFormatProperties2(
+    UNUSED struct vn_dispatch_context *dispatch,
+@@ -747,6 +767,18 @@ vkr_dispatch_vkGetPhysicalDeviceImageFormatProperties2(
+    vn_replace_vkGetPhysicalDeviceImageFormatProperties2_args_handle(args);
+    args->ret = vk->GetPhysicalDeviceImageFormatProperties2(
+       args->physicalDevice, args->pImageFormatInfo, args->pImageFormatProperties);
++#ifdef __ANDROID__
++   if (args->ret == VK_SUCCESS) {
++      const VkPhysicalDeviceExternalImageFormatInfo *ext_info = vkr_find_struct(
++         args->pImageFormatInfo->pNext,
++         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO);
++      VkExternalImageFormatProperties *ext_props = vkr_find_struct(
++         args->pImageFormatProperties->pNext, VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES);
++      if (ext_info && ext_props)
++         vkr_android_report_dma_buf_exportable(physical_dev, ext_info->handleType,
++                                               &ext_props->externalMemoryProperties);
++   }
++#endif
+ }
+ 
+ static void
+@@ -775,6 +807,10 @@ vkr_dispatch_vkGetPhysicalDeviceExternalBufferProperties(
+    vn_replace_vkGetPhysicalDeviceExternalBufferProperties_args_handle(args);
+    vk->GetPhysicalDeviceExternalBufferProperties(
+       args->physicalDevice, args->pExternalBufferInfo, args->pExternalBufferProperties);
++#ifdef __ANDROID__
++   vkr_android_report_dma_buf_exportable(physical_dev, args->pExternalBufferInfo->handleType,
++                                         &args->pExternalBufferProperties->externalMemoryProperties);
++#endif
+ }
+ 
+ static void
