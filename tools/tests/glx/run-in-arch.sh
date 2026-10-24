@@ -29,7 +29,9 @@ OUT=/tmp/glx; mkdir -p $OUT
 gcc -O2 -Wall -o $OUT/glxcheck tools/tests/glx/glxcheck.c -lGL -lX11 || exit 1
 gcc -shared -fPIC -O2 -Wall -pthread -o $OUT/libblsession.so tools/linuxfs/preload/*.c -ldl || exit 1
 
-export MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink LIBGL_DEBUG=verbose
+# Zink takes a CPU Vulkan device (lavapipe here; the phone has the bridge's GPU) only when
+# software GL is asked for, which also means the drisw path: the one a DRI3-less server leaves.
+export MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink LIBGL_DEBUG=verbose LIBGL_ALWAYS_SOFTWARE=1
 fails=0
 check() {  # expect(ok|fail) label env... -- args
   local expect=$1 label=$2; shift 2
@@ -43,7 +45,7 @@ check() {  # expect(ok|fail) label env... -- args
 
 run_cases() {
   echo "== X extensions on $DISPLAY: $(xdpyinfo | sed -n '/number of extensions/,/default screen/p' | grep -v 'default screen\|number of' | tr -s ' \n' ' ')"
-  check ok   "$1: control, llvmpipe (no Zink)" -u MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER=llvmpipe -- --
+  check ok   "$1: control, llvmpipe (no Zink)" -u MESA_LOADER_DRIVER_OVERRIDE -u LIBGL_ALWAYS_SOFTWARE GALLIUM_DRIVER=llvmpipe -- --
   check ok   "$1: Zink, Kopper on" -- --
   [ -n "${shown:-}" ] || { shown=1; echo "---- full log of that case:"; head -60 $OUT/log; MESA_LOADER_DRIVER_OVERRIDE=zink vulkaninfo --summary 2>&1 | grep -i "deviceName\|deviceType\|driverName" | head; }
   check fail "$1: Zink, client sets LIBGL_KOPPER_DISABLE (Steam today, no preload)" -- --steam-env
