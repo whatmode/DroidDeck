@@ -227,6 +227,8 @@ public class LinuxVulkanDriverManager {
             meta.put("libc", "glibc");
             meta.put("minGlibc", minGlibc);
             meta.put("sourceLibraryName", soName);
+            String backend = zipMeta != null ? zipMeta.optString("backend", "") : "";
+            if (!backend.isEmpty()) meta.put("backend", backend);
             meta.put("apiVersion", apiVersion != null ? apiVersion : API_DEFAULT);
             meta.put("importedAt", System.currentTimeMillis());
             if (!FileUtils.writeString(new File(tmpDir, META_NAME), meta.toString(2))) throw new IOException("cannot write meta.json");
