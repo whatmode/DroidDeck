@@ -47,3 +47,63 @@ int xcb_connection_has_error(void *c) {
   errno = saved;
   return r;
 }
+
+/* The connection failure above is "extension not supported": xcb closes the whole connection
+ * when a request for an extension the server lacks is sent (Xwayland -shm has no DRI3, for
+ * one). It is only noticed later, in whichever thread reads events next, so also catch the
+ * request itself: before each extension request, name the missing extension and the caller. */
+typedef struct { const char *name; int global_id; } bl_xcb_extension_t;
+typedef struct { size_t count; bl_xcb_extension_t *ext; unsigned char opcode; unsigned char isvoid; } bl_xcb_protocol_request_t;
+typedef struct { unsigned char response_type, pad0; unsigned short sequence; unsigned int length;
+                 unsigned char present, major_opcode, first_event, first_error; } bl_xcb_query_extension_reply_t;
+
+static void check_extension(void *c, const bl_xcb_protocol_request_t *req) {
+  static int enabled = -1;
+  if (enabled < 0) { const char *w = getenv("BL_XCB_TRACE"); enabled = w && !strcmp(w, "1"); }
+  if (!enabled || !req || !req->ext) return;
+  static const bl_xcb_query_extension_reply_t *(*get_ext)(void *, bl_xcb_extension_t *);
+  if (!get_ext) get_ext = (const bl_xcb_query_extension_reply_t *(*)(void *, bl_xcb_extension_t *))dlsym(RTLD_NEXT, "xcb_get_extension_data");
+  if (!get_ext) return;
+  const bl_xcb_query_extension_reply_t *r = get_ext(c, req->ext);
+  if (r && r->present) return;
+  static int reported;
+  if (reported++ >= 4) return;
+  int saved = errno;
+  fprintf(stderr, "xcb: request %u of missing extension %s on connection %p (this closes it), pid %d tid %ld (%s)\n",
+          req->opcode, req->ext->name ? req->ext->name : "?", c, (int)getpid(), (long)syscall(SYS_gettid),
+          program_invocation_short_name ? program_invocation_short_name : "?");
+  void *frames[48];
+  int n = backtrace(frames, 48);
+  backtrace_symbols_fd(frames, n, 2);
+  errno = saved;
+}
+
+unsigned int xcb_send_request(void *c, int flags, void *vector, const bl_xcb_protocol_request_t *req) {
+  static unsigned int (*real)(void *, int, void *, const bl_xcb_protocol_request_t *);
+  if (!real) real = (unsigned int (*)(void *, int, void *, const bl_xcb_protocol_request_t *))dlsym(RTLD_NEXT, "xcb_send_request");
+  check_extension(c, req);
+  return real ? real(c, flags, vector, req) : 0;
+}
+
+unsigned long long xcb_send_request64(void *c, int flags, void *vector, const bl_xcb_protocol_request_t *req) {
+  static unsigned long long (*real)(void *, int, void *, const bl_xcb_protocol_request_t *);
+  if (!real) real = (unsigned long long (*)(void *, int, void *, const bl_xcb_protocol_request_t *))dlsym(RTLD_NEXT, "xcb_send_request64");
+  check_extension(c, req);
+  return real ? real(c, flags, vector, req) : 0;
+}
+
+unsigned int xcb_send_request_with_fds(void *c, int flags, void *vector, const bl_xcb_protocol_request_t *req,
+                                       unsigned int num_fds, int *fds) {
+  static unsigned int (*real)(void *, int, void *, const bl_xcb_protocol_request_t *, unsigned int, int *);
+  if (!real) real = (unsigned int (*)(void *, int, void *, const bl_xcb_protocol_request_t *, unsigned int, int *))dlsym(RTLD_NEXT, "xcb_send_request_with_fds");
+  check_extension(c, req);
+  return real ? real(c, flags, vector, req, num_fds, fds) : 0;
+}
+
+unsigned long long xcb_send_request_with_fds64(void *c, int flags, void *vector, const bl_xcb_protocol_request_t *req,
+                                               unsigned int num_fds, int *fds) {
+  static unsigned long long (*real)(void *, int, void *, const bl_xcb_protocol_request_t *, unsigned int, int *);
+  if (!real) real = (unsigned long long (*)(void *, int, void *, const bl_xcb_protocol_request_t *, unsigned int, int *))dlsym(RTLD_NEXT, "xcb_send_request_with_fds64");
+  check_extension(c, req);
+  return real ? real(c, flags, vector, req, num_fds, fds) : 0;
+}
