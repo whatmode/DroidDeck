@@ -167,6 +167,25 @@ mali_gl_setup() {
   fi
   [ -x "$dir/bin/Xwayland" ] && [ -x "$dir/bin/gamescope" ] && [ -d "$dir/lib" ] || {
     echo "== mali-gl: not installed ($dir), stock stack"; return 1; }
+  # Venus bridge, one GPU driver: Android's Mali driver does all GPU work. GL (Steam's client,
+  # its UI through ANGLE) runs on Zink, whose Vulkan goes over the bridge like gamescope's, and
+  # Xwayland keeps windows in shared memory (-shm, no glamor) instead of drawing them with
+  # Mesa's Panfrost. Two drivers on the same buffers stopped the GPU with exception 0x88
+  # (shareability fault). Only the patched gamescope (and its Xwayland, without glamor) is used
+  # from mali-gl. ~/.droiddeck-venus-mixed (or BL_VENUS_GL=panfrost) goes back to Panfrost GL.
+  if [ "${BL_VENUS:-0}" = 1 ] && [ "${BL_VENUS_GL:-zink}" = zink ] && [ ! -e "$HOME/.droiddeck-venus-mixed" ]; then
+    local wrap=$HOME/.cache/droiddeck/Xwayland-shm
+    mkdir -p "${wrap%/*}"
+    printf '#!/bin/sh\nLD_LIBRARY_PATH=%s/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} exec %s/bin/Xwayland "$@" -shm\n' "$dir" "$dir" > "$wrap"
+    chmod 755 "$wrap"
+    export WLR_XWAYLAND=$wrap
+    export MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink
+    BL_GAMESCOPE_BIN=$dir/bin/gamescope
+    BL_MALI_GL_ACTIVE=1
+    BL_VENUS_SINGLE=1
+    echo "== mali-gl: venus single driver ($(cat "$dir/VERSION" 2>/dev/null)): gamescope $BL_GAMESCOPE_BIN, Xwayland -shm, GL on Zink over the bridge"
+    return 0
+  fi
   export WLR_XWAYLAND=$dir/bin/Xwayland
   export LD_LIBRARY_PATH=$dir/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
   export GBM_BACKENDS_PATH=$dir/lib/gbm LIBGL_DRIVERS_PATH=$dir/lib/dri
@@ -888,6 +907,9 @@ BUSCONF
         # gl+nowsi, vulkan+nowsi, gl and vulkan all died identically; keep one variant while the
         # scale factor is tested (the death follows "ThreadSetForceDeviceScaleFactors 1 * 1.49").
         _bl_mali_variants=(gl)
+        # One driver over the Venus bridge: ANGLE on Vulkan presents through the gamescope WSI
+        # layer straight to gamescope, not through Xwayland's software path.
+        [ "${BL_VENUS_SINGLE:-0}" = 1 ] && _bl_mali_variants=(vulkan)
         _bl_mali_idx=$(cat "$HOME/.droiddeck-mali-cef-auto" 2>/dev/null || echo 0)
         case "$_bl_mali_idx" in ''|*[!0-9]*) _bl_mali_idx=0 ;; esac
         _bl_mali_idx=$((_bl_mali_idx % ${#_bl_mali_variants[@]}))
