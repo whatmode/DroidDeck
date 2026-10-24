@@ -1,0 +1,50 @@
+From f8589aa9736d008f95c6029fce0f01967e0ecc2e Mon Sep 17 00:00:00 2001
+From: droiddeck <ci@droiddeck>
+Date: Sat, 24 Oct 2026 18:56:27 +0000
+Subject: [PATCH] vk: log queue lookups with no exact match
+
+---
+ src/vulkan/runtime/vk_device.c | 19 ++++++++++++++++---
+ 1 file changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/src/vulkan/runtime/vk_device.c b/src/vulkan/runtime/vk_device.c
+index 8e99c47..fda0131 100644
+--- a/src/vulkan/runtime/vk_device.c
++++ b/src/vulkan/runtime/vk_device.c
+@@ -21,6 +21,7 @@
+  * IN THE SOFTWARE.
+  */
+ 
++#include <stdio.h>
+ #include "vk_device.h"
+ 
+ #include "vk_alloc.h"
+@@ -477,10 +478,22 @@ vk_common_GetDeviceQueue2(VkDevice _device,
+     *    VkDeviceQueueCreateInfo instance. If no matching flags were specified
+     *    at device creation time then pQueue will return VK_NULL_HANDLE."
+     */
+-   if (queue && queue->flags == pQueueInfo->flags)
++   if (queue && queue->flags == pQueueInfo->flags) {
+       *pQueue = vk_queue_to_handle(queue);
+-   else
+-      *pQueue = VK_NULL_HANDLE;
++      return;
++   }
++
++   /* DroidDeck: a VK_NULL_HANDLE here took Steam's webhelper down (the gamescope WSI layer
++    * asserts on a null VkQueue). Say what was asked and what exists, and hand back the queue
++    * at that family/index when only the flags differ. */
++   fprintf(stderr, "vk: vkGetDeviceQueue2(family %u, index %u, flags 0x%x) has no exact match%s\n",
++           pQueueInfo->queueFamilyIndex, pQueueInfo->queueIndex, pQueueInfo->flags,
++           queue ? "; returning the queue with other flags" : "");
++   vk_foreach_queue(iter, device) {
++      fprintf(stderr, "vk:   created queue: family %u, index %u, flags 0x%x\n",
++              iter->queue_family_index, iter->index_in_family, iter->flags);
++   }
++   *pQueue = queue ? vk_queue_to_handle(queue) : VK_NULL_HANDLE;
+ }
+ 
+ VKAPI_ATTR VkResult VKAPI_CALL
+-- 
+2.43.0
+
