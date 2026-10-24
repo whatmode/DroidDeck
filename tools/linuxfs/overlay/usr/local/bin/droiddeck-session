@@ -912,9 +912,10 @@ BUSCONF
         # gl+nowsi, vulkan+nowsi, gl and vulkan all died identically; keep one variant while the
         # scale factor is tested (the death follows "ThreadSetForceDeviceScaleFactors 1 * 1.49").
         _bl_mali_variants=(gl)
-        # One driver over the Venus bridge: ANGLE on Vulkan presents through the gamescope WSI
-        # layer straight to gamescope, not through Xwayland's software path.
-        [ "${BL_VENUS_SINGLE:-0}" = 1 ] && _bl_mali_variants=(vulkan)
+        # One driver over the Venus bridge. ANGLE on GL (Zink, presenting through Kopper and the
+        # gamescope WSI layer) got Big Picture on screen; ANGLE on Vulkan left the webhelper
+        # silent until Steam restarted it every ~10 s. Try GL first, Vulkan after a failure.
+        [ "${BL_VENUS_SINGLE:-0}" = 1 ] && _bl_mali_variants=(gl vulkan)
         _bl_mali_idx=$(cat "$HOME/.droiddeck-mali-cef-auto" 2>/dev/null || echo 0)
         case "$_bl_mali_idx" in ''|*[!0-9]*) _bl_mali_idx=0 ;; esac
         _bl_mali_idx=$((_bl_mali_idx % ${#_bl_mali_variants[@]}))
