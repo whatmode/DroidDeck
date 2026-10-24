@@ -2,7 +2,7 @@ name: Mali GL build
 
 on:
   push:
-    branches: [mali-gl]
+    branches: [mali-gl, venus-bridge]
     paths:
       - 'mali-gl/**'
       - 'tools/gamescope/**'
