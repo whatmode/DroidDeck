@@ -52,6 +52,11 @@ object VenusBridge {
             "LD_LIBRARY_PATH=$dir",
             "RENDER_SERVER_EXEC_PATH=" + File(dir, RENDER_SERVER).path,
             "TMPDIR=" + context.cacheDir.path,
+            // Memory the Linux side maps comes from a dma-heap. Its CPU mapping is never
+            // synced against the GPU (venus does no dma-buf cache maintenance), so with the
+            // cached heap the Linux side read stale GPU-written values: semaphore feedback
+            // never changed and gamescope waited forever. The uncached heap has no such cache.
+            "VKR_DMA_HEAP=" + (System.getenv("DROIDDECK_VENUS_HEAP") ?: "/dev/dma_heap/system-uncached"),
         )
         pid = HostProcess.start(
             "${server.path} --venus --no-virgl --multi-clients --socket-path ${sock.path}",
