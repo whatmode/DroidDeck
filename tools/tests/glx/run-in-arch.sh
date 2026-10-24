@@ -28,6 +28,7 @@ echo "== mesa $(pacman -Q mesa), $(pacman -Q xorg-xwayland)"
 OUT=/tmp/glx; mkdir -p $OUT
 gcc -O2 -Wall -o $OUT/glxcheck tools/tests/glx/glxcheck.c -lGL -lX11 || exit 1
 printf '#include <stdlib.h>\nint main(void) { exit(1); }\n' > $OUT/steam.c && gcc -o $OUT/steam $OUT/steam.c || exit 1
+mkdir -p $OUT/audit && gcc -O2 -Wall -o $OUT/audit/steam tools/tests/glx/auditcheck.c -ldl || exit 1
 gcc -shared -fPIC -O2 -Wall -pthread -o $OUT/libblsession.so tools/linuxfs/preload/*.c -ldl || exit 1
 
 # Zink takes a CPU Vulkan device (lavapipe) only when software GL is asked for, and asking
@@ -63,6 +64,13 @@ run_cases() {
   BL_STEAM_GLX_REPORT=1 LD_PRELOAD=$OUT/libblsession.so $OUT/steam > $OUT/log 2>&1
   grep "glxreport" $OUT/log | grep -v " env \| loaded " | head -12
   if grep -q "glXChooseVisual(rgba): visual" $OUT/log; then echo "PASS $1: report"; else echo "FAIL $1: report"; fails=$((fails+1)); fi
+  # The preload as an audit library (glxaudit.c): Steam's own call seen and rescued.
+  for how in "dlsym 0" "gpa 0" "dlsym 3"; do
+    echo "---- $1: audited 'steam', lookup $how (expect rescued)"
+    LD_AUDIT=$OUT/libblsession.so $OUT/audit/steam $how > $OUT/log 2>&1
+    grep "glxaudit\|program got" $OUT/log | head -10
+    if grep -q "program got a visual" $OUT/log; then echo "PASS $1: audit $how"; else echo "FAIL $1: audit $how"; tail -5 $OUT/log; fails=$((fails+1)); fi
+  done
 }
 
 Xvfb :7 -screen 0 640x480x24 >/dev/null 2>&1 & sleep 2
