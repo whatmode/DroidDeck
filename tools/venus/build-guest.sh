@@ -8,6 +8,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/source.env"
 WORK=${VENUS_WORK:-$(mktemp -d)}
 [ -d "$WORK/mesa" ] || git clone -q --depth 1 --branch "$MESA_REF" "$MESA_REPO" "$WORK/mesa"
+tar -C "$WORK/mesa" -czf "$OUT/mesa-virtio-src.tar.gz" src/virtio src/vulkan/runtime src/vulkan/wsi include/drm-uapi
 echo "== venus vtest socket handling:"
 grep -n "getenv\|SOCKET\|socket_name\|sun_path" "$WORK/mesa/src/virtio/vulkan/vn_renderer_vtest.c" | head -20 || true
 grep -rn "VN_DEBUG\|\"vtest\"" "$WORK/mesa/src/virtio/vulkan/vn_common.c" | head -10 || true

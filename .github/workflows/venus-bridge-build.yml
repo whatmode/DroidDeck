@@ -83,7 +83,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: venus-guest
-          path: out/Venus-Bridge-guest-*.zip
+          path: |
+            out/Venus-Bridge-guest-*.zip
+            out/mesa-virtio-src.tar.gz
 
   publish:
     needs: [server, guest]
@@ -102,4 +104,4 @@ jobs:
           gh release view "$tag" >/dev/null 2>&1 \
             || gh release create "$tag" --prerelease --target "$GITHUB_SHA" --title "Venus bridge (test)" \
                  --notes "Venus Vulkan bridge: vtest server for Android and the venus ICD for the Linux side, from ${GITHUB_SHA::7}."
-          gh release upload "$tag" dl/venus-server/*.tar.gz dl/venus-guest/*.zip --clobber
+          gh release upload "$tag" dl/venus-server/*.tar.gz dl/venus-guest/*.zip dl/venus-guest/*.tar.gz --clobber
