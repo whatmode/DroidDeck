@@ -942,6 +942,12 @@ BUSCONF
         _bl_mali_scale_args=(-forcedesktopscaling "${BL_MALI_SCALE:-1}")
         echo "== steam: Mali GPU, UI scale pinned to ${BL_MALI_SCALE:-1}x (webhelper: $BL_WEBHELPER_ARGS)"
       fi
+      # Steam drops the webhelper's own output; keep it (Mesa/Zink errors, Chromium's crash
+      # report) in Steam's log folder, which the logs zip carries.
+      if [ "${BL_VENUS_SINGLE:-0}" = 1 ]; then
+        export BL_WEBHELPER_STDERR=$steam_root/logs/webhelper_stderr.txt
+        mkdir -p "$steam_root/logs" && : > "$BL_WEBHELPER_STDERR"
+      fi
       case "${_bl_mali_cef%%+*}" in
         cpu)
           _bl_cef=(-cef-disable-gpu)
@@ -1317,7 +1323,7 @@ BUSCONF
         (
           _bw_logs="$steam_root/logs"
           declare -A _bw_off=() _bw_seen=() _bw_name=() _bw_gl=() _bw_snap=()
-          for _bw_f in cef_log.txt webhelper.txt webhelper_js.txt console_log.txt steamui_html.txt; do
+          for _bw_f in cef_log.txt webhelper.txt webhelper_js.txt console_log.txt steamui_html.txt webhelper_stderr.txt; do
             _bw_off[$_bw_f]=$(stat -c %s "$_bw_logs/$_bw_f" 2>/dev/null || echo 0)
           done
           _bw_prev=""
