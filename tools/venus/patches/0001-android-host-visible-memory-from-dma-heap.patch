@@ -1,0 +1,110 @@
+diff --git a/src/venus/vkr_device_memory.c b/src/venus/vkr_device_memory.c
+index 9c2addc..aea49c9 100644
+--- a/src/venus/vkr_device_memory.c
++++ b/src/venus/vkr_device_memory.c
+@@ -119,6 +119,48 @@ fail:
+    return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+ }
+ 
++#elif defined(__ANDROID__)
++#include <fcntl.h>
++#include <linux/dma-heap.h>
++#include <sys/ioctl.h>
++
++/* Android: physical_dev->udmabuf_dev_fd is a dma-heap (see vkr_physical_device.c). The heap
++ * buffer is imported into the driver as dma_buf and kept, like a udmabuf, to hand to the
++ * guest when the memory is exported as a blob.
++ */
++static VkResult
++vkr_udmabuf_get_fd_info_from_allocation_info(struct vkr_physical_device *physical_dev,
++                                             const VkMemoryAllocateInfo *alloc_info,
++                                             int *out_udmabuf_fd,
++                                             VkImportMemoryFdInfoKHR *out_fd_info)
++{
++   struct dma_heap_allocation_data data = {
++      .len = align64(alloc_info->allocationSize, 4096),
++      .fd_flags = O_RDWR | O_CLOEXEC,
++   };
++   if (ioctl(physical_dev->udmabuf_dev_fd, DMA_HEAP_IOCTL_ALLOC, &data) < 0) {
++      vkr_log("DMA_HEAP_IOCTL_ALLOC of %llu bytes failed (%s)",
++              (unsigned long long)data.len, strerror(errno));
++      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++   }
++
++   const int fd = os_dupfd_cloexec((int)data.fd);
++   if (fd < 0) {
++      vkr_log("os_dupfd_cloexec failed (%s)", strerror(errno));
++      close((int)data.fd);
++      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++   }
++
++   *out_udmabuf_fd = (int)data.fd;
++   *out_fd_info = (VkImportMemoryFdInfoKHR){
++      .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
++      .pNext = alloc_info->pNext,
++      .fd = fd,
++      .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
++   };
++   return VK_SUCCESS;
++}
++
+ #else  /* HAVE_LINUX_UDMABUF_H && HAVE_MEMFD_CREATE */
+ 
+ static inline VkResult
+diff --git a/src/venus/vkr_physical_device.c b/src/venus/vkr_physical_device.c
+index b998fc2..077f0f6 100644
+--- a/src/venus/vkr_physical_device.c
++++ b/src/venus/vkr_physical_device.c
+@@ -43,6 +43,34 @@ vkr_physical_device_get_udmabuf_dev_fd(void)
+ 
+ #endif /* HAVE_LINUX_UDMABUF_H */
+ 
++#ifdef __ANDROID__
++#include <fcntl.h>
++#include <stdlib.h>
++
++static int android_dma_heap_fd = -1;
++
++static void
++vkr_android_dma_heap_init_once(void)
++{
++   const char *heap = getenv("VKR_DMA_HEAP");
++   if (!heap || !heap[0])
++      heap = "/dev/dma_heap/system";
++   android_dma_heap_fd = open(heap, O_RDONLY | O_CLOEXEC);
++   if (android_dma_heap_fd < 0)
++      vkr_log("failed to open dma-heap %s: %s", heap, strerror(errno));
++   else
++      vkr_log("host-visible memory comes from dma-heap %s", heap);
++}
++
++static int
++vkr_android_dma_heap_fd(void)
++{
++   static once_flag dma_heap_once_flag = ONCE_FLAG_INIT;
++   call_once(&dma_heap_once_flag, vkr_android_dma_heap_init_once);
++   return android_dma_heap_fd;
++}
++#endif /* __ANDROID__ */
++
+ #ifdef ENABLE_MINIGBM_ALLOCATION
+ #include <gbm.h>
+ #ifdef MINIGBM
+@@ -233,6 +261,17 @@ vkr_physical_device_init_memory_properties(struct vkr_physical_device *physical_
+ 
+    physical_dev->udmabuf_dev_fd =
+       VKR_DEBUG(UDMABUF) ? vkr_physical_device_get_udmabuf_dev_fd() : -1;
++
++#ifdef __ANDROID__
++   /* Android drivers export neither dma_buf nor opaque fds from host-visible memory, and
++    * there is no gbm or udmabuf device. Allocate that memory from the system dma-heap and
++    * import it as dma_buf instead; udmabuf_dev_fd carries the heap fd on this path.
++    */
++   if (!physical_dev->is_dma_buf_fd_export_supported &&
++       !physical_dev->is_opaque_fd_export_supported &&
++       physical_dev->EXT_external_memory_dma_buf && physical_dev->udmabuf_dev_fd < 0)
++      physical_dev->udmabuf_dev_fd = vkr_android_dma_heap_fd();
++#endif
+ }
+ 
+ static void

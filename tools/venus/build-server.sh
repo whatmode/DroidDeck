@@ -67,6 +67,11 @@ ninja -C "$WORK/build-libepoxy" install
 fetch virglrenderer "$VIRGLRENDERER_REPO" "$VIRGLRENDERER_REF"
 # The source as built, for reading and patching where gitlab is out of reach.
 tar -C "$WORK" --exclude=.git -czf "$OUT/virglrenderer-src.tar.gz" virglrenderer
+for p in "$HERE"/patches/*.patch; do
+  [ -e "$p" ] || continue
+  echo "== virglrenderer patch $(basename "$p")"
+  git -C "$WORK/virglrenderer" apply "$p"
+done
 echo "== virglrenderer meson_options:"; grep -n "option(" "$WORK/virglrenderer/meson_options.txt" | cut -c1-160
 echo "== virglrenderer gbm/platform lines:"; grep -n "gbm\|platforms\|with_egl\|with_glx\|epoxy" "$WORK/virglrenderer/meson.build" | cut -c1-160
 # Android has no DRM render node or GBM, so no EGL/GLX platform: this server only runs Venus.
