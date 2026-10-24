@@ -193,6 +193,8 @@ mali_gl_setup() {
     # DRI3 that swapchain never comes up and the webhelper sat in vkCreateSwapchainKHR until
     # Steam killed it. Always hand windows to gamescope.
     export GAMESCOPE_WSI_FORCE_BYPASS=${GAMESCOPE_WSI_FORCE_BYPASS:-1}
+    # Thread-safe Xlib in the webhelper (see the preload): "Fatal IO error 11 on X server".
+    export BL_WEBHELPER_XTHREADS=${BL_WEBHELPER_XTHREADS:-1}
     echo "== mali-gl: venus single driver ($(cat "$dir/VERSION" 2>/dev/null)): gamescope $BL_GAMESCOPE_BIN, Xwayland -shm, GL on Zink over the bridge"
     return 0
   fi
@@ -956,6 +958,10 @@ BUSCONF
       case "${_bl_mali_cef%%+*}" in
         cpu)
           _bl_cef=(-cef-disable-gpu)
+          # Without the GPU, Chromium falls back to ANGLE on SwiftShader (Vulkan), whose queue
+          # request trips the gamescope WSI layer (null VkQueue, vkroots.h:129) and kills the
+          # webhelper. No software rasterizer: CEF composites on the CPU without it.
+          [ "${BL_VENUS_SINGLE:-0}" = 1 ] && export BL_WEBHELPER_ARGS="${BL_WEBHELPER_ARGS:---no-zygote --in-process-gpu -AudioServiceOutOfProcess} --disable-software-rasterizer"
           echo "== steam: Mali GPU, CEF draws in software (-cef-disable-gpu)" ;;
         vulkan)
           _bl_cef=(-cef-force-gpu -cef-use-gl=angle -cef-use-angle=vulkan)
