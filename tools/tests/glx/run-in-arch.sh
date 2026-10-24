@@ -27,6 +27,7 @@ pacman -Syu --noconfirm --needed gcc mesa vulkan-swrast vulkan-tools vulkan-head
 echo "== mesa $(pacman -Q mesa), $(pacman -Q xorg-xwayland)"
 OUT=/tmp/glx; mkdir -p $OUT
 gcc -O2 -Wall -o $OUT/glxcheck tools/tests/glx/glxcheck.c -lGL -lX11 || exit 1
+printf '#include <stdlib.h>\nint main(void) { exit(1); }\n' > $OUT/steam.c && gcc -o $OUT/steam $OUT/steam.c || exit 1
 gcc -shared -fPIC -O2 -Wall -pthread -o $OUT/libblsession.so tools/linuxfs/preload/*.c -ldl || exit 1
 
 # Zink takes a CPU Vulkan device (lavapipe) only when software GL is asked for, and asking
@@ -51,17 +52,17 @@ check() {  # expect(ok|fail) label env... -- args
 
 run_cases() {
   echo "== X extensions on $DISPLAY: $(xdpyinfo | sed -n '/number of extensions/,/default screen/p' | grep -v 'default screen\|number of' | tr -s ' \n' ' ')"
-  check ok   "$1: control, llvmpipe (no Zink)" -u MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER=llvmpipe -- --
-  check ok   "$1: Zink, Kopper on" -- --
-  [ -n "${shown:-}" ] || { shown=1; echo "---- that case again, verbose, with the files it opens:";
-    MESA_DEBUG=1 MESA_LOG_LEVEL=debug ZINK_DEBUG=noreorder strace -f -e trace=openat -o $OUT/strace timeout 60 $OUT/glxcheck > $OUT/vlog 2>&1
-    grep -v "glXChooseVisual(" $OUT/vlog | head -40
-    grep -E "gallium|dri|vulkan|icd|layer|lvp|GLX" $OUT/strace | grep -v ENOENT | sed 's/^[0-9]* *//' | cut -c1-160 | head -30
-    vulkaninfo --summary 2>&1 | grep -i "deviceName\|deviceType\|driverName" | head; }
-  check fail "$1: Zink, client sets LIBGL_KOPPER_DISABLE (Steam today, no preload)" -- --steam-env
-  check ok   "$1: same, session preload with BL_WEBHELPER_KOPPER=1" LD_PRELOAD=$OUT/libblsession.so BL_WEBHELPER_KOPPER=1 -- --steam-env
-  check fail "$1: same preload, BL_WEBHELPER_KOPPER unset (the fix is opt-in)" LD_PRELOAD=$OUT/libblsession.so -- --steam-env
-  check ok   "$1: inherited LIBGL_KOPPER_DISABLE, preload on" LD_PRELOAD=$OUT/libblsession.so BL_WEBHELPER_KOPPER=1 LIBGL_KOPPER_DISABLE=true -- --
+  check ok   "$1: Zink with Kopper" -- --
+  # Steam's client sets LIBGL_KOPPER_DISABLE=true in its own process. With LIBGL_KOPPER_DRI2
+  # GLX still finds visuals, so that is not why it exits on "glXChooseVisual failed".
+  check ok   "$1: Zink, client sets LIBGL_KOPPER_DISABLE" -- --steam-env
+  # Without the driver Mesa's GLX has no configs at all: what the in-process report must show.
+  check fail "$1: Zink with no Vulkan driver" VK_DRIVER_FILES=/nonexistent.json -- --
+  # The session preload's report from a failing Steam client process (glxreport.c).
+  echo "---- $1: in-process GLX report of an exiting 'steam' (expect visuals)"
+  BL_STEAM_GLX_REPORT=1 LD_PRELOAD=$OUT/libblsession.so $OUT/steam > $OUT/log 2>&1
+  grep "glxreport" $OUT/log | grep -v " env \| loaded " | head -12
+  if grep -q "glXChooseVisual(rgba): visual" $OUT/log; then echo "PASS $1: report"; else echo "FAIL $1: report"; fails=$((fails+1)); fi
 }
 
 Xvfb :7 -screen 0 640x480x24 >/dev/null 2>&1 & sleep 2
@@ -86,10 +87,11 @@ if pacman -S --noconfirm --needed chromium >/dev/null 2>&1; then
       echo "---- chromium on $d, ANGLE on $angle (report)"
       rm -rf /tmp/cr; DISPLAY=$d LD_PRELOAD=$OUT/libblsession.so BL_XCB_TRACE=1 BL_WEBHELPER_KOPPER=1 \
         timeout 25 chromium --no-sandbox --user-data-dir=/tmp/cr --ozone-platform=x11 --use-gl=angle \
-        --use-angle=$angle --ignore-gpu-blocklist --no-first-run --enable-logging=stderr \
+        --use-angle=$angle --ignore-gpu-blocklist --no-first-run --enable-logging=stderr --disable-dev-shm-usage \
         "data:text/html,<canvas id=c></canvas><script>c.getContext('webgl').clearColor(1,0,0,1)</script>" \
         > $OUT/cr.log 2>&1; echo "exit $?"
-      grep -E "xcb:|Fatal IO|extension|DRI3|GPU process|gpu_init|GL_RENDERER|ANGLE|zink|kopper|Exiting GPU" $OUT/cr.log | sort | uniq -c | sort -rn | head -25
+      grep -E "xcb:|Fatal IO|extension|DRI3|GPU process|gpu_init|GL_RENDERER|ANGLE|zink|kopper|Exiting GPU" $OUT/cr.log | sort | uniq -c | sort -rn | head -15
+      grep -v "Fontconfig\|dbus\|bus.cc" $OUT/cr.log | tail -8 | cut -c1-220
     done
   done
 else
