@@ -1,0 +1,66 @@
+diff --git a/src/rendervulkan.cpp b/src/rendervulkan.cpp
+index e1c6462..c3152a9 100644
+--- a/src/rendervulkan.cpp
++++ b/src/rendervulkan.cpp
+@@ -141,6 +141,9 @@ std::span<const uint64_t> GetSupportedSampleModifiers( uint32_t uDrmFormat )
+ }
+ 
+ static LogScope vk_log("vulkan");
++
++// Whether the device exports and imports semaphore file descriptors (see CVulkanDevice::createDevice).
++static bool s_bExternalSemaphoreFd = true;
+ // Debug verbosity turns the timestamp queries on, so log_composite_timing debug is the switch.
+ static LogScope composite_timing_log("composite_timing");
+ 
+@@ -593,7 +596,23 @@ bool CVulkanDevice::createDevice()
+ 	enabledExtensions.push_back( VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME );
+ 	enabledExtensions.push_back( VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME );
+ 
+-	enabledExtensions.push_back( VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME );
++	{
++		// A remoted driver (Mesa's venus over vtest, which carries the Vulkan of DroidDeck's
++		// Mali bridge) has no semaphore file descriptors. They only back explicit-sync
++		// timelines, which need a DRM render node anyway, so go on without them.
++		uint32_t nExtCount = 0;
++		vk.EnumerateDeviceExtensionProperties( physDev(), nullptr, &nExtCount, nullptr );
++		std::vector<VkExtensionProperties> exts( nExtCount );
++		vk.EnumerateDeviceExtensionProperties( physDev(), nullptr, &nExtCount, exts.data() );
++		s_bExternalSemaphoreFd = false;
++		for ( auto &ext : exts )
++			if ( strcmp( ext.extensionName, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME ) == 0 )
++				s_bExternalSemaphoreFd = true;
++		if ( s_bExternalSemaphoreFd )
++			enabledExtensions.push_back( VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME );
++		else
++			vk_log.infof( "no %s: explicit-sync timelines are unavailable", VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME );
++	}
+ 
+ 	enabledExtensions.push_back( VK_EXT_ROBUSTNESS_2_EXTENSION_NAME );
+ #if 0
+@@ -1443,6 +1462,8 @@ VulkanTimelineSemaphore_t::~VulkanTimelineSemaphore_t()
+ 
+ int VulkanTimelineSemaphore_t::GetFd() const
+ {
++	if ( !s_bExternalSemaphoreFd )
++		return -1;
+ 	const VkSemaphoreGetFdInfoKHR semaphoreGetInfo =
+ 	{
+ 		.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
+@@ -1463,6 +1484,8 @@ int VulkanTimelineSemaphore_t::GetFd() const
+ 
+ std::shared_ptr<VulkanTimelineSemaphore_t> CVulkanDevice::CreateTimelineSemaphore( uint64_t ulStartPoint, bool bShared )
+ {
++	if ( bShared && !s_bExternalSemaphoreFd )
++		return nullptr;
+ 	std::shared_ptr<VulkanTimelineSemaphore_t> pSemaphore = std::make_unique<VulkanTimelineSemaphore_t>();
+ 	pSemaphore->pDevice = this;
+ 
+@@ -1499,6 +1522,8 @@ std::shared_ptr<VulkanTimelineSemaphore_t> CVulkanDevice::CreateTimelineSemaphor
+ 
+ std::shared_ptr<VulkanTimelineSemaphore_t> CVulkanDevice::ImportTimelineSemaphore( gamescope::CTimeline *pTimeline )
+ {
++	if ( !s_bExternalSemaphoreFd )
++		return nullptr;
+ 	std::shared_ptr<VulkanTimelineSemaphore_t> pSemaphore = std::make_unique<VulkanTimelineSemaphore_t>();
+ 	pSemaphore->pDevice = this;
+ 
