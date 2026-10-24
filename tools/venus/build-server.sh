@@ -75,7 +75,7 @@ ninja -C "$WORK/build-virglrenderer" install || { echo "== virglrenderer build f
 
 mkdir -p "$OUT/venus-server"
 cp "$PREFIX/bin/virgl_test_server" "$OUT/venus-server/"
-cp "$PREFIX/lib/libvirglrenderer.so" "$PREFIX/lib/libepoxy.so" "$PREFIX/lib/libdrm.so" "$OUT/venus-server/" 2>/dev/null || true
+cp "$PREFIX/libexec/virgl_render_server" "$OUT/venus-server/" 2>/dev/null || echo "== no virgl_render_server (venus runs in the vtest process)"
 cp "$PREFIX"/lib/libvirglrenderer.so* "$PREFIX"/lib/libepoxy.so* "$PREFIX"/lib/libdrm.so* "$OUT/venus-server/" 2>/dev/null || true
 "$TC/llvm-strip" "$OUT/venus-server/"* 2>/dev/null || true
 ls -la "$OUT/venus-server"

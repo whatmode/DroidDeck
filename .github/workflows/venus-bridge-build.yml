@@ -72,6 +72,10 @@ jobs:
           enc() { sed 's/%/%25/g' | cut -c1-300 | awk '{printf "%s%%0A", $0}'; }
           echo "::error title=guest tail::$(tail -45 /tmp/guest.log | enc)"
           echo "::error title=guest errors::$(grep -nE 'ERROR|error:|not found|undefined' /tmp/guest.log | tail -30 | enc)"
+      - name: Show the venus vtest settings
+        run: |
+          enc() { sed 's/%/%25/g' | cut -c1-300 | awk '{printf "%s%%0A", $0}'; }
+          echo "::notice title=venus vtest::$(sed -n '/== venus vtest socket handling/,/^The Meson\|^Version/p' /tmp/guest.log | head -40 | enc)"
       - uses: actions/upload-artifact@v4
         with:
           name: venus-guest

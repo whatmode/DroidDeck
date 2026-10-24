@@ -123,6 +123,15 @@ if [ -n "${BL_VK_DRIVER:-}" ]; then
   fi
   unset bl_icd_lib
 fi
+# Venus bridge: the selected driver forwards Vulkan to Android's driver through the vtest
+# socket. Log what it reports, so a first test shows whether the bridge answers at all.
+if [ -n "${BL_VENUS:-}" ]; then
+  bl_venus_state="NOT running"; [ "$BL_VENUS" = 1 ] && bl_venus_state=up
+  echo "== venus bridge: server $bl_venus_state, socket $( [ -S /tmp/.virgl_test ] && echo present || echo MISSING )"
+  if command -v vulkaninfo >/dev/null 2>&1; then
+    ( timeout 30 vulkaninfo --summary 2>&1 | sed 's/^/== venus vulkaninfo: /' | head -40 ) || true
+  fi
+fi
 export GAMESCOPE_FORCE_VULKAN_REALTIME=${BL_GAMESCOPE_REALTIME:-0}
 
 # mali-gl: on a Mali phone (kbase, /dev/mali0, no DRM node) game mode runs on the

@@ -566,6 +566,12 @@ class SessionService : Service() {
         )
         LinuxVulkanDriver.resolveIcdPath(this, linuxDriverId)
             ?.let { guest.add(LinuxVulkanDriver.ENV + "=" + it) }
+        if (com.droiddeck.launcher.gpu.VenusBridge.isVenus(this, linuxDriverId)) {
+            val up = com.droiddeck.launcher.gpu.VenusBridge.start(this, SessionState.logDirectory?.let { File(it, "venus-server.log") })
+            Log.i(TAG, "venus bridge: server " + if (up) "up" else "NOT running")
+            guest.add("VN_DEBUG=vtest")
+            guest.add("BL_VENUS=" + if (up) "1" else "0")
+        }
         tuDebug(linuxDriverId)?.let { guest.add("TU_DEBUG=$it") }
         com.droiddeck.launcher.gpu.TpUbwcHint.forThisDevice()?.let { guest.add("${com.droiddeck.launcher.gpu.TpUbwcHint.ENV}=$it") }
         if (SessionPrefs.zinkLazy(this)) {
@@ -696,6 +702,8 @@ class SessionService : Service() {
         runtimeDir: File,
     ): ArrayList<String> {
         val binds = ArrayList<String>()
+        if (com.droiddeck.launcher.gpu.VenusBridge.running)
+            binds.add(com.droiddeck.launcher.gpu.VenusBridge.socket(this).path + ":" + com.droiddeck.launcher.gpu.VenusBridge.GUEST_SOCKET)
         if (controllersOn) binds.add(fakeInputDir.path + ":/dev/input")
         if (controllersOn) binds.addAll(deckBinds)
         val battery = BatteryComponent(
@@ -1383,6 +1391,7 @@ class SessionService : Service() {
 
     private fun stopSession(status: Int) {
         cancelQueuedSteamGame()
+        com.droiddeck.launcher.gpu.VenusBridge.stop()
         completeNativeSleep()
         val (ended, endedArch) = synchronized(stopLock) {
             if (!SessionState.running) return
