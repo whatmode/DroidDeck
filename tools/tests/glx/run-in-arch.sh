@@ -43,7 +43,7 @@ check() {  # expect(ok|fail) label env... -- args
 
 run_cases() {
   echo "== X extensions on $DISPLAY: $(xdpyinfo | sed -n '/number of extensions/,/default screen/p' | grep -v 'default screen\|number of' | tr -s ' \n' ' ')"
-  check ok   "$1: control, llvmpipe (no Zink)" MESA_LOADER_DRIVER_OVERRIDE= GALLIUM_DRIVER=llvmpipe -- --
+  check ok   "$1: control, llvmpipe (no Zink)" -u MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER=llvmpipe -- --
   check ok   "$1: Zink, Kopper on" -- --
   [ -n "${shown:-}" ] || { shown=1; echo "---- full log of that case:"; head -60 $OUT/log; MESA_LOADER_DRIVER_OVERRIDE=zink vulkaninfo --summary 2>&1 | grep -i "deviceName\|deviceType\|driverName" | head; }
   check fail "$1: Zink, client sets LIBGL_KOPPER_DISABLE (Steam today, no preload)" -- --steam-env
