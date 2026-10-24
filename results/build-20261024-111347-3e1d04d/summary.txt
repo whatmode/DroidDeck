@@ -1,0 +1,23 @@
+== zenithblue 5b87b74d3e2580d5816e7f2c629f6f016a462f28 profile g615-v11-csf
+== mesa 5a07217f034b3e50d8c7c7794f97a2df1742613b
+== mali-gl patch: 0001-panfrost-gallium-on-kbase.patch applied
+== mali-gl patch: 0002-panvk-csf-compute-tls-size.patch applied
+== mali-gl patch: 0003-pan-bi-tls-spill-mem-access.patch applied
+== mali-gl patch: 0004-pan-bi-tls-store-helper-analysis.patch applied
+== mali-gl patch: 0005-panvk-self-configuring-kbase-profile.patch applied
+== configure: OK
+== build: ninja rc=0, 0 error lines, 0 warnings in patched files
+== installed: ./lib/dri/libdril_dri.so ./lib/gbm/dri_gbm.so ./lib/libEGL.so.1.0.0 ./lib/libGL.so.1.2.0 ./lib/libGLESv2.so.2.0.0 ./lib/libgallium-26.3.0-devel.so ./lib/libgbm.so.1.0.0 
+== gltest: built
+== x11test: built
+== glprobe: built
+== tfptest: built
+== gamescope: packaged
+xwayland job: xwayland 24.1.14
+xwayland job: applied 0001-glamor-gbm-on-a-non-drm-device.patch
+xwayland job: NEEDED: libpixman-1.so.0 libXfont2.so.2 libwayland-client.so.0 libm.so.6 libxcvt.so.0 libxshmfence.so.1 libdrm.so.2 libepoxy.so.0 libei.so.1 liboeffis.so.1 libgbm.so.1 libdecor-0.so.0 libnettle.so.9 libtirpc.so.3 libXau.so.6 libGL.so.1 libc.so.6 ld-linux-aarch64.so.1 
+== Xwayland: packaged
+== external sonames: ld-linux-aarch64.so.1 libSDL2-2.0.so.0 libX11-xcb.so.1 libX11.so.6 libXRes.so.1 libXau.so.6 libXcomposite.so.1 libXcursor.so.1 libXdamage.so.1 libXext.so.6 libXfixes.so.3 libXfont2.so.2 libXi.so.6 libXmu.so.6 libXrender.so.1 libXtst.so.6 libXxf86vm.so.1 libavif.so.16 libc.so.6 libcap.so.2 libdecor-0.so.0 libdrm.so.2 libei.so.1 libeis.so.1 libepoxy.so.0 libgcc_s.so.1 libinput.so.10 liblcms2.so.2 libluajit-5.1.so.2 libm.so.6 libmvec.so.1 libnettle.so.9 liboeffis.so.1 libpipewire-0.3.so.0 libpixman-1.so.0 libseat.so.1 libstdc++.so.6 libtirpc.so.3 libudev.so.1 libwayland-client.so.0 libwayland-server.so.0 libxcb-dri3.so.0 libxcb-glx.so.0 libxcb-present.so.0 libxcb-randr.so.0 libxcb-shm.so.0 libxcb-sync.so.1 libxcb-xfixes.so.0 libxcb.so.1 libxcvt.so.0 libxkbcommon.so.0 libxshmfence.so.1 libz.so.1 
+== max GLIBC symbol version: GLIBC_2.43
+== package: mali-gl-aarch64.tar.gz 53M
+== runtime package: mali-gl-runtime-aarch64.tar.gz 8.5M sha256 f52f245847d4be7546723f0e648df70dc611d93b76a1e1336ec4a1cd2b3bf68c
