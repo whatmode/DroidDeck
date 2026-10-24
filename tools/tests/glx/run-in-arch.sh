@@ -22,16 +22,20 @@ trap annotate EXIT
 grep -q '^DisableSandbox' /etc/pacman.conf || sed -i 's/^\[options\]/[options]\nDisableSandbox/' /etc/pacman.conf
 { for m in https://ca.us.mirror.archlinuxarm.org https://fl.us.mirror.archlinuxarm.org https://de3.mirror.archlinuxarm.org https://nl.mirror.archlinuxarm.org; do echo "Server = $m/\$arch/\$repo"; done; cat /etc/pacman.d/mirrorlist; } > /etc/pacman.d/mirrorlist.new
 mv /etc/pacman.d/mirrorlist.new /etc/pacman.d/mirrorlist
-pacman -Syu --noconfirm --needed gcc mesa vulkan-swrast vulkan-tools libglvnd libx11 xorg-server-xvfb \
+pacman -Syu --noconfirm --needed gcc mesa vulkan-swrast vulkan-tools vulkan-headers libglvnd libx11 xorg-server-xvfb \
   xorg-xwayland weston xorg-xdpyinfo >/tmp/pacman.log 2>&1 || { echo "pacman failed"; tail -15 /tmp/pacman.log; exit 1; }
 echo "== mesa $(pacman -Q mesa), $(pacman -Q xorg-xwayland)"
 OUT=/tmp/glx; mkdir -p $OUT
 gcc -O2 -Wall -o $OUT/glxcheck tools/tests/glx/glxcheck.c -lGL -lX11 || exit 1
 gcc -shared -fPIC -O2 -Wall -pthread -o $OUT/libblsession.so tools/linuxfs/preload/*.c -ldl || exit 1
 
-# Zink takes a CPU Vulkan device (lavapipe here; the phone has the bridge's GPU) only when
-# software GL is asked for, which also means the drisw path: the one a DRI3-less server leaves.
-export MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink LIBGL_DEBUG=verbose LIBGL_ALWAYS_SOFTWARE=1
+# Zink takes a CPU Vulkan device (lavapipe) only when software GL is asked for, and asking
+# (LIBGL_ALWAYS_SOFTWARE) changes the GLX path. The phone's bridge device is a GPU, so a
+# test-only layer reports lavapipe as one: GLX then goes DRI3 first, then Kopper, as there.
+gcc -shared -fPIC -O2 -Wall -o $OUT/libgputype.so tools/tests/glx/gputype_layer.c || exit 1
+mkdir -p $OUT/layers && cp tools/tests/glx/gputype_layer.json $OUT/layers/
+export VK_LAYER_PATH=$OUT/layers VK_INSTANCE_LAYERS=VK_LAYER_DROIDDECK_gputype
+export MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink LIBGL_DEBUG=verbose
 fails=0
 check() {  # expect(ok|fail) label env... -- args
   local expect=$1 label=$2; shift 2
@@ -45,7 +49,7 @@ check() {  # expect(ok|fail) label env... -- args
 
 run_cases() {
   echo "== X extensions on $DISPLAY: $(xdpyinfo | sed -n '/number of extensions/,/default screen/p' | grep -v 'default screen\|number of' | tr -s ' \n' ' ')"
-  check ok   "$1: control, llvmpipe (no Zink)" -u MESA_LOADER_DRIVER_OVERRIDE -u LIBGL_ALWAYS_SOFTWARE GALLIUM_DRIVER=llvmpipe -- --
+  check ok   "$1: control, llvmpipe (no Zink)" -u MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER=llvmpipe -- --
   check ok   "$1: Zink, Kopper on" -- --
   [ -n "${shown:-}" ] || { shown=1; echo "---- full log of that case:"; head -60 $OUT/log; MESA_LOADER_DRIVER_OVERRIDE=zink vulkaninfo --summary 2>&1 | grep -i "deviceName\|deviceType\|driverName" | head; }
   check fail "$1: Zink, client sets LIBGL_KOPPER_DISABLE (Steam today, no preload)" -- --steam-env
