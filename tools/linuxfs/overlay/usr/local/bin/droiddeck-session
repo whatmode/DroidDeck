@@ -276,6 +276,13 @@ if [ -z "${BL_INSIDE:-}" ]; then
   if [ "$mode" = steam ]; then
     export gamescope_cursor_composite=2
   fi
+  if [ "${BL_VENUS:-0}" = 1 ] && [ $(( nested % 64 )) -ne 0 ]; then
+    # Through the Venus bridge, Android's Mali driver must import the X windows' buffers, and
+    # it rejected the linear layout of a ${nested}-wide one. Keep the nested size a multiple of
+    # 64 pixels (gamescope scales it to the screen) until the accepted pitches are known.
+    nested=$(( nested / 64 * 64 ))
+    echo "== gamescope: venus bridge, nested width rounded down to ${nested}"
+  fi
   mali_gl_setup || true
   args=(--backend wayland --expose-wayland -f -W "$width" -H "$height" -w "$nested" -h "$height")
   [ "$nested" != "$width" ] && args+=(-S stretch) && export BL_STRETCHED=1
