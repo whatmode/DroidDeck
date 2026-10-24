@@ -34,4 +34,36 @@ class PerfModeTest {
         val otherResolution = mode(3, 60f, 720)
         assertEquals(low, PerfMode.selectMode(arrayOf(low, high, otherResolution), high, 60, 60f))
     }
+
+    // The panel exposes one 120 Hz mode under two ids (1 and 255), which is the shape that made
+    // PerfMode write preferredDisplayModeId 2242 times in three minutes: each write reordered
+    // supportedModes, the maxByOrNull winner flipped, and the caller's guard never matched.
+    @Test fun twoIdsForTheSameRefreshDoNotAlternate() {
+        val id1 = mode(1, 120f)
+        val id255 = mode(255, 120f)
+        val forward = arrayOf(id1, id255)
+        val reversed = arrayOf(id255, id1)
+
+        // The answer does not depend on the order supportedModes is reported in.
+        for (modes in listOf(forward, reversed)) {
+            assertEquals(id1, PerfMode.selectMode(modes, id1, 0, Float.POSITIVE_INFINITY))
+            assertEquals(id255, PerfMode.selectMode(modes, id255, 0, Float.POSITIVE_INFINITY))
+        }
+
+        // And every answer is a fixed point, so the caller stops reapplying after one write.
+        for (current in listOf(id1, id255)) {
+            val once = PerfMode.selectMode(forward, current, 0, Float.POSITIVE_INFINITY)!!
+            assertEquals(once, PerfMode.selectMode(forward, once, 0, Float.POSITIVE_INFINITY))
+        }
+    }
+
+    @Test fun aModeAlreadyAllowedAndAsGoodIsKept() {
+        val low = mode(1, 60f)
+        val high = mode(2, 120f)
+        // Already at the best allowed refresh: keep the mode in use rather than switching to a
+        // same-refresh sibling or bouncing to another id.
+        assertEquals(high, PerfMode.selectMode(arrayOf(low, high), high, 0, Float.POSITIVE_INFINITY))
+        // A cap that lowers the refresh still moves off the current mode.
+        assertEquals(low, PerfMode.selectMode(arrayOf(low, high), high, 0, 60f))
+    }
 }

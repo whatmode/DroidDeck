@@ -186,7 +186,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: app/src/main/assets/linuxfs
-          key: preloads-${{ env.PRELOAD_CACHE_VERSION }}-${{ hashFiles('app/src/main/cpp/fakeinput_steam.cpp', 'app/src/main/cpp/adrenotools/src/hook/kgsl.h', 'tools/quest/*', 'tools/linuxfs/preload/*.c', 'tools/linuxfs/build-x86-preloads.sh', 'tools/linuxfs/fex/*', 'tools/linuxfs/clipboard/*.c', 'tools/linuxfs/ssbs/*.c', 'tools/proot/fastpath/*.c', 'tools/linuxfs/overlay/usr/local/bin/*', 'tools/linuxfs/overlay/usr/bin/**', 'tools/linuxfs/desktop/*', 'tools/gamescope/release.env', 'mali-gl/release.env', 'tools/ea/release.env', 'tools/ffmpeg/*', 'tools/vklayers/*', 'tools/wlroots/release.env', 'tools/linuxfs/uruntime.env', 'tools/linuxfs/licenses/*', 'tools/mangoapp/*', 'tools/msitools/**', 'tools/comet/**', 'tools/linuxfs/debian-image.env', 'tools/vr/**') }}
+          key: preloads-${{ env.PRELOAD_CACHE_VERSION }}-${{ hashFiles('app/src/main/cpp/fakeinput_steam.cpp', 'app/src/main/cpp/adrenotools/src/hook/kgsl.h', 'tools/quest/*', 'tools/linuxfs/preload/*.c', 'tools/linuxfs/build-x86-preloads.sh', 'tools/linuxfs/fex/*', 'tools/linuxfs/clipboard/*.c', 'tools/linuxfs/ssbs/*.c', 'tools/proot/fastpath/*.c', 'tools/linuxfs/overlay/usr/local/bin/*', 'tools/linuxfs/overlay/usr/bin/**', 'tools/linuxfs/desktop/*', 'tools/gamescope/release.env', 'mali-gl/release.env', 'tools/ffmpeg/*', 'tools/vklayers/*', 'tools/wlroots/release.env', 'tools/linuxfs/uruntime.env', 'tools/linuxfs/licenses/*', 'tools/mangoapp/*', 'tools/msitools/**', 'tools/linuxfs/debian-image.env', 'tools/vr/**') }}
 
       - name: Build libfakeinput.so and libblsession.so (glibc aarch64)
         if: steps.preloads.outputs.cache-hit != 'true'
@@ -240,16 +240,6 @@ jobs:
             echo "${MALI_GL_SHA256}  mali-gl-runtime.tar.gz" | sha256sum -c -
             install -Dm644 mali-gl-runtime.tar.gz "$D/opt/mali-gl.tgz"
             rm mali-gl-runtime.tar.gz
-          fi
-          if [ -f tools/ea/release.env ]; then
-            . tools/ea/release.env
-            gh release download "${EA_TAG}" -R "${EA_REPO:-${GITHUB_REPOSITORY}}" -p droiddeck-ea-aarch64.tar.gz -O droiddeck-ea.tar.gz
-            echo "${EA_SHA256}  droiddeck-ea.tar.gz" | sha256sum -c -
-            mkdir -p ea-unpack && tar xzf droiddeck-ea.tar.gz -C ea-unpack
-            for f in droiddeck-ea maxima-bootstrap droiddeck-ea-wine; do
-              install -Dm755 "ea-unpack/droiddeck-ea/bin/$f" "$D/usr/local/lib/droiddeck-ea/$f"
-            done
-            rm -rf ea-unpack droiddeck-ea.tar.gz
           fi
           bash tools/ffmpeg/build.sh "$D/usr/local/lib/droiddeck-ffmpeg" aarch64-linux-gnu-
           . tools/linuxfs/uruntime.env
@@ -455,33 +445,6 @@ jobs:
             -ldl -o /tmp/test-presenter-shutdown
           timeout 10 /tmp/test-presenter-shutdown
 
-      - name: Rust toolchain for the store engines (aarch64-linux-android)
-        id: rust
-        run: |
-          set -euo pipefail
-          rustup target add aarch64-linux-android
-          echo "rustc=$(rustc -V | awk '{print $2}')" >> "$GITHUB_OUTPUT"
-          rustc -V; cargo -V
-
-      - name: Cache cargo registry and the store engines' target
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            ~/.cargo/bin/cargo-ndk
-            app/src/main/rust/stores/target
-          key: stores-${{ steps.rust.outputs.rustc }}-${{ hashFiles('app/src/main/rust/stores/Cargo.lock') }}
-          restore-keys: |
-            stores-${{ steps.rust.outputs.rustc }}-
-
-      - name: cargo-ndk
-        run: |
-          set -euo pipefail
-          command -v cargo-ndk >/dev/null || cargo install cargo-ndk --locked
-          cargo ndk --version
-
       - name: Cache the CMake build tree
         uses: actions/cache@v4
         with:
@@ -491,13 +454,6 @@ jobs:
           key: cxx-${{ env.NDK_VERSION }}-${{ hashFiles('app/src/main/cpp/**', 'tools/vr/src/xr_*.h') }}
           restore-keys: |
             cxx-${{ env.NDK_VERSION }}-
-
-      - name: Build GOG Galaxy companion
-        if: steps.preloads.outputs.cache-hit != 'true'
-        run: |
-          rustup toolchain install 1.90.0 --profile minimal
-          rustup target add --toolchain 1.90.0 aarch64-unknown-linux-gnu
-          RUSTUP_TOOLCHAIN=1.90.0 bash tools/comet/build.sh
 
       - name: Build
         id: build
@@ -522,30 +478,12 @@ jobs:
           echo "::error title=tail::$(tail -40 /tmp/build.log | enc)"
           echo "::error title=errors::$(grep -nE "^e: |What went wrong|FAILED|Exception|ValueError|Missing|stale|changed since" /tmp/build.log | tail -30 | enc)"
 
-      - name: Check the store engines' library
+      - name: Check the APK's native libraries
         run: |
           set -euo pipefail
           NDK="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-$ANDROID_NDK_ROOT}}"
           python3 tools/release/check_android_libraries.py app/build/outputs/apk/release/app-release.apk \
             --readelf "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
-          git diff --stat -- app/src/main/rust/stores/Cargo.lock
-          git diff --exit-code -- app/src/main/rust/stores/Cargo.lock \
-            || { echo "::error::Cargo.lock changed during the build; commit the regenerated lockfile (uploaded as stores-cargo-lock)"; exit 1; }
-
-      - name: Store engines host unit tests
-        timeout-minutes: 10
-        continue-on-error: true
-        run: |
-          cd app/src/main/rust/stores
-          cargo test --locked 2>&1 | tail -60
-
-      - name: Upload the regenerated Cargo.lock
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: stores-cargo-lock
-          path: app/src/main/rust/stores/Cargo.lock
-          if-no-files-found: ignore
 
       - name: Steam import and game environment tests
         run: python3 -m unittest discover -s tools/tests -p 'test_*.py'
@@ -556,6 +494,15 @@ jobs:
           set -o pipefail
           mkdir -p app/build
           ./gradlew testReleaseUnitTest --console=plain --info --stacktrace -Drobolectric.logging=stderr -PndkVersion="$NDK_VERSION" 2>&1 | tee app/build/unit-tests.log
+
+      - name: Report failed unit tests as annotations
+        if: failure() && steps.unit-tests.outcome == 'failure'
+        run: |
+          [ -f app/build/unit-tests.log ] || exit 0
+          enc() { sed 's/%/%25/g' | cut -c1-300 | awk '{printf "%s%%0A", $0}'; }
+          echo "::error title=failed tests::$(grep -E ' FAILED$|^e: ' app/build/unit-tests.log | head -25 | enc)"
+          echo "::error title=first failure::$(grep -A25 -m1 -E ' FAILED$' app/build/unit-tests.log | enc)"
+          echo "::error title=compile::$(grep -E '^e: |What went wrong' -A3 app/build/unit-tests.log | head -30 | enc)"
 
       - name: Upload unit test diagnostics
         id: unit-test-diagnostics

@@ -15,7 +15,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.droiddeck.launcher.R
 import com.droiddeck.launcher.frontend.Library
-import com.droiddeck.launcher.stores.Store
 
 
 internal val FlathubTeal = Color(0xFF3FB8AF)
@@ -26,10 +25,6 @@ internal const val FLATHUB = "flathub"
 internal class SourceColours(val fill: Color, val ink: Color, val dot: Color)
 
 internal fun sourceColours(source: String): SourceColours = when (source) {
-    Store.GOG.id -> SourceColours(Color(0xFF3A1A3C), Color(0xFFE6A3EA), Color(0xFFC25BC8))
-    Store.EPIC.id -> SourceColours(Color(0xFF2A2A2A), Color(0xFFDDDDDD), Color(0xFFBDBDBD))
-    Store.AMAZON.id -> SourceColours(Color(0xFF3A2A0A), Color(0xFFFFC266), Color(0xFFFF9900))
-    Store.EA.id -> SourceColours(Color(0xFF3A1212), Color(0xFFFF9C9C), Color(0xFFFF4747))
     Library.SOURCE_STEAM -> SourceColours(Color(0xFF16293D), Color(0xFF7CC4FF), Color(0xFF1A9FFF))
     FLATHUB -> SourceColours(Color(0xFF0B2E2B), Color(0xFF9FE3DD), FlathubTeal)
     else -> SourceColours(Color(0xFF1A1D22), Color(0xFF9AA3AF), Color(0xFF9AA3AF))
@@ -38,10 +33,6 @@ internal fun sourceColours(source: String): SourceColours = when (source) {
 @Composable
 internal fun sourceLabel(source: String): String = when (source) {
     Library.SOURCE_STEAM -> stringResource(R.string.source_steam)
-    Store.GOG.id -> Store.GOG.label
-    Store.EPIC.id -> Store.EPIC.label
-    Store.AMAZON.id -> Store.AMAZON.label
-    Store.EA.id -> Store.EA.label
     else -> stringResource(R.string.source_added)
 }
 

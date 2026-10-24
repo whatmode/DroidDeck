@@ -439,9 +439,7 @@ object EsyncPacks {
     }
 
     fun enabled(context: Context): Boolean = SessionPrefs.syncFallback(context) || try {
-        GameEnvironmentStore.read(context).let { config ->
-            (listOf(config.shared) + config.games.values).any { it["BL_SYNC_FALLBACK"] == "1" }
-        }
+        GameEnvironmentStore.read(context).shared["BL_SYNC_FALLBACK"] == "1"
     } catch (t: Throwable) {
         false
     }

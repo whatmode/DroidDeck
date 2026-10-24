@@ -249,10 +249,6 @@ private fun Content(
         StorePage(s, a, modifier)
         return
     }
-    if (selected == "stores") {
-        StoresPage(s, a, modifier)
-        return
-    }
     if (selected == "games" || selected.startsWith("app:")) {
         GamesPage(s, a, selected, onSelect, modifier)
         return

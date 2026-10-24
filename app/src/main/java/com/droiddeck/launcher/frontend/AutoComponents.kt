@@ -9,7 +9,6 @@ import android.util.Log
 import androidx.annotation.VisibleForTesting
 import com.droiddeck.launcher.session.SessionState
 import com.droiddeck.launcher.session.WinComponents
-import com.droiddeck.launcher.stores.StoreGameSidecar
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.json.JSONArray
 import org.json.JSONObject
@@ -178,8 +177,6 @@ object AutoComponents {
         if (game.library == Library.ADDED && game.source == Library.ADDED && folder != null && SteamMatch.get(context, folder.path) == null) {
             AddedGames.single(context, folder.path)?.let { SteamMatch.resolve(context, folder.path, it.exe, it.name) }
         }
-        val store = com.droiddeck.launcher.stores.Store.byId(game.source)
-        if (folder != null && (store == com.droiddeck.launcher.stores.Store.GOG || store == com.droiddeck.launcher.stores.Store.EPIC)) StoreListBackfill.fill(context, folder)
         if (asked && online(context)) steamAppOf(context, game)?.let { SteamAppInfo.lookup(context, listOf(it)) }
         val findings = findings(context, game)
         val catalog = (catalogOf(context, false) ?: catalogOf(context, true))?.associateBy { it.name } ?: return
@@ -263,7 +260,6 @@ object AutoComponents {
         val parts = listOfNotNull(
             folder?.lastModified(),
             folder?.let { SteamRedists.manifest(it, game.appId)?.lastModified() },
-            folder?.let { StoreGameSidecar.file(it).lastModified() },
             folder?.let { File(it, "fuel.json").lastModified() },
             SteamAppInfo.appinfoFile(context).lastModified(),
             folder?.let { SteamMatch.get(context, it.path) }?.let { "${it.appId}/${it.certainty}" },

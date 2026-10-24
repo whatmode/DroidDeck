@@ -32,9 +32,9 @@ class PresetScaleTest {
         compose.setContent {
             DroidDeckTheme(appScale = scale.intValue) {
                 Box(Modifier.size(100.dp).testTag("page-size"))
-                FexPresetChip(preset.value, false, open.value, true,
+                FexPresetChip(preset.value, open.value, true,
                     onToggle = { open.value = true }, onDismiss = { open.value = false },
-                    onPick = { preset.value = it!! })
+                    onPick = { preset.value = it })
             }
         }
         val originalWidth = compose.onNodeWithTag("page-size").fetchSemanticsNode().boundsInRoot.width
