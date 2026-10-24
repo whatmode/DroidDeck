@@ -182,7 +182,7 @@ mali_gl_setup() {
     export MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink
     BL_GAMESCOPE_BIN=$dir/bin/gamescope
     BL_MALI_GL_ACTIVE=1
-    BL_VENUS_SINGLE=1
+    export BL_VENUS_SINGLE=1
     echo "== mali-gl: venus single driver ($(cat "$dir/VERSION" 2>/dev/null)): gamescope $BL_GAMESCOPE_BIN, Xwayland -shm, GL on Zink over the bridge"
     return 0
   fi
