@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -70,4 +71,17 @@ __attribute__((visibility("hidden"))) char *const *bl_webhelper_argv(const char 
   if (disable && (flag = malloc(strlen(disable) + 20))) out[n++] = strcat(strcpy(flag, "--disable-features="), disable);
   out[n] = NULL;
   return out;
+}
+
+/* Steam's launcher exports LIBGL_KOPPER_DISABLE=true for steamwebhelper. Without Kopper, Zink
+ * presents to X11 only through DRI3, which a glamor-less Xwayland (-shm, the Venus bridge's
+ * one-driver mode) lacks: the webhelper's GL composer gets no swapchain ("zink: could not
+ * create swapchain") and dies, and Steam restarts it every ~10 s. With Kopper, Zink presents
+ * through Vulkan WSI, which the gamescope WSI layer hands to gamescope directly.
+ * BL_WEBHELPER_KOPPER=1 drops the variable inside the webhelper. */
+__attribute__((constructor)) static void bl_webhelper_kopper(void) {
+  const char *want = getenv("BL_WEBHELPER_KOPPER");
+  if (!want || strcmp(want, "1")) return;
+  if (!program_invocation_short_name || strcmp(program_invocation_short_name, "steamwebhelper")) return;
+  unsetenv("LIBGL_KOPPER_DISABLE");
 }
