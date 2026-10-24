@@ -4,8 +4,23 @@
 # Xwayland -shm on a headless weston), the session preload. Runs in Arch Linux ARM, the phone
 # rootfs' distribution, so Mesa and libglvnd match. Each case must give the expected result.
 set -uo pipefail
+# The job log is not readable from where results are checked; annotations are. Everything this
+# script prints also goes to report.txt, sent as notice annotations (chunks) at exit.
+REPORT=/tmp/glx-report.txt; : > $REPORT
+exec 3>&1
+exec > >(tee -a $REPORT) 2>&1
+annotate() {
+  sleep 1
+  local n=0
+  split -l 70 $REPORT /tmp/glx-chunk.
+  for f in /tmp/glx-chunk.*; do
+    n=$((n+1)); [ $n -gt 9 ] && break
+    printf '::notice title=glx report %d::%s\n' $n "$(sed 's/%/%25/g' "$f" | cut -c1-300 | awk 'BEGIN{ORS="%0A"}{print}')" >&3
+  done
+}
+trap annotate EXIT
 pacman -Sy --noconfirm --needed gcc mesa vulkan-swrast libglvnd libx11 xorg-server-xvfb \
-  xorg-xwayland weston xorg-xdpyinfo >/dev/null 2>&1 || { echo "pacman failed"; exit 1; }
+  xorg-xwayland weston xorg-xdpyinfo >/tmp/pacman.log 2>&1 || { echo "pacman failed"; tail -15 /tmp/pacman.log; exit 1; }
 echo "== mesa $(pacman -Q mesa), $(pacman -Q xorg-xwayland)"
 OUT=/tmp/glx; mkdir -p $OUT
 gcc -O2 -Wall -o $OUT/glxcheck tools/tests/glx/glxcheck.c -lGL -lX11 || exit 1
@@ -42,6 +57,26 @@ if [ -S $XDG_RUNTIME_DIR/wl-glx ]; then
   DISPLAY=:8; export DISPLAY; run_cases "Xwayland -shm"
 else
   echo "weston headless did not start; Xwayland case skipped"; tail -5 /tmp/weston.log
+fi
+# Chromium (Steam's webhelper is CEF) drawing through ANGLE on Zink on the same DRI3-less
+# servers, with the session preload's X request trace: any request for an extension the server
+# lacks is named with its caller. Reported, not gated: Steam's CEF is an older Chromium.
+if pacman -S --noconfirm --needed chromium >/dev/null 2>&1; then
+  echo "== $(chromium --version 2>/dev/null)"
+  for d in :7 :8; do
+    if [ $d = :7 ]; then Xvfb :7 -screen 0 640x480x24 >/dev/null 2>&1 & sleep 2; fi
+    for angle in gl vulkan; do
+      echo "---- chromium on $d, ANGLE on $angle (report)"
+      rm -rf /tmp/cr; DISPLAY=$d LD_PRELOAD=$OUT/libblsession.so BL_XCB_TRACE=1 BL_WEBHELPER_KOPPER=1 \
+        timeout 25 chromium --no-sandbox --user-data-dir=/tmp/cr --ozone-platform=x11 --use-gl=angle \
+        --use-angle=$angle --ignore-gpu-blocklist --no-first-run --enable-logging=stderr \
+        "data:text/html,<canvas id=c></canvas><script>c.getContext('webgl').clearColor(1,0,0,1)</script>" \
+        > $OUT/cr.log 2>&1; echo "exit $?"
+      grep -E "xcb:|Fatal IO|extension|DRI3|GPU process|gpu_init|GL_RENDERER|ANGLE|zink|kopper|Exiting GPU" $OUT/cr.log | sort | uniq -c | sort -rn | head -25
+    done
+  done
+else
+  echo "chromium not installable; webhelper case skipped"
 fi
 echo "== $fails failing case(s)"
 exit $fails
