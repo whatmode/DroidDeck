@@ -162,15 +162,19 @@ static void report(int status) {
   errno = saved;
 }
 
+void bl_webhelper_note_exit(const char *how, int status) __attribute__((visibility("hidden")));
+
 void exit(int status) {
   static void (*real)(int);
   if (!real) real = (void (*)(int))dlsym(RTLD_NEXT, "exit");
+  bl_webhelper_note_exit("exit", status);
   report(status);
   real(status);
   __builtin_unreachable();
 }
 
 void _exit(int status) {
+  bl_webhelper_note_exit("_exit", status);
   report(status);
   syscall(SYS_exit_group, status);
   __builtin_unreachable();

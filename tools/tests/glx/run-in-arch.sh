@@ -18,11 +18,11 @@ annotate() {
     printf '::notice title=glx report %d::%s\n' $n "$(sed 's/%/%25/g' "$f" | cut -c1-300 | awk 'BEGIN{ORS="%0A"}{print}')" >&3
   done
   echo "---- $1: audited 'steam', GLX call trace (expect FIRST call line and a context)"
-  LD_AUDIT=$OUT/libblsession.so $OUT/audit3/steam > $OUT/log 2>&1
+  LD_AUDIT=$OUT/libblglxaudit.so LD_PRELOAD=$OUT/libblsession.so $OUT/audit3/steam > $OUT/log 2>&1
   grep "glxaudit\|program:" $OUT/log | grep -v "env at" | head -10
   if grep -q "FIRST GLX call" $OUT/log && grep -q "program: version 1.4" $OUT/log && ! grep -q "ctx (nil)" $OUT/log; then echo "PASS $1: trace"; else echo "FAIL $1: trace"; fails=$((fails+1)); fi
   echo "---- $1: audited 'steam' that sets LIBGL_KOPPER_DISABLE itself (report)"
-  LD_AUDIT=$OUT/libblsession.so $OUT/audit2/steam > $OUT/log 2>&1; echo "exit $?"
+  LD_AUDIT=$OUT/libblglxaudit.so LD_PRELOAD=$OUT/libblsession.so $OUT/audit2/steam > $OUT/log 2>&1; echo "exit $?"
   grep "glxaudit\|program got" $OUT/log | grep -v "env at" | head -12
 }
 trap annotate EXIT
@@ -36,6 +36,8 @@ OUT=/tmp/glx; mkdir -p $OUT
 gcc -O2 -Wall -o $OUT/glxcheck tools/tests/glx/glxcheck.c -lGL -lX11 || exit 1
 printf '#include <stdlib.h>\nint main(void) { exit(1); }\n' > $OUT/steam.c && gcc -o $OUT/steam $OUT/steam.c || exit 1
 gcc -O2 -Wall -o $OUT/xcblocal tools/tests/glx/xcblocal.c -ldl || exit 1
+gcc -shared -fPIC -O2 -Wall -o $OUT/libblglxaudit.so tools/linuxfs/audit/glxaudit.c -ldl || exit 1
+mkdir -p $OUT/wh && gcc -O2 -Wall -rdynamic -o $OUT/wh/steamwebhelper tools/tests/glx/webhelperend.c -lpthread || exit 1
 mkdir -p $OUT/audit3 && gcc -O2 -Wall -o $OUT/audit3/steam tools/tests/glx/audittrace.c -ldl || exit 1
 mkdir -p $OUT/audit2 && gcc -O2 -Wall -o $OUT/audit2/steam tools/tests/glx/auditkopper.c -ldl || exit 1
 mkdir -p $OUT/audit && gcc -O2 -Wall -o $OUT/audit/steam tools/tests/glx/auditcheck.c -ldl || exit 1
@@ -80,10 +82,22 @@ run_cases() {
   BL_XCB_TRACE=1 LD_PRELOAD=$OUT/libblsession.so $OUT/xcblocal > $OUT/log 2>&1; rc=$?
   cat $OUT/log | head -5
   if [ $rc = 0 ]; then echo "PASS $1: xcb local"; else echo "FAIL $1: xcb local (rc $rc)"; fails=$((fails+1)); fi
-  # The preload as an audit library (glxaudit.c): Steam's own call seen and rescued.
+  # Steam's client is started with the GL audit library, and every program it starts inherits
+  # it: they must run as without it (the session preload loaded as the audit library made ld.so
+  # abort every steamwebhelper before main, exit 127, no output). And the webhelper's ending is
+  # reported (procwatch.c).
+  for how in exit segv; do
+    echo "---- $1: 'steamwebhelper' started with the GL audit library inherited, ends by $how"
+    BL_WEBHELPER_WATCH=1 BL_WEBHELPER_XTHREADS=1 LD_AUDIT=$OUT/libblglxaudit.so LD_PRELOAD=$OUT/libblsession.so \
+      $OUT/wh/steamwebhelper $how > $OUT/log 2>&1; rc=$?
+    grep "====\|Inconsistency" $OUT/log | head -4
+    want=2; [ $how = segv ] && want=139
+    if [ $rc = $want ] && grep -q "==== webhelper pid" $OUT/log; then echo "PASS $1: webhelper $how"; else echo "FAIL $1: webhelper $how (rc $rc, want $want)"; fails=$((fails+1)); fi
+  done
+  # The audit library (glxaudit.c) (glxaudit.c): Steam's own call seen and rescued.
   for how in "dlsym 0" "gpa 0" "dlsym 3"; do
     echo "---- $1: audited 'steam', lookup $how (expect rescued)"
-    LD_AUDIT=$OUT/libblsession.so $OUT/audit/steam $how > $OUT/log 2>&1
+    LD_AUDIT=$OUT/libblglxaudit.so LD_PRELOAD=$OUT/libblsession.so $OUT/audit/steam $how > $OUT/log 2>&1
     grep "glxaudit\|program got" $OUT/log | head -10
     if grep -q "program got a visual" $OUT/log; then echo "PASS $1: audit $how"; else echo "FAIL $1: audit $how"; tail -5 $OUT/log; fails=$((fails+1)); fi
   done
