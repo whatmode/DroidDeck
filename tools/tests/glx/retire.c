@@ -45,6 +45,10 @@ int main(int argc, char **argv) {
   for (int i = 0; i < 30; i++) frame(main_win, main_ctx, 0.1f, 0.3f, 0.6f);
   fprintf(stderr, "retire: main window up\n");
   for (int r = 0; r < rounds; r++) {
+    /* Steam's windows also change size (created 1280x800, made fullscreen, back). */
+    if (r == 1) { XResizeWindow(x, main_win, 1600, 720); XSync(x, False); fprintf(stderr, "retire: main window resized\n"); }
+    if (r == 2) { XUnmapWindow(x, main_win); XSync(x, False); for (int i = 0; i < 3; i++) frame(main_win, main_ctx, 0.1f, 0.3f, 0.6f);
+                  XMapWindow(x, main_win); XSync(x, False); fprintf(stderr, "retire: main window unmapped and mapped\n"); }
     fprintf(stderr, "retire: round %d: popup opens\n", r);
     Window pop = make_window(254, 102, r & 1);
     for (int i = 0; i < 20; i++) {

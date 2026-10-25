@@ -47,15 +47,19 @@ export ENABLE_GAMESCOPE_WSI=1 GAMESCOPE_WSI_FORCE_BYPASS=1 WLR_XWAYLAND=$OUT/Xwa
 echo "== driver GL env: ${genv[*]}"
 # The gputype layer only for the GL app (gamescope itself runs on lavapipe as it is).
 run_gs() {
-  env "${genv[@]}" timeout 120 "$1" --backend headless -W 1600 -H 720 -w 1600 -h 720 -r 60 -- \
+  env "${genv[@]}" timeout 120 "$1" --backend headless -W 1600 -H 720 -w 1600 -h 720 -r 60 ${GS_EXTRA:-} -- \
     env VK_LAYER_PATH=$OUT/layers VK_INSTANCE_LAYERS=VK_LAYER_DROIDDECK_gputype $OUT/retire 4 > $OUT/log 2>&1
   echo "== $1 exit $?"
 }
 run_gs $GS
+report() {
+  grep -E "retire|droiddeck kopper|Swapchain retired|Creating swapchain|Failed|OUT_OF_DATE|error|Error" $OUT/log | sed 's/\x1b\[[0-9;]*m//g' | cut -c1-160 | head -60
+  echo "== new swapchains: $(grep -c 'droiddeck kopper: new swapchain' $OUT/log), retired: $(grep -c 'Swapchain retired' $OUT/log), created: $(grep -c 'Creating swapchain' $OUT/log)"
+}
+echo "======== plain"; report
+echo "======== steam mode (-e), as the session runs it"; GS_EXTRA="-e" run_gs $GS; report
 if ! grep -q "retire: done" $OUT/log && [ "$GS" != /usr/bin/gamescope ]; then
   echo "== the app's gamescope did not run it; its log:"; sed 's/\x1b\[[0-9;]*m//g' $OUT/log | tail -25 | cut -c1-200
   echo "== trying Arch's gamescope"; run_gs /usr/bin/gamescope
 fi
-grep -E "retire|droiddeck kopper|Swapchain retired|Creating swapchain|Failed|OUT_OF_DATE|error|Error" $OUT/log | sed 's/\x1b\[[0-9;]*m//g' | cut -c1-200 | head -120
-echo "== new swapchains: $(grep -c 'droiddeck kopper: new swapchain' $OUT/log), retired: $(grep -c 'Swapchain retired' $OUT/log), created: $(grep -c 'Creating swapchain' $OUT/log)"
 grep -q "retire: done" $OUT/log
