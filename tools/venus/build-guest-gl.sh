@@ -32,6 +32,8 @@ echo "== installed GL files:"; (cd "$I" && find . -type f -o -type l | sort)
 find "$I" \( -name '*.so' -o -name '*.so.*' \) \( -type f -o -type l \) | while read -r f; do
   cp -L "$f" "$D/$(basename "$f")"
 done
+# One copy each: the names glvnd and the loader look for.
+rm -f "$D"/lib*_droiddeck.so "$D"/lib*_droiddeck.so.0.0.0
 for f in "$D"/*.so*; do patchelf --set-rpath '$ORIGIN' "$f"; done
 egl_json=$(find "$I" -name '*droiddeck*.json' | head -1)
 python3 - "$D" "$MESA_REF" "${egl_json:-}" <<'PY'
