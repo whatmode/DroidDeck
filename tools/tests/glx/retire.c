@@ -81,12 +81,19 @@ int main(int argc, char **argv) {
      * yellow). Both are drawn every frame; screenshots tell which one gamescope shows. */
     XResizeWindow(x, main_win, 1600, 720);
     XSync(x, False);
-    int shown = !strcmp(mode, "childshown");
+    int shown = strcmp(mode, "childhidden") != 0;
+    int wrapped = !strcmp(mode, "childwrapped");
     Display *x2 = XOpenDisplay(NULL);
     XVisualInfo *vi2 = glXChooseVisual(x2, DefaultScreen(x2), attr);
     XSetWindowAttributes swa = {0};
     swa.colormap = XCreateColormap(x2, RootWindow(x2, vi2->screen), vi2->visual, AllocNone);
-    Window child = XCreateWindow(x2, main_win, 0, 0, 1600, 720, 0, vi2->depth, InputOutput, vi2->visual, CWColormap, &swa);
+    /* "childwrapped": as in Steam, the GL window sits in a plain child (no GL) of the main one. */
+    Window holder = main_win;
+    if (wrapped) {
+      holder = XCreateWindow(x2, main_win, 0, 0, 1600, 720, 0, vi2->depth, InputOutput, vi2->visual, CWColormap, &swa);
+      XMapWindow(x2, holder);
+    }
+    Window child = XCreateWindow(x2, holder, 0, 0, 1600, 720, 0, vi2->depth, InputOutput, vi2->visual, CWColormap, &swa);
     if (shown) XMapWindow(x2, child);
     XSync(x2, False);
     GLXContext c2 = glXCreateContext(x2, vi2, NULL, True);

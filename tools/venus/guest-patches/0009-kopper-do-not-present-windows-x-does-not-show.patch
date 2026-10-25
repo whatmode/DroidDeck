@@ -100,7 +100,7 @@ diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper
  #include "pipe/p_context.h"
  #include "pipe-loader/pipe_loader.h"
  #include "state_tracker/st_context.h"
-@@ -593,6 +594,118 @@
+@@ -593,6 +594,147 @@
  #endif
  }
  
@@ -134,6 +134,39 @@ diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper
 +         drawn = true;
 +   simple_mtx_unlock(&droiddeck_presented_lock);
 +   return drawn;
++}
++
++/* droiddeck: a mapped child (or a child's child, as Chromium puts ANGLE's GL window in a plain
++ * child of its own) covering the whole w x h window and drawn by this process; 0 if none. */
++static xcb_window_t
++droiddeck_drawn_cover(xcb_connection_t *conn, xcb_query_tree_reply_t *tree, unsigned w, unsigned h,
++                      int64_t now, int depth)
++{
++   xcb_window_t found = 0;
++   int n = xcb_query_tree_children_length(tree);
++   xcb_window_t *kids = xcb_query_tree_children(tree);
++   for (int i = n - 1; i >= 0 && !found; i--) {
++      xcb_get_window_attributes_cookie_t kac = xcb_get_window_attributes(conn, kids[i]);
++      xcb_get_geometry_cookie_t kgc = xcb_get_geometry(conn, kids[i]);
++      xcb_get_window_attributes_reply_t *ka = xcb_get_window_attributes_reply(conn, kac, NULL);
++      xcb_get_geometry_reply_t *kg = xcb_get_geometry_reply(conn, kgc, NULL);
++      if (ka && kg && ka->map_state == XCB_MAP_STATE_VIEWABLE && ka->_class == XCB_WINDOW_CLASS_INPUT_OUTPUT &&
++          kg->x <= 0 && kg->y <= 0 &&
++          kg->x + kg->width + 2 * kg->border_width >= w &&
++          kg->y + kg->height + 2 * kg->border_width >= h) {
++         if (droiddeck_drawn_lately(kids[i], now)) {
++            found = kids[i];
++         } else if (depth < 3) {
++            xcb_query_tree_reply_t *sub = xcb_query_tree_reply(conn, xcb_query_tree(conn, kids[i]), NULL);
++            if (sub)
++               found = droiddeck_drawn_cover(conn, sub, kg->width, kg->height, now, depth + 1);
++            free(sub);
++         }
++      }
++      free(ka);
++      free(kg);
++   }
++   return found;
 +}
 +
 +/* droiddeck: whether X shows this window at all. A frame for a window it does not show
@@ -175,33 +208,29 @@ diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper
 +      hidden = true;
 +      snprintf(why, sizeof(why), "%s", attr->map_state == XCB_MAP_STATE_UNMAPPED ? "unmapped" : "inside an unmapped window");
 +   } else if (attr && geom && tree) {
-+      int n = xcb_query_tree_children_length(tree);
-+      xcb_window_t *kids = xcb_query_tree_children(tree);
-+      for (int i = n - 1; i >= 0 && !hidden; i--) {
-+         xcb_get_window_attributes_cookie_t kac = xcb_get_window_attributes(conn, kids[i]);
-+         xcb_get_geometry_cookie_t kgc = xcb_get_geometry(conn, kids[i]);
-+         xcb_get_window_attributes_reply_t *ka = xcb_get_window_attributes_reply(conn, kac, NULL);
-+         xcb_get_geometry_reply_t *kg = xcb_get_geometry_reply(conn, kgc, NULL);
-+         if (ka && kg && ka->map_state == XCB_MAP_STATE_VIEWABLE && ka->_class == XCB_WINDOW_CLASS_INPUT_OUTPUT &&
-+             droiddeck_drawn_lately(kids[i], now) &&
-+             kg->x <= 0 && kg->y <= 0 &&
-+             kg->x + kg->width + 2 * kg->border_width >= geom->width &&
-+             kg->y + kg->height + 2 * kg->border_width >= geom->height) {
-+            hidden = true;
-+            snprintf(why, sizeof(why), "covered by its child 0x%x", kids[i]);
-+         }
-+         free(ka);
-+         free(kg);
++      xcb_window_t by = droiddeck_drawn_cover(conn, tree, geom->width, geom->height, now, 0);
++      if (by) {
++         hidden = true;
++         snprintf(why, sizeof(why), "covered by 0x%x, which this process draws", by);
 +      }
 +   }
 +   if (hidden != drawable->droiddeck_hidden || !drawable->droiddeck_vis_logged) {
 +      static unsigned notes;
-+      if (++notes <= 60 || notes % 500 == 0)
-+         fprintf(stderr, "droiddeck kopper: window 0x%x (%ux%u, parent 0x%x, %d children) %s%s\n", win,
-+                 geom ? geom->width : 0, geom ? geom->height : 0, tree ? tree->parent : 0,
++      if (++notes <= 80 || notes % 500 == 0) {
++         /* the toplevel gamescope hands this window's swapchain (its ancestor under the root) */
++         xcb_window_t top = win, up = tree ? tree->parent : 0;
++         for (int d = 0; up && tree && up != tree->root && d < 8; d++) {
++            top = up;
++            xcb_query_tree_reply_t *t = xcb_query_tree_reply(conn, xcb_query_tree(conn, up), NULL);
++            up = t ? t->parent : 0;
++            free(t);
++         }
++         fprintf(stderr, "droiddeck kopper: window 0x%x (%ux%u, parent 0x%x, toplevel 0x%x, %d children) %s%s\n", win,
++                 geom ? geom->width : 0, geom ? geom->height : 0, tree ? tree->parent : 0, top,
 +                 tree ? xcb_query_tree_children_length(tree) : -1,
 +                 hidden ? "not shown by X, frames not presented: " : "shown",
 +                 hidden ? why : "");
++      }
 +      drawable->droiddeck_vis_logged = true;
 +   }
 +   free(attr);
@@ -219,7 +248,7 @@ diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper
  int64_t
  kopperSwapBuffersWithDamage(struct dri_drawable *drawable, uint32_t flush_flags, int nrects, const int *rects)
  {
-@@ -632,6 +745,12 @@
+@@ -632,6 +774,12 @@
        }
     }
  
