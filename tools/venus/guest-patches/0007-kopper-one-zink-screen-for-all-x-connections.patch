@@ -1,0 +1,77 @@
+diff --git a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper.c
+index 51a9ae2..75e960a 100644
+--- a/src/gallium/frontends/dri/kopper.c
++++ b/src/gallium/frontends/dri/kopper.c
+@@ -53,10 +53,37 @@
+ #include "loader_dri3_helper.h"
+ #endif
+ 
++/* DroidDeck: one Zink screen for every X connection in a process. Each GLX display gets its
++ * own dri screen, and a Zink screen per dri screen keeps its own window swapchains: a program
++ * that draws one window from several X connections (Steam's client and web UI hold four or
++ * five) made a swapchain per connection for the same window, and under gamescope each new one
++ * retires the other, so the window's swapchain was made again whenever the drawing connection
++ * changed, a flash each time. With DROIDDECK_KOPPER_SHARE_SCREEN=1 the first Zink screen is
++ * shared (refcounted) and a window has one swapchain whichever connection draws it. */
++#include "util/simple_mtx.h"
++#include "util/u_debug.h"
++static simple_mtx_t droiddeck_shared_lock = SIMPLE_MTX_INITIALIZER;
++static struct pipe_screen *droiddeck_shared_screen;
++static unsigned droiddeck_shared_refs;
++static void (*droiddeck_shared_destroy)(struct pipe_screen *);
++
++static void
++droiddeck_shared_screen_destroy(struct pipe_screen *pscreen)
++{
++   simple_mtx_lock(&droiddeck_shared_lock);
++   bool last = --droiddeck_shared_refs == 0;
++   if (last)
++      droiddeck_shared_screen = NULL;
++   simple_mtx_unlock(&droiddeck_shared_lock);
++   if (last)
++      droiddeck_shared_destroy(pscreen);
++}
++
+ struct pipe_screen *
+ kopper_init_screen(struct dri_screen *screen, bool driver_name_is_inferred)
+ {
+    struct pipe_screen *pscreen = NULL;
++   bool share = screen->fd == -1 && debug_get_bool_option("DROIDDECK_KOPPER_SHARE_SCREEN", false);
+ 
+    if (!screen->kopper_loader) {
+       fprintf(stderr, "mesa: Kopper interface not found!\n"
+@@ -77,12 +104,33 @@ kopper_init_screen(struct dri_screen *screen, bool driver_name_is_inferred)
+    success = pipe_loader_vk_probe_dri(&screen->dev);
+ #endif
+ 
+-   if (success)
++   if (share) {
++      simple_mtx_lock(&droiddeck_shared_lock);
++      if (droiddeck_shared_screen) {
++         pscreen = droiddeck_shared_screen;
++         droiddeck_shared_refs++;
++         fprintf(stderr, "droiddeck kopper: X connection %u shares the Zink screen\n", droiddeck_shared_refs);
++      }
++      simple_mtx_unlock(&droiddeck_shared_lock);
++   }
++
++   if (success && !pscreen)
+       pscreen = pipe_loader_create_screen(screen->dev, driver_name_is_inferred);
+ 
+    if (!pscreen)
+       return NULL;
+ 
++   if (share) {
++      simple_mtx_lock(&droiddeck_shared_lock);
++      if (!droiddeck_shared_screen) {
++         droiddeck_shared_screen = pscreen;
++         droiddeck_shared_refs = 1;
++         droiddeck_shared_destroy = pscreen->destroy;
++         pscreen->destroy = droiddeck_shared_screen_destroy;
++      }
++      simple_mtx_unlock(&droiddeck_shared_lock);
++   }
++
+    assert(pscreen->caps.device_reset_status_query);
+    screen->is_sw = zink_kopper_is_cpu(kopper_get_zink_screen(pscreen));
+ 

@@ -67,6 +67,9 @@ BL_MALI_CEF=gl
 # Swap interval changes keep the window's present mode instead of making a new swapchain
 # (gamescope paces frames itself; each new swapchain showed as a flash in Steam's UI).
 DROIDDECK_KOPPER_KEEP_PRESENT_MODE=1
+# One Zink screen for all X connections of a process: a window drawn from several connections
+# (Steam's client and web UI) keeps one swapchain instead of gamescope retiring one per switch.
+DROIDDECK_KOPPER_SHARE_SCREEN=1
 ENV
 echo "== GL part:"; ls -la "$D"
 for f in "$D"/libGLX_droiddeck.so.0 "$D"/libEGL_droiddeck.so.0; do

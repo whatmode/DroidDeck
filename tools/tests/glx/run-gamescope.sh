@@ -59,9 +59,12 @@ report() {
 echo "======== plain"; report
 echo "======== steam mode (-e), as the session runs it"; GS_EXTRA="-e" run_gs $GS; report
 echo "======== the same window from a second X connection"; RETIRE_MODE=twodisplays GS_EXTRA="-e" run_gs $GS; report
+retired=$(grep -c 'Swapchain retired' $OUT/log)
+if grep -q "retire: done" $OUT/log && [ "${fails:-0}" = 0 ] && [ "$retired" = 0 ]; then echo "PASS one swapchain for a window drawn from two connections"
+else echo "FAIL: $retired swapchain(s) retired for a window drawn from two connections"; fails=1; fi
 echo "======== the same window from a second context"; RETIRE_MODE=twocontexts GS_EXTRA="-e" run_gs $GS; report
-if ! grep -q "retire: done" $OUT/log && [ "$GS" != /usr/bin/gamescope ]; then
+if ! grep -q "retire: done" $OUT/log && [ "${fails:-0}" = 0 ] && [ "$GS" != /usr/bin/gamescope ]; then
   echo "== the app's gamescope did not run it; its log:"; sed 's/\x1b\[[0-9;]*m//g' $OUT/log | tail -25 | cut -c1-200
   echo "== trying Arch's gamescope"; run_gs /usr/bin/gamescope
 fi
-grep -q "retire: done" $OUT/log
+grep -q "retire: done" $OUT/log && [ "${fails:-0}" = 0 ]
