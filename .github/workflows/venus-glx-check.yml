@@ -29,3 +29,19 @@ jobs:
           ls -la drv
       - name: GLX start-up cases
         run: docker run --rm -v "$PWD:/work" -w /work menci/archlinuxarm:base-devel bash tools/tests/glx/run-in-arch.sh
+
+  gamescope:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the bridge driver and the app's gamescope
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p drv gsrt
+          gh release download venus-bridge-latest -R "$GITHUB_REPOSITORY" -p 'Venus-Bridge-guest-*.zip' -D drv
+          gh release download mali-gl-latest -R "$GITHUB_REPOSITORY" -p 'mali-gl-runtime-aarch64.tar.gz' -D gsrt || echo "no mali-gl release"
+      - name: Steam UI pattern under gamescope
+        run: docker run --rm -v "$PWD:/work" -w /work menci/archlinuxarm:base-devel bash tools/tests/glx/run-gamescope.sh
+
