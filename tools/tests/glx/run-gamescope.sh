@@ -112,6 +112,10 @@ echo "======== Steam's side menu: two GL windows in one toplevel (from its logs)
 echo "== retired: $(grep -c 'Swapchain retired' $OUT/log), kopper notes: $(grep -c 'droiddeck kopper' $OUT/log)"; grep "droiddeck kopper" $OUT/log | grep -v tree | uniq -c | head -16 | cut -c1-200
 echo "======== Steam's side menu with the main view still and the toplevel drawn now and then"; shots sidemenustill "menu over a still main view" 1
 echo "== retired: $(grep -c 'Swapchain retired' $OUT/log), kopper notes: $(grep -c 'droiddeck kopper' $OUT/log)"; grep "droiddeck kopper" $OUT/log | grep -v tree | uniq -c | head -16 | cut -c1-200
+echo "======== Steam's menu coming up after its main view went still (a crash there before)"
+RETIRE_MODE=sidemenulate GS_EXTRA="-e" run_gs $GS
+grep -E "retire:|SIGSEGV|droiddeck glx: pid|toplevel" $OUT/log | head -8
+grep -q "retire: done" $OUT/log && ! grep -q "got signal" $OUT/log && echo "PASS menu after a still main view: no crash" || echo "FAIL menu after a still main view"
 echo "======== vblank clock for Chromium's frames (GLX_OML_sync_control) at 120 Hz"
 env "${genv[@]}" DROIDDECK_GLX_FAKE_MSC=1 timeout 120 $GS --backend headless -W 1600 -H 720 -w 1600 -h 720 -r 120 -- \
   env VK_LAYER_PATH=$OUT/layers VK_INSTANCE_LAYERS=VK_LAYER_DROIDDECK_gputype $OUT/omlcheck > $OUT/log 2>&1
