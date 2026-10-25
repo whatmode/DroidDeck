@@ -70,6 +70,10 @@ DROIDDECK_KOPPER_KEEP_PRESENT_MODE=1
 # One Zink screen for all X connections of a process: a window drawn from several connections
 # (Steam's client and web UI) keeps one swapchain instead of gamescope retiring one per switch.
 DROIDDECK_KOPPER_SHARE_SCREEN=1
+# The panel's refresh (120 Hz) for gamescope instead of the session's 60 Hz cap on a Mali:
+# that cap kept Xwayland's software copies of GL frames from overrunning the X connection,
+# and GL windows now present to gamescope directly (no copies through X).
+BL_MALI_REFRESH=0
 ENV
 echo "== GL part:"; ls -la "$D"
 for f in "$D"/libGLX_droiddeck.so.0 "$D"/libEGL_droiddeck.so.0; do
