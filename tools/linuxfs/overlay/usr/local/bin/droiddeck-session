@@ -210,6 +210,8 @@ mali_gl_setup() {
     # The updated client exits on "glXChooseVisual failed" while a separate GL program (glprobe)
     # and its own update UI find visuals: report the GL state from inside the exiting client.
     export BL_STEAM_GLX_REPORT=${BL_STEAM_GLX_REPORT:-1}
+    # How each steamwebhelper process ends (signal or exit, with call stacks; procwatch.c).
+    export BL_WEBHELPER_WATCH=${BL_WEBHELPER_WATCH:-1}
     # GL from the selected driver's own Mesa (its gl/ part, set up by the app from gl/env).
     if [ -n "${BL_DRIVER_GL:-}" ] && [ -f "$BL_DRIVER_GL/gl.json" ]; then
       echo "== driver GL part: $BL_DRIVER_GL (glvnd vendor ${__GLX_VENDOR_LIBRARY_NAME:-?}, Mesa $(sed -n 's/.*"mesa": *"\([^"]*\)".*/\1/p' "$BL_DRIVER_GL/gl.json"))"
@@ -1444,12 +1446,13 @@ BUSCONF
       fi
       steam_started=$SECONDS
       _bl_html_from=$(stat -c %s "$steam_root/logs/steamui_html.txt" 2>/dev/null || echo 0)
-      # Venus bridge: Steam's own glXChooseVisual call, seen and rescued by the session preload
-      # loaded as an audit library (glxaudit.c; only the client's main process audits).
+      # Venus bridge: Steam's own glXChooseVisual call, seen and rescued by the GL audit library
+      # (tools/linuxfs/audit/glxaudit.c; only the client's main process audits, every other
+      # program it starts unloads it again). Added to any LD_AUDIT already set.
       _bl_audit=()
-      if [ "${BL_VENUS_SINGLE:-0}" = 1 ] && [ "${BL_STEAM_GLX_AUDIT:-1}" = 1 ] && [ -f /usr/local/lib/libblsession.so ]; then
+      if [ "${BL_VENUS_SINGLE:-0}" = 1 ] && [ "${BL_STEAM_GLX_AUDIT:-1}" = 1 ] && [ -f /usr/local/lib/libblglxaudit.so ]; then
         # LIBGL_DEBUG: Mesa's loader messages from the first GLX call on, not only from a retry.
-        _bl_audit=(env LD_AUDIT=/usr/local/lib/libblsession.so LIBGL_DEBUG=verbose)
+        _bl_audit=(env "LD_AUDIT=${LD_AUDIT:+$LD_AUDIT:}/usr/local/lib/libblglxaudit.so" LIBGL_DEBUG=verbose)
       fi
       "${_bl_audit[@]}" "${steam_client[@]}" "${_bl_ui[@]}" "${_bl_cdp[@]}" "${_bl_lang[@]}" -clientbeta "$steam_channel" \
         -no-cef-sandbox -cef-ozone-platform=x11 "${_bl_cef[@]}" "${_bl_mali_scale_args[@]}" "$@"
