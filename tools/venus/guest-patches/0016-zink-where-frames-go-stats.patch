@@ -1,0 +1,475 @@
+diff -ruN a/src/gallium/drivers/zink/zink_batch.c b/src/gallium/drivers/zink/zink_batch.c
+--- a/src/gallium/drivers/zink/zink_batch.c
++++ b/src/gallium/drivers/zink/zink_batch.c
+@@ -1,4 +1,5 @@
+ #include "zink_batch.h"
++#include "zink_dd_stats.h"
+ #include "zink_context.h"
+ #include "zink_descriptors.h"
+ #include "zink_kopper.h"
+@@ -61,6 +62,17 @@
+ {
+    struct zink_screen *screen = zink_screen(ctx->base.screen);
+ 
++   /* droiddeck: the GPU's time for this state's last batch (see zink_dd_stats.h) */
++   if (bs->dd_ts_pending) {
++      uint64_t ts[2] = {0};
++      if (VKSCR(GetQueryPoolResults)(screen->dev, bs->dd_ts_pool, 0, 2, sizeof(ts), ts, sizeof(ts[0]),
++                                     VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && ts[1] >= ts[0]) {
++         const uint64_t ns = (uint64_t)((ts[1] - ts[0]) * (double)screen->info.props.limits.timestampPeriod);
++         if (ns < 5000000000ull)
++            zink_dd_stats_add(&zink_dd_stats.gpu_batches, &zink_dd_stats.gpu_ns, &zink_dd_stats.gpu_max_ns, ns);
++      }
++      bs->dd_ts_pending = false;
++   }
+    VkResult result = VKSCR(ResetCommandPool)(screen->dev, bs->cmdpool, 0);
+    if (result != VK_SUCCESS)
+       mesa_loge("ZINK: vkResetCommandPool failed (%s)", vk_Result_to_str(result));
+@@ -246,6 +258,8 @@
+       VKSCR(FreeCommandBuffers)(screen->dev, bs->cmdpool, 1, &bs->reordered_cmdbuf);
+    if (bs->cmdpool)
+       VKSCR(DestroyCommandPool)(screen->dev, bs->cmdpool, NULL);
++   if (bs->dd_ts_pool)
++      VKSCR(DestroyQueryPool)(screen->dev, bs->dd_ts_pool, NULL);
+    if (bs->unsynchronized_cmdbuf)
+       VKSCR(FreeCommandBuffers)(screen->dev, bs->unsynchronized_cmdpool, 1, &bs->unsynchronized_cmdbuf);
+    if (bs->unsynchronized_cmdpool)
+@@ -605,6 +619,48 @@
+ 
+ #define ZINK_MAX_SIGNALS 3
+ 
++/* droiddeck: two small command buffers that write timestamps before and after a batch */
++static bool
++zink_dd_timestamps_prepare(struct zink_screen *screen, struct zink_batch_state *bs)
++{
++   if (!bs->dd_ts_pool) {
++      VkQueryPoolCreateInfo qpci = {
++         .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
++         .queryType = VK_QUERY_TYPE_TIMESTAMP,
++         .queryCount = 2,
++      };
++      if (VKSCR(CreateQueryPool)(screen->dev, &qpci, NULL, &bs->dd_ts_pool) != VK_SUCCESS) {
++         bs->dd_ts_pool = VK_NULL_HANDLE;
++         return false;
++      }
++      VkCommandBufferAllocateInfo cbai = {
++         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
++         .commandPool = bs->cmdpool,
++         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
++         .commandBufferCount = 2,
++      };
++      if (VKSCR(AllocateCommandBuffers)(screen->dev, &cbai, bs->dd_ts_cmd) != VK_SUCCESS) {
++         VKSCR(DestroyQueryPool)(screen->dev, bs->dd_ts_pool, NULL);
++         bs->dd_ts_pool = VK_NULL_HANDLE;
++         return false;
++      }
++   }
++   VkCommandBufferBeginInfo cbbi = {
++      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
++      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
++   };
++   if (VKSCR(BeginCommandBuffer)(bs->dd_ts_cmd[0], &cbbi) != VK_SUCCESS)
++      return false;
++   VKSCR(CmdResetQueryPool)(bs->dd_ts_cmd[0], bs->dd_ts_pool, 0, 2);
++   VKSCR(CmdWriteTimestamp)(bs->dd_ts_cmd[0], VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, bs->dd_ts_pool, 0);
++   if (VKSCR(EndCommandBuffer)(bs->dd_ts_cmd[0]) != VK_SUCCESS)
++      return false;
++   if (VKSCR(BeginCommandBuffer)(bs->dd_ts_cmd[1], &cbbi) != VK_SUCCESS)
++      return false;
++   VKSCR(CmdWriteTimestamp)(bs->dd_ts_cmd[1], VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, bs->dd_ts_pool, 1);
++   return VKSCR(EndCommandBuffer)(bs->dd_ts_cmd[1]) == VK_SUCCESS;
++}
++
+ static void
+ submit_queue(void *data, void *gdata, int thread_index)
+ {
+@@ -665,14 +721,26 @@
+    };
+    if (si[ZINK_SUBMIT_CMDBUF].waitSemaphoreCount)
+       si[ZINK_SUBMIT_CMDBUF].pNext = &sem_submit;
+-   VkCommandBuffer cmdbufs[3];
++   VkCommandBuffer cmdbufs[5];
+    unsigned c = 0;
++   /* droiddeck: timestamps around the batch (see zink_dd_stats.h) */
++   const bool dd_time = zink_dd_stats_on && screen->timestamp_valid_bits &&
++                        (bs->has_unsync || bs->has_reordered_work || bs->has_work) &&
++                        zink_dd_timestamps_prepare(screen, bs);
++   if (dd_time)
++      cmdbufs[c++] = bs->dd_ts_cmd[0];
+    if (bs->has_unsync)
+       cmdbufs[c++] = bs->unsynchronized_cmdbuf;
+    if (bs->has_reordered_work)
+       cmdbufs[c++] = bs->reordered_cmdbuf;
+    if (bs->has_work)
+       cmdbufs[c++] = bs->cmdbuf;
++   if (dd_time) {
++      cmdbufs[c++] = bs->dd_ts_cmd[1];
++      bs->dd_ts_pending = true;
++   }
++   zink_dd_count(&zink_dd_stats.batches, 1);
++   zink_dd_stats_tick();
+    si[ZINK_SUBMIT_CMDBUF].pCommandBuffers = cmdbufs;
+    si[ZINK_SUBMIT_CMDBUF].commandBufferCount = c;
+    /* assorted signal submit from wsi/externals */
+@@ -1190,8 +1258,12 @@
+    /* this batch state was already completed and reset */
+    if (u->submit_count - submit_count > 1)
+       return;
+-   if (zink_batch_usage_unflushed_wait(ctx, u, submit_count, trywait))
++   if (zink_batch_usage_unflushed_wait(ctx, u, submit_count, trywait)) {
++      const int dd_reason = zink_dd_wait_reason;
++      zink_dd_wait_reason = ZINK_DD_WAIT_MAP;
+       zink_wait_on_batch(ctx, u->usage);
++      zink_dd_wait_reason = dd_reason;
++   }
+ }
+ 
+ void
+diff -ruN a/src/gallium/drivers/zink/zink_clear.c b/src/gallium/drivers/zink/zink_clear.c
+--- a/src/gallium/drivers/zink/zink_clear.c
++++ b/src/gallium/drivers/zink/zink_clear.c
+@@ -23,6 +23,7 @@
+ 
+ #include "zink_batch.h"
+ #include "zink_clear.h"
++#include "zink_dd_stats.h"
+ #include "zink_context.h"
+ #include "zink_format.h"
+ #include "zink_inlines.h"
+@@ -498,6 +499,7 @@
+       if (res->aspect & VK_IMAGE_ASPECT_STENCIL_BIT)
+          info.pStencilAttachment = &att;
+    }
++   zink_dd_count(&zink_dd_stats.clear_passes, 1);
+    VKCTX(CmdBeginRendering)(cmdbuf, &info);
+    if (!full_clear) {
+       VkClearRect rect;
+diff -ruN a/src/gallium/drivers/zink/zink_context.c b/src/gallium/drivers/zink/zink_context.c
+--- a/src/gallium/drivers/zink/zink_context.c
++++ b/src/gallium/drivers/zink/zink_context.c
+@@ -23,6 +23,7 @@
+ 
+ #include "zink_clear.h"
+ #include "zink_context.h"
++#include "zink_dd_stats.h"
+ #include "zink_descriptors.h"
+ #include "zink_fence.h"
+ #include "zink_format.h"
+@@ -3236,6 +3237,24 @@
+ 
+    if (has_msrtss && !ctx->blitting)
+       ctx->dynamic_fb.info.pNext = ctx->transient_attachments ? &msrtss : NULL;
++   if (zink_dd_stats_on) {
++      zink_dd_count(&zink_dd_stats.passes, 1);
++      for (unsigned i = 0; i < ctx->dynamic_fb.info.colorAttachmentCount; i++) {
++         if (!ctx->dynamic_fb.attachments[i].imageView)
++            continue;
++         switch (ctx->dynamic_fb.attachments[i].loadOp) {
++         case VK_ATTACHMENT_LOAD_OP_LOAD: zink_dd_count(&zink_dd_stats.color_load, 1); break;
++         case VK_ATTACHMENT_LOAD_OP_CLEAR: zink_dd_count(&zink_dd_stats.color_clear, 1); break;
++         default: zink_dd_count(&zink_dd_stats.color_dont_care, 1); break;
++         }
++      }
++      if (ctx->dynamic_fb.info.pDepthAttachment) {
++         if (ctx->dynamic_fb.info.pDepthAttachment->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD)
++            zink_dd_count(&zink_dd_stats.depth_load, 1);
++         else if (ctx->dynamic_fb.info.pDepthAttachment->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR)
++            zink_dd_count(&zink_dd_stats.depth_clear, 1);
++      }
++   }
+    VKCTX(CmdBeginRendering)(ctx->bs->cmdbuf, &ctx->dynamic_fb.info);
+    ctx->in_rp = true;
+    return clear_buffers;
+diff -ruN a/src/gallium/drivers/zink/zink_dd_stats.h b/src/gallium/drivers/zink/zink_dd_stats.h
+new file mode 100644
+--- /dev/null
++++ b/src/gallium/drivers/zink/zink_dd_stats.h
+@@ -0,0 +1,61 @@
++/*
++ * DroidDeck: where a GL program's frames go in Zink, every 10 s in its log (stderr), so one
++ * round of logs shows whether Steam's UI waits on the GPU, on shader/pipeline compiles, on
++ * buffer maps, or on render pass load/stores (expensive on a tiler like Mali):
++ *   batches submitted and the GPU's time for them (timestamps at the start and end of each);
++ *   render passes begun and their color/depth load ops;
++ *   pipelines made (graphics, libraries, compute) and how long each took on the CPU;
++ *   waits for the GPU by reason (fence: glFinish/glClientWaitSync/swap throttle, map: a
++ *   buffer or texture the CPU wants while the GPU uses it, other).
++ * DROIDDECK_ZINK_STATS=0 turns it off; DROIDDECK_ZINK_STATS_MS sets the interval.
++ */
++#ifndef ZINK_DD_STATS_H
++#define ZINK_DD_STATS_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#include "util/os_time.h"
++
++enum zink_dd_wait {
++   ZINK_DD_WAIT_OTHER,
++   ZINK_DD_WAIT_FENCE,
++   ZINK_DD_WAIT_MAP,
++   ZINK_DD_WAIT_COUNT,
++};
++
++enum zink_dd_pipe {
++   ZINK_DD_PIPE_GFX,
++   ZINK_DD_PIPE_LIBRARY,
++   ZINK_DD_PIPE_COMPUTE,
++   ZINK_DD_PIPE_COUNT,
++};
++
++struct zink_dd_stats {
++   uint64_t batches, gpu_batches, gpu_ns, gpu_max_ns;
++   uint64_t passes, clear_passes, color_load, color_clear, color_dont_care, depth_load, depth_clear;
++   uint64_t pipe_count[ZINK_DD_PIPE_COUNT], pipe_ns[ZINK_DD_PIPE_COUNT], pipe_max_ns[ZINK_DD_PIPE_COUNT];
++   uint64_t pipe_main_thread;
++   uint64_t wait_count[ZINK_DD_WAIT_COUNT], wait_ns[ZINK_DD_WAIT_COUNT], wait_max_ns[ZINK_DD_WAIT_COUNT];
++};
++
++extern struct zink_dd_stats zink_dd_stats;
++extern bool zink_dd_stats_on;
++extern __thread int zink_dd_wait_reason;
++
++void
++zink_dd_stats_init(void);
++/* adds max under the stats lock and prints when 10 s have passed */
++void
++zink_dd_stats_add(uint64_t *count, uint64_t *total, uint64_t *max, uint64_t value);
++void
++zink_dd_stats_tick(void);
++
++static inline void
++zink_dd_count(uint64_t *counter, uint64_t n)
++{
++   if (zink_dd_stats_on)
++      __atomic_fetch_add(counter, n, __ATOMIC_RELAXED);
++}
++
++#endif
+diff -ruN a/src/gallium/drivers/zink/zink_fence.c b/src/gallium/drivers/zink/zink_fence.c
+--- a/src/gallium/drivers/zink/zink_fence.c
++++ b/src/gallium/drivers/zink/zink_fence.c
+@@ -24,6 +24,7 @@
+ #include "zink_batch.h"
+ #include "zink_context.h"
+ #include "zink_fence.h"
++#include "zink_dd_stats.h"
+ 
+ #include "zink_resource.h"
+ #include "zink_screen.h"
+@@ -137,7 +138,10 @@
+    assert(fence->batch_id);
+    assert(fence->submitted);
+ 
++   const int dd_reason = zink_dd_wait_reason;
++   zink_dd_wait_reason = ZINK_DD_WAIT_FENCE;
+    bool success = zink_screen_timeline_wait(screen, fence->batch_id, timeout_ns);
++   zink_dd_wait_reason = dd_reason;
+ 
+    if (success) {
+       p_atomic_set(&fence->completed, true);
+diff -ruN a/src/gallium/drivers/zink/zink_pipeline.c b/src/gallium/drivers/zink/zink_pipeline.c
+--- a/src/gallium/drivers/zink/zink_pipeline.c
++++ b/src/gallium/drivers/zink/zink_pipeline.c
+@@ -24,6 +24,16 @@
+ #include "compiler/spirv/spirv.h"
+ 
+ #include "zink_pipeline.h"
++#include "zink_dd_stats.h"
++
++/* droiddeck: CPU time of each pipeline made (zink_dd_stats.h) */
++#define ZINK_DD_TIMED(kind, call) ({ \
++   const uint64_t dd_t0_ = zink_dd_stats_on ? os_time_get_nano() : 0; \
++   VkResult dd_r_ = (call); \
++   if (dd_t0_) \
++      zink_dd_stats_add(&zink_dd_stats.pipe_count[kind], &zink_dd_stats.pipe_ns[kind], \
++                        &zink_dd_stats.pipe_max_ns[kind], os_time_get_nano() - dd_t0_); \
++   dd_r_; })
+ 
+ #include "zink_compiler.h"
+ #include "nir_to_spirv/nir_to_spirv.h"
+@@ -405,7 +415,7 @@
+    u_rwlock_wrlock(&prog->base.pipeline_cache_lock);
+    VkResult result;
+    VRAM_ALLOC_LOOP(result,
+-      VKSCR(CreateGraphicsPipelines)(screen->dev, prog->base.pipeline_cache, 1, &pci, NULL, &pipeline),
++      ZINK_DD_TIMED(ZINK_DD_PIPE_GFX, VKSCR(CreateGraphicsPipelines)(screen->dev, prog->base.pipeline_cache, 1, &pci, NULL, &pipeline)),
+       u_rwlock_wrunlock(&prog->base.pipeline_cache_lock);
+       if (result != VK_SUCCESS) {
+          mesa_loge("ZINK: vkCreateGraphicsPipelines failed (%s)", vk_Result_to_str(result));
+@@ -476,7 +486,7 @@
+    VkResult result;
+    u_rwlock_wrlock(&comp->base.pipeline_cache_lock);
+    VRAM_ALLOC_LOOP(result,
+-      VKSCR(CreateComputePipelines)(screen->dev, comp->base.pipeline_cache, 1, &pci, NULL, &pipeline),
++      ZINK_DD_TIMED(ZINK_DD_PIPE_COMPUTE, VKSCR(CreateComputePipelines)(screen->dev, comp->base.pipeline_cache, 1, &pci, NULL, &pipeline)),
+       u_rwlock_wrunlock(&comp->base.pipeline_cache_lock);
+       if (result != VK_SUCCESS) {
+          mesa_loge("ZINK: vkCreateComputePipelines failed (%s)", vk_Result_to_str(result));
+@@ -598,7 +608,7 @@
+    VkPipeline pipeline;
+    VkResult result;
+    VRAM_ALLOC_LOOP(result,
+-      VKSCR(CreateGraphicsPipelines)(screen->dev, VK_NULL_HANDLE, 1, &pci, NULL, &pipeline),
++      ZINK_DD_TIMED(ZINK_DD_PIPE_LIBRARY, VKSCR(CreateGraphicsPipelines)(screen->dev, VK_NULL_HANDLE, 1, &pci, NULL, &pipeline)),
+       if (result != VK_SUCCESS) {
+          mesa_loge("ZINK: vkCreateGraphicsPipelines failed (%s)", vk_Result_to_str(result));
+          return VK_NULL_HANDLE;
+@@ -679,7 +689,7 @@
+    VkPipeline pipeline;
+    VkResult result;
+    VRAM_ALLOC_LOOP(result,
+-      VKSCR(CreateGraphicsPipelines)(screen->dev, VK_NULL_HANDLE, 1, &pci, NULL, &pipeline),
++      ZINK_DD_TIMED(ZINK_DD_PIPE_LIBRARY, VKSCR(CreateGraphicsPipelines)(screen->dev, VK_NULL_HANDLE, 1, &pci, NULL, &pipeline)),
+       if (result != VK_SUCCESS) {
+          mesa_loge("ZINK: vkCreateGraphicsPipelines failed (%s)", vk_Result_to_str(result));
+          return VK_NULL_HANDLE;
+@@ -817,7 +827,7 @@
+    VkPipeline pipeline;
+    VkResult result;
+    VRAM_ALLOC_LOOP(result,
+-      VKSCR(CreateGraphicsPipelines)(screen->dev, pipeline_cache, 1, &pci, NULL, &pipeline),
++      ZINK_DD_TIMED(ZINK_DD_PIPE_LIBRARY, VKSCR(CreateGraphicsPipelines)(screen->dev, pipeline_cache, 1, &pci, NULL, &pipeline)),
+       if (result != VK_SUCCESS) {
+          mesa_loge("ZINK: vkCreateGraphicsPipelines failed");
+          return VK_NULL_HANDLE;
+@@ -876,7 +886,7 @@
+    u_rwlock_wrlock(&prog->base.pipeline_cache_lock);
+    VkResult result;
+    VRAM_ALLOC_LOOP(result,
+-      VKSCR(CreateGraphicsPipelines)(screen->dev, prog->base.pipeline_cache, 1, &pci, NULL, &pipeline),
++      ZINK_DD_TIMED(ZINK_DD_PIPE_GFX, VKSCR(CreateGraphicsPipelines)(screen->dev, prog->base.pipeline_cache, 1, &pci, NULL, &pipeline)),
+       u_rwlock_wrunlock(&prog->base.pipeline_cache_lock);
+       if (result != VK_SUCCESS && result != VK_PIPELINE_COMPILE_REQUIRED) {
+          mesa_loge("ZINK: vkCreateGraphicsPipelines failed");
+diff -ruN a/src/gallium/drivers/zink/zink_screen.c b/src/gallium/drivers/zink/zink_screen.c
+--- a/src/gallium/drivers/zink/zink_screen.c
++++ b/src/gallium/drivers/zink/zink_screen.c
+@@ -22,6 +22,10 @@
+  */
+ 
+ #include "zink_screen.h"
++#include "zink_dd_stats.h"
++#include "util/u_process.h"
++#include <inttypes.h>
++#include <unistd.h>
+ 
+ #include "zink_kopper.h"
+ #include "zink_compiler.h"
+@@ -2430,6 +2434,80 @@
+ #endif
+ }
+ 
++/* droiddeck: see zink_dd_stats.h */
++struct zink_dd_stats zink_dd_stats;
++bool zink_dd_stats_on;
++__thread int zink_dd_wait_reason;
++static simple_mtx_t zink_dd_lock = SIMPLE_MTX_INITIALIZER;
++static uint64_t zink_dd_since;
++static uint64_t zink_dd_interval_ns = 10000000000ull;
++
++void
++zink_dd_stats_init(void)
++{
++   zink_dd_stats_on = debug_get_bool_option("DROIDDECK_ZINK_STATS", true);
++   /* DROIDDECK_ZINK_STATS_MS: how often (tests use less than 10 s) */
++   zink_dd_interval_ns = debug_get_num_option("DROIDDECK_ZINK_STATS_MS", 10000) * 1000000ull;
++}
++
++void
++zink_dd_stats_add(uint64_t *count, uint64_t *total, uint64_t *max, uint64_t value)
++{
++   if (!zink_dd_stats_on)
++      return;
++   simple_mtx_lock(&zink_dd_lock);
++   (*count)++;
++   *total += value;
++   if (value > *max)
++      *max = value;
++   simple_mtx_unlock(&zink_dd_lock);
++   zink_dd_stats_tick();
++}
++
++void
++zink_dd_stats_tick(void)
++{
++   if (!zink_dd_stats_on)
++      return;
++   const uint64_t now = os_time_get_nano();
++   struct zink_dd_stats s;
++   simple_mtx_lock(&zink_dd_lock);
++   if (!zink_dd_since)
++      zink_dd_since = now;
++   if (now - zink_dd_since < zink_dd_interval_ns) {
++      simple_mtx_unlock(&zink_dd_lock);
++      return;
++   }
++   const double secs = (now - zink_dd_since) / 1e9;
++   zink_dd_since = now;
++   s = zink_dd_stats;
++   memset(&zink_dd_stats, 0, sizeof(zink_dd_stats));
++   simple_mtx_unlock(&zink_dd_lock);
++   if (!s.batches)
++      return;
++#define DD_MS(x) ((x) / 1e6)
++   mesa_logi("droiddeck zink [%d %s]: over %.0f s: %" PRIu64 " batches, GPU busy %.1f ms (%" PRIu64
++             " timed, avg %.2f, max %.2f ms); %" PRIu64 " render passes (+%" PRIu64 " clear-only): "
++             "color load %" PRIu64 " clear %" PRIu64 " dont-care %" PRIu64 ", depth load %" PRIu64
++             " clear %" PRIu64 "; pipelines: full %" PRIu64 " %.1f ms (max %.1f), library %" PRIu64
++             " %.1f ms (max %.1f), compute %" PRIu64 " %.1f ms (max %.1f); waits: fence %" PRIu64
++             " %.1f ms (max %.1f), map %" PRIu64 " %.1f ms (max %.1f), other %" PRIu64
++             " %.1f ms (max %.1f)",
++             (int)getpid(), util_get_process_name(), secs, s.batches, DD_MS(s.gpu_ns), s.gpu_batches,
++             s.gpu_batches ? DD_MS(s.gpu_ns) / s.gpu_batches : 0.0, DD_MS(s.gpu_max_ns), s.passes,
++             s.clear_passes, s.color_load, s.color_clear, s.color_dont_care, s.depth_load,
++             s.depth_clear, s.pipe_count[ZINK_DD_PIPE_GFX], DD_MS(s.pipe_ns[ZINK_DD_PIPE_GFX]),
++             DD_MS(s.pipe_max_ns[ZINK_DD_PIPE_GFX]), s.pipe_count[ZINK_DD_PIPE_LIBRARY],
++             DD_MS(s.pipe_ns[ZINK_DD_PIPE_LIBRARY]), DD_MS(s.pipe_max_ns[ZINK_DD_PIPE_LIBRARY]),
++             s.pipe_count[ZINK_DD_PIPE_COMPUTE], DD_MS(s.pipe_ns[ZINK_DD_PIPE_COMPUTE]),
++             DD_MS(s.pipe_max_ns[ZINK_DD_PIPE_COMPUTE]), s.wait_count[ZINK_DD_WAIT_FENCE],
++             DD_MS(s.wait_ns[ZINK_DD_WAIT_FENCE]), DD_MS(s.wait_max_ns[ZINK_DD_WAIT_FENCE]),
++             s.wait_count[ZINK_DD_WAIT_MAP], DD_MS(s.wait_ns[ZINK_DD_WAIT_MAP]),
++             DD_MS(s.wait_max_ns[ZINK_DD_WAIT_MAP]), s.wait_count[ZINK_DD_WAIT_OTHER],
++             DD_MS(s.wait_ns[ZINK_DD_WAIT_OTHER]), DD_MS(s.wait_max_ns[ZINK_DD_WAIT_OTHER]));
++#undef DD_MS
++}
++
+ bool
+ zink_screen_timeline_wait(struct zink_screen *screen, uint64_t batch_id, uint64_t timeout)
+ {
+@@ -2445,7 +2523,13 @@
+    bool success = false;
+    if (screen->device_lost)
+       return true;
++   const uint64_t dd_t0 = timeout && zink_dd_stats_on ? os_time_get_nano() : 0;
+    VkResult ret = VKSCR(WaitSemaphores)(screen->dev, &wi, timeout);
++   if (dd_t0) {
++      const int r = zink_dd_wait_reason;
++      zink_dd_stats_add(&zink_dd_stats.wait_count[r], &zink_dd_stats.wait_ns[r],
++                        &zink_dd_stats.wait_max_ns[r], os_time_get_nano() - dd_t0);
++   }
+    success = zink_screen_handle_vkresult(screen, ret);
+ 
+    if (success)
+@@ -3396,6 +3480,7 @@
+     * is never mapped, after the GPU's own types. Lazily allocated and protected types keep
+     * their place, after them. DROIDDECK_ZINK_PREFER_UNMAPPABLE=0 keeps the GPU's order.
+     */
++   zink_dd_stats_init();
+    if (debug_get_bool_option("DROIDDECK_ZINK_PREFER_UNMAPPABLE", true)) {
+       const VkMemoryPropertyFlags avoid = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                           VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT |
+diff -ruN a/src/gallium/drivers/zink/zink_types.h b/src/gallium/drivers/zink/zink_types.h
+--- a/src/gallium/drivers/zink/zink_types.h
++++ b/src/gallium/drivers/zink/zink_types.h
+@@ -590,6 +590,10 @@
+ 
+ struct zink_batch_state {
+    struct zink_fence fence;
++   /* droiddeck: GPU time of the last batch (zink_dd_stats.h) */
++   VkQueryPool dd_ts_pool;
++   VkCommandBuffer dd_ts_cmd[2];
++   bool dd_ts_pending;
+    struct zink_batch_state *next;
+ 
+    struct zink_batch_usage usage;
