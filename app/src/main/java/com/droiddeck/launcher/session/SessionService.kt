@@ -600,6 +600,12 @@ class SessionService : Service() {
         if (SessionState.mode == MODE_STEAM && SessionPrefs.zramCompression(this) &&
             com.droiddeck.launcher.core.ZramSupport.supported()) guest.add("BL_ZRAM=1")
         guest.add("BANNER_AUDIO_DIRECT_DECAY=0")
+        // The selected driver's GL part (Zink and GLX/EGL built with it) and the settings it asks
+        // for; the user's own extra variables still come after and win.
+        LinuxVulkanDriverManager(this).glEnvironment(linuxDriverId, guest).let { env ->
+            if (env.isNotEmpty()) Log.i(TAG, "driver GL part: " + env.joinToString(" "))
+            guest.addAll(env)
+        }
         extraEnv().forEach { guest.add(it) }
         com.droiddeck.launcher.agent.AgentEnv.beginSession(this).forEach { guest.add(it) }
         val clientPinned = steamHere && SessionPrefs.clientCpusOverride(this)

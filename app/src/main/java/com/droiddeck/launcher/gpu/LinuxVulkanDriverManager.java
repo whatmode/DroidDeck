@@ -29,6 +29,14 @@ public class LinuxVulkanDriverManager {
     public static final String LIB_NAME = "libvulkan_freedreno.so";
     public static final String ICD_NAME = "icd.json";
     public static final String META_NAME = "meta.json";
+    /**
+     * A driver's GL part (Zink and Mesa's GLX/EGL from the same Mesa as the Vulkan driver): the
+     * zip's gl/ folder, kept as is. Its gl.json marks it; its env file says what the session sets
+     * when the driver is selected, so GL changes ship in the driver, not in the app.
+     */
+    public static final String GL_DIR = "gl";
+    public static final String GL_MARKER = "gl.json";
+    public static final String GL_ENV = "env";
     /** Used when a zip's own ICD manifest states no api_version. */
     private static final String API_DEFAULT = "1.1.274";
     /** The zip's own ICD manifests, whose api_version the generated one carries over. */
@@ -79,6 +87,63 @@ public class LinuxVulkanDriverManager {
         if (id == null || id.isEmpty() || id.contains("/") || id.contains("..")) return false;
         File dir = getDriverDir(id);
         return new File(dir, LIB_NAME).isFile() && new File(dir, ICD_NAME).isFile();
+    }
+
+    static boolean isSafeFileName(String name) {
+        return name != null && !name.equals(".") && !name.equals("..") && name.matches("[A-Za-z0-9._+-]+");
+    }
+
+    /** The driver's GL part, or null when it has none. */
+    public File getGlDir(String id) {
+        if (!isInstalled(id)) return null;
+        File gl = new File(getDriverDir(id), GL_DIR);
+        return new File(gl, GL_MARKER).isFile() ? gl : null;
+    }
+
+    /** What the session adds to its environment for the driver's GL part (empty without one). */
+    public List<String> glEnvironment(String id, List<String> current) {
+        File gl = getGlDir(id);
+        if (gl == null) return new ArrayList<>();
+        File env = new File(gl, GL_ENV);
+        String text = env.isFile() ? FileUtils.readString(env) : null;
+        return parseGlEnv(text, gl.getAbsolutePath(), current);
+    }
+
+    /**
+     * A GL part's env file: one KEY=VALUE per line ("#" starts a comment), KEY+=VALUE to append
+     * to the variable with ":" (LD_LIBRARY_PATH), "@GL@" for the GL part's folder. Returns
+     * KEY=VALUE entries to add after {@code current} (later entries win).
+     */
+    static List<String> parseGlEnv(String text, String glPath, List<String> current) {
+        ArrayList<String> out = new ArrayList<>();
+        if (text == null) return out;
+        for (String raw : text.split("\n")) {
+            String line = raw.trim();
+            if (line.isEmpty() || line.startsWith("#")) continue;
+            int eq = line.indexOf('=');
+            if (eq <= 0) continue;
+            boolean append = line.charAt(eq - 1) == '+';
+            String key = line.substring(0, append ? eq - 1 : eq);
+            if (!key.matches("[A-Za-z_][A-Za-z0-9_]*")) continue;
+            String value = line.substring(eq + 1).replace("@GL@", glPath);
+            if (append) {
+                String before = lastValue(out, key);
+                if (before == null) before = lastValue(current, key);
+                if (before != null && !before.isEmpty()) value = before + ":" + value;
+            }
+            out.add(key + "=" + value);
+        }
+        return out;
+    }
+
+    private static String lastValue(List<String> env, String key) {
+        if (env == null) return null;
+        String prefix = key + "=";
+        for (int i = env.size() - 1; i >= 0; i--) {
+            String e = env.get(i);
+            if (e != null && e.startsWith(prefix)) return e.substring(prefix.length());
+        }
+        return null;
     }
 
     public String getIcdPath(String id) {
@@ -141,6 +206,18 @@ public class LinuxVulkanDriverManager {
                     if (entry.isDirectory()) continue;
                     String base = new File(entry.getName()).getName();
                     if (base.isEmpty()) continue;
+                    String path = entry.getName().replace('\\', '/');
+                    if (path.startsWith(GL_DIR + "/")) {
+                        // Flat folder of plain file names only.
+                        if (path.equals(GL_DIR + "/" + base) && isSafeFileName(base)) {
+                            File gl = new File(tmpDir, GL_DIR);
+                            if (!gl.isDirectory() && !gl.mkdirs()) throw new IOException("cannot create " + gl);
+                            Files.copy(zis, new File(gl, base).toPath(), StandardCopyOption.REPLACE_EXISTING);
+                        } else {
+                            Log.w(TAG, "skipping " + path + " in the driver's GL part");
+                        }
+                        continue;
+                    }
                     if (isRuntimeDriverName(base)) {
                         if (soName != null) Log.w(TAG, "zip has several Vulkan driver libraries; using the first (" + soName + ")");
                         else {

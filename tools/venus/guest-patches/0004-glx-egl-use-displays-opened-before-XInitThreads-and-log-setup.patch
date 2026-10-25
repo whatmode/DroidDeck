@@ -1,0 +1,134 @@
+diff --git a/src/egl/drivers/dri2/platform_x11.c b/src/egl/drivers/dri2/platform_x11.c
+index 296056d..06d3ac9 100644
+--- a/src/egl/drivers/dri2/platform_x11.c
++++ b/src/egl/drivers/dri2/platform_x11.c
+@@ -1069,8 +1069,9 @@ dri2_get_xcb_connection(_EGLDisplay *disp, struct dri2_egl_display *dri2_dpy)
+       screen = dri2_find_screen_for_display(disp, screen);
+    } else if (disp->Platform == _EGL_PLATFORM_X11) {
+       Display *dpy = disp->PlatformDisplay;
++      /* DroidDeck: as in GLX (glxext.c), use a display opened before XInitThreads anyway. */
+       if (!x11_xlib_display_is_thread_safe(dpy))
+-         return EGL_FALSE;
++         fprintf(stderr, "droiddeck egl: Xlib display %p is not thread-safe, used anyway\n", (void *)dpy);
+       dri2_dpy->conn = XGetXCBConnection(dpy);
+       screen = DefaultScreen(dpy);
+    } else {
+diff --git a/src/glx/glxext.c b/src/glx/glxext.c
+index 2511740..e4bf9e8 100644
+--- a/src/glx/glxext.c
++++ b/src/glx/glxext.c
+@@ -17,6 +17,8 @@
+ #include <assert.h>
+ #include <stdbool.h>
+ #include <stdarg.h>
++#include <stdio.h>
++#include <unistd.h>
+ 
+ #include "glxclient.h"
+ #include <X11/extensions/Xext.h>
+@@ -61,6 +63,23 @@
+ #define __GLX_TOTAL_CONFIG \
+    (__GLX_MIN_CONFIG_PROPS + 2 * __GLX_EXT_CONFIG_PROPS)
+ 
++/* DroidDeck: one line per GLX set-up step on stderr, so a display that ends up without GL
++ * says why. DROIDDECK_GLX_QUIET=1 silences it. */
++static void
++droiddeck_glx_log(Display *dpy, const char *f, ...)
++{
++   static int quiet = -1;
++   if (quiet < 0) quiet = debug_get_bool_option("DROIDDECK_GLX_QUIET", false);
++   if (quiet) return;
++   char msg[512];
++   va_list args;
++   va_start(args, f);
++   vsnprintf(msg, sizeof(msg), f, args);
++   va_end(args);
++   fprintf(stderr, "droiddeck glx[%d]: display %p \"%s\": %s\n", (int)getpid(), (void *)dpy,
++           dpy ? DisplayString(dpy) : "?", msg);
++}
++
+ void
+ glx_message(int level, const char *f, ...)
+ {
+@@ -942,8 +961,11 @@ __glXInitialize(Display * dpy)
+    struct glx_display *dpyPriv, *d;
+    int i, majorVersion = 0;
+ 
+-   if (!x11_xlib_display_is_thread_safe(dpy))
+-      return NULL;
++   /* DroidDeck: GLX used to refuse, silently, a display opened before XInitThreads, so every
++    * GLX call on it failed ("glXChooseVisual failed" in Steam's client) while displays opened
++    * later in the same process worked. Use it anyway: GLX itself makes its Xlib calls on the
++    * calling thread, and Zink presents through its own xcb connection (Kopper). */
++   bool thread_safe = x11_xlib_display_is_thread_safe(dpy);
+ 
+    _XLockMutex(_Xglobal_lock);
+ 
+@@ -957,12 +979,15 @@ __glXInitialize(Display * dpy)
+    /* Drop the lock while we create the display private. */
+    _XUnlockMutex(_Xglobal_lock);
+ 
++   droiddeck_glx_log(dpy, "setting up GLX (%s Xlib display)", thread_safe ? "thread-safe" : "NOT thread-safe, used anyway:");
++
+    dpyPriv = calloc(1, sizeof *dpyPriv);
+    if (!dpyPriv)
+       return NULL;
+ 
+    codes = XInitExtension(dpy, __glXExtensionName);
+    if (!codes) {
++      droiddeck_glx_log(dpy, "FAILED: the X server has no GLX extension on this display");
+       free(dpyPriv);
+       return NULL;
+    }
+@@ -975,6 +1000,7 @@ __glXInitialize(Display * dpy)
+ 		     &majorVersion, &dpyPriv->minorVersion)
+        || (majorVersion != 1)
+        || (majorVersion == 1 && dpyPriv->minorVersion < 3)) {
++      droiddeck_glx_log(dpy, "FAILED: GLX version %d.%d from the server, 1.3 or later needed", majorVersion, dpyPriv->minorVersion);
+       free(dpyPriv);
+       return NULL;
+    }
+@@ -1037,6 +1063,7 @@ __glXInitialize(Display * dpy)
+       if (glx_driver & GLX_DRIVER_ZINK_YES) {
+          /* only print error if zink was explicitly requested */
+          CriticalErrorMessageF("DRI3 not available\n");
++         droiddeck_glx_log(dpy, "FAILED: Zink requested, no DRI3 multibuffer and LIBGL_KOPPER_DRI2 not set");
+          goto init_fail;
+       }
+       /* if no dri3 and not using dri2, disable zink */
+@@ -1059,7 +1086,11 @@ __glXInitialize(Display * dpy)
+       goto init_fail;
+ #endif
+ 
++   droiddeck_glx_log(dpy, "drivers to try: 0x%x (direct %d, accelerated %d, Kopper %d, DRI3 multibuffer %d, override %s)",
++                     glx_driver, glx_direct, glx_accel, kopper, dpyPriv->has_multibuffer, env ? env : "none");
+    if (!AllocAndFetchScreenConfigs(dpy, dpyPriv, glx_driver, !env)) {
++      droiddeck_glx_log(dpy, "no screen from the drivers tried%s",
++                        (glx_driver & GLX_DRIVER_ZINK_INFER) ? ", trying software GL" : "");
+       Bool fail = True;
+ #if defined(GLX_DIRECT_RENDERING) && (!defined(GLX_USE_APPLEGL) || defined(GLX_USE_APPLE))
+       if (glx_driver & GLX_DRIVER_ZINK_INFER) {
+@@ -1071,6 +1102,15 @@ __glXInitialize(Display * dpy)
+    }
+ 
+    glxSendClientInfo(dpyPriv, -1);
++   {
++      int nconfigs = 0;
++      for (int s = 0; s < ScreenCount(dpy); s++)
++         if (dpyPriv->screens[s])
++            for (struct glx_config *c = dpyPriv->screens[s]->configs; c; c = c->next)
++               nconfigs++;
++      droiddeck_glx_log(dpy, "GLX ready: %d config(s) on screen 0..%d, driver %s", nconfigs, ScreenCount(dpy) - 1,
++                        dpyPriv->screens[0] && dpyPriv->screens[0]->driverName ? dpyPriv->screens[0]->driverName : "(indirect)");
++   }
+ 
+    /* Grab the lock again and add the display private, unless somebody
+     * beat us to initializing on this display in the meantime. */
+@@ -1091,6 +1131,7 @@ __glXInitialize(Display * dpy)
+ 
+    return dpyPriv;
+ init_fail:
++   droiddeck_glx_log(dpy, "FAILED: no GLX on this display");
+ #if defined(GLX_DIRECT_RENDERING) && !defined(GLX_USE_APPLEGL)
+    _mesa_set_destroy(dpyPriv->zombieGLXDrawable, free_zombie_glx_drawable);
+    __glxHashDestroy(dpyPriv->drawHash);

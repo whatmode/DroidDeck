@@ -210,6 +210,12 @@ mali_gl_setup() {
     # The updated client exits on "glXChooseVisual failed" while a separate GL program (glprobe)
     # and its own update UI find visuals: report the GL state from inside the exiting client.
     export BL_STEAM_GLX_REPORT=${BL_STEAM_GLX_REPORT:-1}
+    # GL from the selected driver's own Mesa (its gl/ part, set up by the app from gl/env).
+    if [ -n "${BL_DRIVER_GL:-}" ] && [ -f "$BL_DRIVER_GL/gl.json" ]; then
+      echo "== driver GL part: $BL_DRIVER_GL (glvnd vendor ${__GLX_VENDOR_LIBRARY_NAME:-?}, Mesa $(sed -n 's/.*"mesa": *"\([^"]*\)".*/\1/p' "$BL_DRIVER_GL/gl.json"))"
+    else
+      echo "== driver GL part: none, GL from the system's Mesa"
+    fi
     echo "== mali-gl: venus single driver ($(cat "$dir/VERSION" 2>/dev/null)): gamescope $BL_GAMESCOPE_BIN, Xwayland -shm, GL on Zink over the bridge"
     return 0
   fi
