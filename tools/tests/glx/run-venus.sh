@@ -49,12 +49,25 @@ export LD_LIBRARY_PATH=$(dirname $(find $OUT/vrb -name 'libvirglrenderer.so*' | 
 echo "== server: $SERVER_BIN (built from the release's virglrenderer source)"
 export VK_DRIVER_FILES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -1)
 echo "== host Vulkan for the server: $VK_DRIVER_FILES"; vulkaninfo --summary 2>&1 | grep -E "deviceName|apiVersion" | head -3
+# venus contexts run in the render server the vtest server starts (its built-in path is the
+# install directory, which a build tree does not have)
+export RENDER_SERVER_EXEC_PATH=$(find $OUT/vrb -name virgl_render_server -type f | head -1)
+echo "== render server: $RENDER_SERVER_EXEC_PATH"
 export VKR_DEBUG=all
-$SERVER_BIN --venus --no-virgl --multi-clients > $OUT/server.log 2>&1 &
-SERVER=$!
-for i in $(seq 1 50); do [ -S /tmp/.virgl_test ] && break; sleep 0.2; done
+# the phone's server offers a device-local-only memory type (native GPU memory) because its
+# host-visible memory comes from a dma-heap; here it is turned on by hand
+start_server() {
+  rm -f /tmp/.virgl_test
+  VK_DRIVER_FILES=$HOST_ICD LD_LIBRARY_PATH=$HOST_LIBS VKR_NATIVE_MEMORY=$1 \
+    $SERVER_BIN --venus --no-virgl --multi-clients > $OUT/server-$1.log 2>&1 &
+  SERVER=$!
+  for i in $(seq 1 50); do [ -S /tmp/.virgl_test ] && break; sleep 0.2; done
+  [ -S /tmp/.virgl_test ] || { echo "FAIL no vtest socket"; tail -20 $OUT/server-$1.log; exit 1; }
+}
+HOST_ICD=$VK_DRIVER_FILES HOST_LIBS=$LD_LIBRARY_PATH
 unset VK_DRIVER_FILES LD_LIBRARY_PATH
-[ -S /tmp/.virgl_test ] || { echo "FAIL no vtest socket"; cat $OUT/server.log | tail -20; exit 1; }
+start_server 1
+ln -sf server-1.log $OUT/server.log
 export VK_ICD_FILENAMES=$OUT/virtio_icd.aarch64.json VN_DEBUG=vtest,init STEAM_COMPAT_CLIENT_INSTALL_PATH=/tmp/steamroot
 mkdir -p /tmp/steamroot/logs
 vulkaninfo --summary > $OUT/vi.txt 2>&1
@@ -80,5 +93,18 @@ spirv-dis $(ls /tmp/dump/*.spv | head -1) 2>/dev/null | grep -E "Capability|Vari
 echo "---- the same without emulation (the GPU here draws wireframe; the check must notice)"
 DROIDDECK_VN_EMULATE=0 timeout 120 $OUT/vkemu $OUT/clip-spv10.spv $OUT/green.spv > $OUT/noemu.txt 2>&1
 grep "vkemu:" $OUT/noemu.txt | head -6
-echo "== server log:"; grep -v "^$" $OUT/server.log | tail -25
+echo "---- native device-local memory (the server's alias type, VKR_NATIVE_MEMORY=1)"
+gcc -O2 -Wall -o $OUT/vkmem tools/tests/glx/vkemu/vkmem.c -lvulkan || exit 1
+timeout 120 $OUT/vkmem 1 > $OUT/mem1.txt 2>&1; rc=$?
+grep "vkmem:" $OUT/mem1.txt
+[ $rc = 0 ] || { echo "FAIL vkmem with the alias (rc $rc)"; tail -8 $OUT/mem1.txt; }
+grep -E "memory type|native device-local|allocations in" $OUT/server-1.log | head -12
+echo "== server log:"; grep -v "^$" $OUT/server-1.log | grep -v "memory type" | tail -25
+kill $SERVER 2>/dev/null; wait $SERVER 2>/dev/null
+echo "---- the same with the alias off (VKR_NATIVE_MEMORY=0, as before)"
+start_server 0
+timeout 120 $OUT/vkmem 0 > $OUT/mem0.txt 2>&1; rc=$?
+grep "vkmem:" $OUT/mem0.txt | grep -v "memory type"
+[ $rc = 0 ] && echo "PASS vkmem with the alias off" || { echo "FAIL vkmem with the alias off (rc $rc)"; tail -8 $OUT/mem0.txt; }
+grep -E "native device-local" $OUT/server-0.log | head -3
 kill $SERVER 2>/dev/null
