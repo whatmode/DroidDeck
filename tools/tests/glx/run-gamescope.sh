@@ -42,12 +42,20 @@ while IFS= read -r line; do
 done < $G/env
 printf '#!/bin/sh\nexec /usr/bin/Xwayland "$@" -shm\n' > $OUT/Xwayland-shm && chmod 755 $OUT/Xwayland-shm
 export XDG_RUNTIME_DIR=/tmp/xdg; mkdir -p -m 700 $XDG_RUNTIME_DIR
-export VK_LAYER_PATH=$OUT/layers VK_INSTANCE_LAYERS=VK_LAYER_DROIDDECK_gputype
 export MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink LIBGL_KOPPER_DRI2=true
 export ENABLE_GAMESCOPE_WSI=1 GAMESCOPE_WSI_FORCE_BYPASS=1 WLR_XWAYLAND=$OUT/Xwayland-shm
 echo "== driver GL env: ${genv[*]}"
-env "${genv[@]}" timeout 120 $GS --backend headless -W 1600 -H 720 -w 1600 -h 720 -r 60 -- $OUT/retire 4 > $OUT/log 2>&1
-echo "== gamescope exit $?"
+# The gputype layer only for the GL app (gamescope itself runs on lavapipe as it is).
+run_gs() {
+  env "${genv[@]}" timeout 120 "$1" --backend headless -W 1600 -H 720 -w 1600 -h 720 -r 60 -- \
+    env VK_LAYER_PATH=$OUT/layers VK_INSTANCE_LAYERS=VK_LAYER_DROIDDECK_gputype $OUT/retire 4 > $OUT/log 2>&1
+  echo "== $1 exit $?"
+}
+run_gs $GS
+if ! grep -q "retire: done" $OUT/log && [ "$GS" != /usr/bin/gamescope ]; then
+  echo "== the app's gamescope did not run it; its log:"; sed 's/\x1b\[[0-9;]*m//g' $OUT/log | tail -25 | cut -c1-200
+  echo "== trying Arch's gamescope"; run_gs /usr/bin/gamescope
+fi
 grep -E "retire|droiddeck kopper|Swapchain retired|Creating swapchain|Failed|OUT_OF_DATE|error|Error" $OUT/log | sed 's/\x1b\[[0-9;]*m//g' | cut -c1-200 | head -120
 echo "== new swapchains: $(grep -c 'droiddeck kopper: new swapchain' $OUT/log), retired: $(grep -c 'Swapchain retired' $OUT/log), created: $(grep -c 'Creating swapchain' $OUT/log)"
 grep -q "retire: done" $OUT/log
