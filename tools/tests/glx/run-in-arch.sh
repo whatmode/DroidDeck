@@ -38,6 +38,7 @@ printf '#include <stdlib.h>\nint main(void) { exit(1); }\n' > $OUT/steam.c && gc
 gcc -O2 -Wall -o $OUT/xcblocal tools/tests/glx/xcblocal.c -ldl || exit 1
 gcc -O2 -Wall -o $OUT/swapint tools/tests/glx/swapint.c -lGL -lX11 || exit 1
 gcc -O0 -g -o $OUT/crashstack tools/tests/glx/crashstack.c -lGL -lX11 || exit 1
+gcc -O2 -Wall -o $OUT/vkcheck tools/tests/glx/vkcheck.c -lvulkan || exit 1
 gcc -O2 -Wall -o $OUT/tfptest mali-gl/test/tfptest.c -lGL -lX11 -lXcomposite || exit 1
 gcc -shared -fPIC -O2 -Wall -o $OUT/libblglxaudit.so tools/linuxfs/audit/glxaudit.c -ldl || exit 1
 mkdir -p $OUT/wh && gcc -O2 -Wall -rdynamic -o $OUT/wh/steamwebhelper tools/tests/glx/webhelperend.c -lpthread || exit 1
@@ -187,6 +188,19 @@ if [ -n "$zip" ] && pacman -S --noconfirm --needed unzip >/dev/null 2>&1 && unzi
     grep -E "glxcheck|droiddeck glx|failed|error" $OUT/log | head -14
     if [ $rc = 0 ] && grep -q "droiddeck glx" $OUT/log && grep -q "renderer zink" $OUT/log; then echo "PASS driver GL on $d"; else echo "FAIL driver GL on $d (rc $rc)"; tail -15 $OUT/log; fails=$((fails+1)); fi
   done
+  # The bridge driver's Vulkan side logs what each program asks (instance, GPUs, device) to
+  # Steam's logs folder: a game failing to start Vulkan says why there.
+  echo "---- driver Vulkan log (droiddeck_vulkan.txt)"
+  unzip -q -o "$zip" 'libvulkan_panvk.so' 'virtio_icd.aarch64.json' -d $OUT/drv
+  sed -i "s|\"library_path\": *\"[^\"]*\"|\"library_path\": \"$OUT/drv/libvulkan_panvk.so\"|" $OUT/drv/virtio_icd.aarch64.json
+  mkdir -p /tmp/steamroot/logs; rm -f /tmp/steamroot/logs/droiddeck_vulkan.txt
+  VK_ICD_FILENAMES=$OUT/drv/virtio_icd.aarch64.json VN_DEBUG=vtest,result STEAM_COMPAT_CLIENT_INSTALL_PATH=/tmp/steamroot \
+    DISPLAY=:7 timeout 60 $OUT/vkcheck > $OUT/log 2>&1; rc=$?
+  cat $OUT/log | head -8; echo "== droiddeck_vulkan.txt:"; cut -c1-220 /tmp/steamroot/logs/droiddeck_vulkan.txt 2>/dev/null | head -20
+  L=/tmp/steamroot/logs/droiddeck_vulkan.txt
+  if [ $rc = 0 ] && grep -q "vkCreateInstance: app 'vkcheck' engine 'DXVK' api 1.3.*VK_KHR_xlib_surface" $L && grep -q "NO renderer" $L \
+     && grep -q "vkEnumeratePhysicalDevices: 0 GPU" $L && grep -q "vkcheck" $L; then echo "PASS driver Vulkan log"
+  else echo "FAIL driver Vulkan log (rc $rc)"; fails=$((fails+1)); fi
 else
   echo "== no bridge driver GL part to test"
 fi
