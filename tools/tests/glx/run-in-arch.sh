@@ -30,12 +30,13 @@ grep -q '^DisableSandbox' /etc/pacman.conf || sed -i 's/^\[options\]/[options]\n
 { for m in https://ca.us.mirror.archlinuxarm.org https://fl.us.mirror.archlinuxarm.org https://de3.mirror.archlinuxarm.org https://nl.mirror.archlinuxarm.org; do echo "Server = $m/\$arch/\$repo"; done; cat /etc/pacman.d/mirrorlist; } > /etc/pacman.d/mirrorlist.new
 mv /etc/pacman.d/mirrorlist.new /etc/pacman.d/mirrorlist
 pacman -Syu --noconfirm --needed gcc mesa vulkan-swrast vulkan-tools vulkan-headers strace libglvnd libx11 xorg-server-xvfb \
-  xorg-xwayland weston xorg-xdpyinfo >/tmp/pacman.log 2>&1 || { echo "pacman failed"; tail -15 /tmp/pacman.log; exit 1; }
+  xorg-xwayland weston xorg-xdpyinfo libxcomposite >/tmp/pacman.log 2>&1 || { echo "pacman failed"; tail -15 /tmp/pacman.log; exit 1; }
 echo "== mesa $(pacman -Q mesa), $(pacman -Q xorg-xwayland)"
 OUT=/tmp/glx; mkdir -p $OUT
 gcc -O2 -Wall -o $OUT/glxcheck tools/tests/glx/glxcheck.c -lGL -lX11 || exit 1
 printf '#include <stdlib.h>\nint main(void) { exit(1); }\n' > $OUT/steam.c && gcc -o $OUT/steam $OUT/steam.c || exit 1
 gcc -O2 -Wall -o $OUT/xcblocal tools/tests/glx/xcblocal.c -ldl || exit 1
+gcc -O2 -Wall -o $OUT/tfptest mali-gl/test/tfptest.c -lGL -lX11 -lXcomposite || exit 1
 gcc -shared -fPIC -O2 -Wall -o $OUT/libblglxaudit.so tools/linuxfs/audit/glxaudit.c -ldl || exit 1
 mkdir -p $OUT/wh && gcc -O2 -Wall -rdynamic -o $OUT/wh/steamwebhelper tools/tests/glx/webhelperend.c -lpthread || exit 1
 mkdir -p $OUT/audit3 && gcc -O2 -Wall -o $OUT/audit3/steam tools/tests/glx/audittrace.c -ldl || exit 1
@@ -154,6 +155,15 @@ if [ -n "$zip" ] && pacman -S --noconfirm --needed unzip >/dev/null 2>&1 && unzi
   grep -E "droiddeck glx|RESULT" $OUT/log | head -30
   if [ $rc = 0 ] && grep -q "QueryVersion over Xlib: reply, 1.4" $OUT/log && grep -q "GetInputFocus): reply" $OUT/log \
      && grep -q "xcb_query_extension_reply comes from .*libxcb" $OUT/log; then echo "PASS driver GL Xlib version"; else echo "FAIL driver GL Xlib version (rc $rc)"; tail -10 $OUT/log; fails=$((fails+1)); fi
+  # Steam's web UI composites its windows with texture-from-pixmap. Without DRI3 the driver's
+  # Zink must not ask for one (xcb closes the connection), and the texture must show the window.
+  for d in :7 :8; do
+    echo "---- driver GL texture-from-pixmap on $d, session preload (expect the window's green, no DRI3 request)"
+    DISPLAY=$d env "${genv[@]}" BL_XCB_TRACE=1 LD_PRELOAD=$OUT/libblsession.so timeout 120 $OUT/tfptest > $OUT/log 2>&1; rc=$?
+    grep -E "###|drawn texture|xcb:|droiddeck kopper|HANG|tfptest done" $OUT/log | head -24
+    if [ $rc = 0 ] && grep -q "tfptest done" $OUT/log && grep -q "PASS (client's green)" $OUT/log && ! grep -q "xcb: request" $OUT/log; then
+      echo "PASS driver GL tfp on $d"; else echo "FAIL driver GL tfp on $d (rc $rc)"; tail -8 $OUT/log; fails=$((fails+1)); fi
+  done
   for d in :7 :8; do
     echo "---- driver GL on $d (expect ok, GL from the driver's Mesa, set-up lines)"
     DISPLAY=$d env "${genv[@]}" timeout 60 $OUT/glxcheck > $OUT/log 2>&1; rc=$?
