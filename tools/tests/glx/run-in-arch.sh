@@ -114,5 +114,28 @@ if pacman -S --noconfirm --needed chromium >/dev/null 2>&1; then
 else
   echo "chromium not installable; webhelper case skipped"
 fi
+# The bridge driver's own GL part (Zink, GLX, EGL from its Mesa), selected the way the app does
+# from the driver's gl/env: GL must come from it and say how each display was set up.
+zip=$(ls drv/Venus-Bridge-guest-*.zip 2>/dev/null | head -1)
+if [ -n "$zip" ] && pacman -S --noconfirm --needed unzip >/dev/null 2>&1 && unzip -q -o "$zip" 'gl/*' -d $OUT/drv 2>/dev/null; then
+  G=$OUT/drv/gl
+  echo "== driver GL part from $(basename "$zip"): $(ls $G | tr '\n' ' ')"
+  genv=()
+  while IFS= read -r line; do
+    case "$line" in ''|'#'*) continue ;; esac
+    k=${line%%=*}; v=${line#*=}; v=${v//@GL@/$G}
+    if [ "${k%+}" != "$k" ]; then k=${k%+}; v="${!k:+${!k}:}$v"; fi
+    genv+=("$k=$v")
+  done < $G/env
+  echo "== driver GL env: ${genv[*]}"
+  for d in :7 :8; do
+    echo "---- driver GL on $d (expect ok, GL from the driver's Mesa, set-up lines)"
+    DISPLAY=$d env "${genv[@]}" timeout 60 $OUT/glxcheck > $OUT/log 2>&1; rc=$?
+    grep -E "glxcheck|droiddeck glx|failed|error" $OUT/log | head -14
+    if [ $rc = 0 ] && grep -q "droiddeck glx" $OUT/log && grep -q "renderer zink" $OUT/log; then echo "PASS driver GL on $d"; else echo "FAIL driver GL on $d (rc $rc)"; tail -15 $OUT/log; fails=$((fails+1)); fi
+  done
+else
+  echo "== no bridge driver GL part to test"
+fi
 echo "== $fails failing case(s)"
 exit $fails
