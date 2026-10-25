@@ -74,6 +74,35 @@ int main(int argc, char **argv) {
     printf("retire: done\n");
     return 0;
   }
+  if (!strncmp(mode, "child", 5)) {
+    /* A GL child window the size of the main one, drawn from another X connection (as
+     * Chromium and ANGLE make one inside Steam's window): left unmapped ("childhidden",
+     * X shows the main window: blue) or mapped over it ("childshown", X shows the child:
+     * yellow). Both are drawn every frame; screenshots tell which one gamescope shows. */
+    XResizeWindow(x, main_win, 1600, 720);
+    XSync(x, False);
+    int shown = !strcmp(mode, "childshown");
+    Display *x2 = XOpenDisplay(NULL);
+    XVisualInfo *vi2 = glXChooseVisual(x2, DefaultScreen(x2), attr);
+    XSetWindowAttributes swa = {0};
+    swa.colormap = XCreateColormap(x2, RootWindow(x2, vi2->screen), vi2->visual, AllocNone);
+    Window child = XCreateWindow(x2, main_win, 0, 0, 1600, 720, 0, vi2->depth, InputOutput, vi2->visual, CWColormap, &swa);
+    if (shown) XMapWindow(x2, child);
+    XSync(x2, False);
+    GLXContext c2 = glXCreateContext(x2, vi2, NULL, True);
+    fprintf(stderr, "retire: child window 0x%lx %s\n", (unsigned long)child, shown ? "mapped" : "unmapped");
+    for (int i = 0; i < rounds * 60; i++) {
+      frame(main_win, main_ctx, 0.0f, 0.0f, 1.0f);
+      glXMakeCurrent(x2, child, c2);
+      glClearColor(1.0f, 1.0f, 0.0f, 1);
+      glClear(GL_COLOR_BUFFER_BIT);
+      glXSwapBuffers(x2, child);
+      usleep(16000);
+    }
+    glFinish();
+    printf("retire: done\n");
+    return 0;
+  }
   if (!strcmp(mode, "twodisplays") || !strcmp(mode, "twocontexts")) {
     /* The same window drawn from a second GL context: on another X connection (Steam's
      * client holds several), or on the same one. */
