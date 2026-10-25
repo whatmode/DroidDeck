@@ -1,7 +1,149 @@
 diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper.c
 --- a/src/gallium/frontends/dri/kopper.c
 +++ b/src/gallium/frontends/dri/kopper.c
-@@ -1184,9 +1184,70 @@
+@@ -888,7 +888,8 @@
+    int x, y;
+    unsigned w, h;
+    uint64_t order;
+-   struct pipe_resource *tex;
++   struct pipe_resource *tex;  /* its frame copy */
++   struct pipe_resource *back; /* its back buffer, when it has no copy yet */
+    int64_t swap;
+ };
+ struct droiddeck_group {
+@@ -911,6 +912,7 @@
+       for (unsigned i = 0; i < DROIDDECK_MEMBERS; i++)
+          if (droiddeck_groups[g].m[i].win == win) {
+             pipe_resource_reference(&droiddeck_groups[g].m[i].tex, NULL);
++            pipe_resource_reference(&droiddeck_groups[g].m[i].back, NULL);
+             memset(&droiddeck_groups[g].m[i], 0, sizeof(droiddeck_groups[g].m[i]));
+          }
+    simple_mtx_unlock(&droiddeck_group_lock);
+@@ -926,6 +928,20 @@
+ /* droiddeck: keep this window's latest frame in a texture of its own while its toplevel has
+  * other GL windows: when one of them shows (Steam's menu opens over a still main view) the
+  * shared swapchain needs every window's picture, and a presented swapchain image is gone. */
++static bool
++droiddeck_group_has_others(uint32_t win, uint32_t top)
++{
++   bool others = false;
++   simple_mtx_lock(&droiddeck_group_lock);
++   for (unsigned g = 0; g < ARRAY_SIZE(droiddeck_groups); g++)
++      if (droiddeck_groups[g].top == top)
++         for (unsigned i = 0; i < DROIDDECK_MEMBERS; i++)
++            if (droiddeck_groups[g].m[i].win && droiddeck_groups[g].m[i].win != win)
++               others = true;
++   simple_mtx_unlock(&droiddeck_group_lock);
++   return others;
++}
++
+ static void
+ droiddeck_copy_frame(struct dri_drawable *drawable, struct pipe_context *pipe, struct pipe_resource *ptex)
+ {
+@@ -974,7 +990,7 @@
+       const char *e = getenv("DROIDDECK_KOPPER_COMPOSITE");
+       enabled = !(e && e[0] == '0');
+    }
+-   if (!enabled || !drawable->is_window || !drawable->droiddeck_top || !drawable->droiddeck_copy ||
++   if (!enabled || !drawable->is_window || !drawable->droiddeck_top ||
+        drawable->info.bos.sType != VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR)
+       return false;
+    VkXcbSurfaceCreateInfoKHR *xcb = (VkXcbSurfaceCreateInfoKHR *)&drawable->info.bos;
+@@ -1026,14 +1042,17 @@
+    self->h = drawable->droiddeck_h;
+    self->order = drawable->droiddeck_order;
+    self->swap = now;
+-   pipe_resource_reference(&self->tex, drawable->droiddeck_copy);
++   if (drawable->droiddeck_copy)
++      pipe_resource_reference(&self->tex, drawable->droiddeck_copy);
++   pipe_resource_reference(&self->back, ptex);
+ 
+    unsigned n = 0;
+    bool top_drawn = false;
+    struct droiddeck_member *primary = NULL;
+    for (unsigned i = 0; i < DROIDDECK_MEMBERS; i++) {
+       struct droiddeck_member *m = &grp->m[i];
+-      if (!m->win || !m->tex || m->tex->screen != pscreen)
++      struct pipe_resource *pic = m->tex ? m->tex : m->back;
++      if (!m->win || !pic || pic->screen != pscreen)
+          continue;
+       /* the toplevel drawn by GL itself has its own swapchain: X allows one per window */
+       top_drawn |= m->win == top;
+@@ -1070,11 +1089,15 @@
+    unsigned count = 0;
+    for (unsigned i = 0; i < DROIDDECK_MEMBERS; i++) {
+       struct droiddeck_member *m = &grp->m[i];
+-      if (!m->win || !m->tex || m->tex->screen != pscreen)
++      struct pipe_resource *pic = m->tex ? m->tex : m->back;
++      if (!m->win || !pic || pic->screen != pscreen)
+          continue;
+       list[count] = *m;
+       list[count].tex = NULL;
++      list[count].back = NULL;
+       pipe_resource_reference(&list[count].tex, m->tex);
++      if (!m->tex)
++         pipe_resource_reference(&list[count].back, m->back);
+       count++;
+    }
+    if (!grp->info.bos.sType) {
+@@ -1144,10 +1167,47 @@
+       simple_mtx_unlock(&droiddeck_group_lock);
+ 
+       if (comp) {
++         /* a window that has not drawn since another came up (Steam's still main view under
++          * its new menu): its picture from its back buffer, once; it keeps a copy from then on */
++         for (unsigned i = 0; i < count; i++) {
++            struct droiddeck_member *m = &list[i];
++            if (m->tex || !m->back)
++               continue;
++            struct pipe_resource templ;
++            memset(&templ, 0, sizeof(templ));
++            templ.target = PIPE_TEXTURE_2D;
++            templ.format = m->back->format;
++            templ.bind = PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW;
++            templ.width0 = m->back->width0;
++            templ.height0 = m->back->height0;
++            templ.depth0 = 1;
++            templ.array_size = 1;
++            struct pipe_resource *copy = pscreen->resource_create(pscreen, &templ);
++            if (copy) {
++               struct pipe_blit_info b;
++               memset(&b, 0, sizeof(b));
++               b.dst.resource = copy;
++               b.dst.format = copy->format;
++               u_box_2d(0, 0, copy->width0, copy->height0, &b.dst.box);
++               b.src.resource = m->back;
++               b.src.format = m->back->format;
++               u_box_2d(0, 0, copy->width0, copy->height0, &b.src.box);
++               b.mask = PIPE_MASK_RGBA;
++               b.filter = PIPE_TEX_FILTER_NEAREST;
++               pipe->blit(pipe, &b);
++               m->tex = copy;
++               simple_mtx_lock(&droiddeck_group_lock);
++               for (unsigned k = 0; k < DROIDDECK_MEMBERS; k++)
++                  if (grp->top == top && grp->m[k].win == m->win && !grp->m[k].tex)
++                     pipe_resource_reference(&grp->m[k].tex, copy);
++               simple_mtx_unlock(&droiddeck_group_lock);
++            }
++            pipe_resource_reference(&m->back, NULL);
++         }
+          qsort(list, count, sizeof(list[0]), droiddeck_member_cmp);
+          for (unsigned i = 0; i < count; i++) {
+             struct droiddeck_member *m = &list[i];
+-            if (!m->w || !m->h)
++            if (!m->w || !m->h || !m->tex)
+                continue;
+             int x0 = MAX2(m->x, 0), y0 = MAX2(m->y, 0);
+             int x1 = MIN3(m->x + (int)m->w, (int)cw, m->x + (int)m->tex->width0);
+@@ -1179,14 +1239,77 @@
+          done = true;
+       }
+    }
+-   for (unsigned i = 0; i < count; i++)
++   for (unsigned i = 0; i < count; i++) {
+       pipe_resource_reference(&list[i].tex, NULL);
++      pipe_resource_reference(&list[i].back, NULL);
++   }
     return done;
  }
  
@@ -72,7 +214,7 @@ diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper
     struct dri_context *ctx = dri_get_current();
     struct pipe_resource *ptex;
  
-@@ -1207,7 +1268,9 @@
+@@ -1207,10 +1330,12 @@
     _mesa_glthread_finish(ctx->st->ctx);
  
     /* droiddeck: the frame's copy, before the flush that ends it (that flush puts the image in
@@ -82,8 +224,12 @@ diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper
 +   int64_t dd_t0 = os_time_get_nano();
     if (drawable->is_window && drawable->info.bos.sType == VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR &&
         !drawable->droiddeck_hidden && drawable->droiddeck_top &&
-        droiddeck_others_in_top(((VkXcbSurfaceCreateInfoKHR *)&drawable->info.bos)->window, drawable->droiddeck_top)) {
-@@ -1220,6 +1283,8 @@
+-       droiddeck_others_in_top(((VkXcbSurfaceCreateInfoKHR *)&drawable->info.bos)->window, drawable->droiddeck_top)) {
++       droiddeck_group_has_others(((VkXcbSurfaceCreateInfoKHR *)&drawable->info.bos)->window, drawable->droiddeck_top)) {
+       st_context_flush(ctx->st, 0, NULL, NULL, NULL);
+       droiddeck_copy_frame(drawable, ctx->st->pipe, ptex);
+    }
+@@ -1220,6 +1345,8 @@
     dri_flush(ctx, drawable,
               __DRI2_FLUSH_DRAWABLE | __DRI2_FLUSH_CONTEXT | flush_flags,
               __DRI2_THROTTLE_SWAPBUFFER);
@@ -92,7 +238,7 @@ diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper
  
     struct pipe_box stack_boxes[64];
     if (nrects > ARRAY_SIZE(stack_boxes))
-@@ -1237,6 +1302,7 @@
+@@ -1237,6 +1364,7 @@
        droiddeck_group_leave(((VkXcbSurfaceCreateInfoKHR *)&drawable->info.bos)->window);
     if (!dd_hidden && droiddeck_composite(drawable, ctx->st->pipe, ptex)) {
        /* its frame went into the toplevel's shared swapchain */
@@ -100,7 +246,7 @@ diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper
        zink_kopper_discard(drawable->screen->base.screen, ctx->st->pipe, ptex);
        drawable->droiddeck_discarding = true;
        drawable->lastStamp++;
-@@ -1244,6 +1310,7 @@
+@@ -1244,6 +1372,7 @@
        return 0;
     }
     if (dd_hidden) {
@@ -108,7 +254,7 @@ diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper
        zink_kopper_discard(drawable->screen->base.screen, ctx->st->pipe, ptex);
        drawable->droiddeck_discarding = true;
        drawable->lastStamp++;
-@@ -1336,6 +1403,93 @@
+@@ -1336,6 +1465,93 @@
     *height = drawable->h;
  }
  
@@ -202,7 +348,7 @@ diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper
  int
  kopperGetSyncValues(struct dri_drawable *drawable, int64_t target_msc, int64_t divisor,
                      int64_t remainder, int64_t *ust, int64_t *msc, int64_t *sbc)
-@@ -1348,6 +1502,9 @@
+@@ -1348,6 +1564,9 @@
     VkXcbSurfaceCreateInfoKHR *xcb = (VkXcbSurfaceCreateInfoKHR *)&info->bos;
     xcb_connection_t *conn = xcb->connection;
  
