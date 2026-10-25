@@ -49,8 +49,9 @@ echo "== driver GL env: ${genv[*]}"
 # The gputype layer only for the GL app (gamescope itself runs on lavapipe as it is).
 run_gs() {
   env "${genv[@]}" timeout 120 "$1" --backend headless -W 1600 -H 720 -w 1600 -h 720 -r 60 ${GS_EXTRA:-} -- \
-    env VK_LAYER_PATH=$OUT/layers VK_INSTANCE_LAYERS=VK_LAYER_DROIDDECK_gputype $OUT/retire 4 ${RETIRE_MODE:-popups} > $OUT/log 2>&1
+    env VK_LAYER_PATH=$OUT/layers VK_INSTANCE_LAYERS=VK_LAYER_DROIDDECK_gputype gdb -q -batch -ex run -ex "bt 25" --args $OUT/retire 4 ${RETIRE_MODE:-popups} > $OUT/log 2>&1
   echo "== $1 exit $?"
+  grep -q "retire: done" $OUT/log || { echo "== the GL program did not finish; end of the log:"; sed 's/\x1b\[[0-9;]*m//g' $OUT/log | grep -v "vulkan:   [A-Z]" | tail -20 | cut -c1-180; }
 }
 run_gs $GS
 report() {
