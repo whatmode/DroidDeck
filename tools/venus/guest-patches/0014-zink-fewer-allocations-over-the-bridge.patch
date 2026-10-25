@@ -1,0 +1,35 @@
+diff -ru a/src/gallium/drivers/zink/zink_bo.c b/src/gallium/drivers/zink/zink_bo.c
+--- a/src/gallium/drivers/zink/zink_bo.c
++++ b/src/gallium/drivers/zink/zink_bo.c
+@@ -1391,8 +1391,11 @@
+    for (uint32_t i = 0; i < screen->info.mem_props.memoryHeapCount; ++i)
+       total_mem += screen->info.mem_props.memoryHeaps[i].size;
+    /* Create managers. */
++   /* droiddeck: freed memory kept 4 s instead of 0.5 s for reuse: a new allocation over the
++    * bridge costs a server round trip (DROIDDECK_ZINK_BO_CACHE_MS) */
++   unsigned cache_ms = debug_get_num_option("DROIDDECK_ZINK_BO_CACHE_MS", 4000);
+    pb_cache_init(&screen->pb.bo_cache, screen->info.mem_props.memoryTypeCount,
+-                 500000, 2.0f, 0,
++                 cache_ms * 1000, 2.0f, 0,
+                  total_mem / 8, offsetof(struct zink_bo, cache_entry), screen,
+                  (void*)bo_destroy, (void*)bo_can_reclaim);
+ 
+diff -ru a/src/gallium/drivers/zink/zink_resource.c b/src/gallium/drivers/zink/zink_resource.c
+--- a/src/gallium/drivers/zink/zink_resource.c
++++ b/src/gallium/drivers/zink/zink_resource.c
+@@ -846,7 +846,14 @@
+          offset += req2.memoryRequirements.size;
+          reqs->size += req2.memoryRequirements.size;
+          reqs->memoryTypeBits |= req2.memoryRequirements.memoryTypeBits;
+-         need_dedicated |= ded.prefersDedicatedAllocation || ded.requiresDedicatedAllocation;
++         /* droiddeck: only when required. Over the bridge each dedicated allocation is a new
++          * dma-buf made by the server with a round trip (Steam's UI made ~50 a second for its
++          * textures, each ~1 ms on the server, waited for on its GL thread); shared ones come
++          * from zink's slabs and cache. DROIDDECK_ZINK_HONOR_PREFERS_DEDICATED=1 restores. */
++         static int honor = -1;
++         if (honor < 0)
++            honor = debug_get_bool_option("DROIDDECK_ZINK_HONOR_PREFERS_DEDICATED", false);
++         need_dedicated |= (honor && ded.prefersDedicatedAllocation) || ded.requiresDedicatedAllocation;
+       }
+    } else {
+       VKSCR(GetImageMemoryRequirements)(screen->dev, obj->image, reqs);
