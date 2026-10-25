@@ -108,7 +108,7 @@ diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper
  #include "pipe/p_context.h"
  #include "pipe-loader/pipe_loader.h"
  #include "state_tracker/st_context.h"
-@@ -593,6 +594,507 @@
+@@ -593,6 +594,512 @@
  #endif
  }
  
@@ -463,17 +463,22 @@ diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper
 +   pipe_resource_reference(&self->tex, ptex);
 +
 +   unsigned n = 0;
++   bool top_drawn = false;
 +   struct droiddeck_member *primary = NULL;
 +   for (unsigned i = 0; i < DROIDDECK_MEMBERS; i++) {
 +      struct droiddeck_member *m = &grp->m[i];
 +      if (!m->win || !m->tex || m->tex->screen != pscreen)
 +         continue;
++      /* the toplevel drawn by GL itself has its own swapchain: X allows one per window */
++      top_drawn |= m->win == top;
 +      n++;
 +      if (!primary || m->w * m->h > primary->w * primary->h)
 +         primary = m;
 +   }
 +   static unsigned notes;
-+   if (n < 2) {
++   if (n < 2 || top_drawn) {
++      if (top_drawn)
++         pipe_resource_reference(&grp->comp, NULL);
 +      if (grp->compositing && (++notes <= 60 || notes % 500 == 0))
 +         fprintf(stderr, "droiddeck kopper: toplevel 0x%x: one GL window again (0x%x), it presents itself\n", top, win);
 +      grp->compositing = false;
@@ -616,7 +621,7 @@ diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper
  int64_t
  kopperSwapBuffersWithDamage(struct dri_drawable *drawable, uint32_t flush_flags, int nrects, const int *rects)
  {
-@@ -632,6 +1134,28 @@
+@@ -632,6 +1139,28 @@
        }
     }
  
