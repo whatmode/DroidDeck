@@ -1,0 +1,707 @@
+diff -ruN a/src/virtio/vulkan/meson.build b/src/virtio/vulkan/meson.build
+--- a/src/virtio/vulkan/meson.build
++++ b/src/virtio/vulkan/meson.build
+@@ -61,6 +61,7 @@
+   'vn_descriptor_set.c',
+   'vn_device.c',
+   'vn_device_memory.c',
++  'vn_droiddeck_emu.c',
+   'vn_feedback.c',
+   'vn_host_copy.c',
+   'vn_icd.c',
+diff -ruN a/src/virtio/vulkan/vn_command_buffer.c b/src/virtio/vulkan/vn_command_buffer.c
+--- a/src/virtio/vulkan/vn_command_buffer.c
++++ b/src/virtio/vulkan/vn_command_buffer.c
+@@ -10,6 +10,8 @@
+ 
+ #include "vn_command_buffer.h"
+ 
++#include "vn_droiddeck_emu.h"
++
+ #include "venus-protocol/vn_protocol_driver_command_buffer.h"
+ #include "venus-protocol/vn_protocol_driver_command_pool.h"
+ 
+@@ -1156,6 +1158,12 @@
+                   uint32_t viewportCount,
+                   const VkViewport *pViewports)
+ {
++   /* droiddeck: one viewport on a GPU without multiViewport */
++   if ((vn_dd_emu_global & VN_DD_EMU_MULTI_VIEWPORT) && (firstViewport || viewportCount > 1)) {
++      if (firstViewport)
++         return;
++      viewportCount = 1;
++   }
+    VN_CMD_ENQUEUE(vkCmdSetViewport, commandBuffer, firstViewport,
+                   viewportCount, pViewports);
+ }
+@@ -1166,6 +1174,11 @@
+                  uint32_t scissorCount,
+                  const VkRect2D *pScissors)
+ {
++   if ((vn_dd_emu_global & VN_DD_EMU_MULTI_VIEWPORT) && (firstScissor || scissorCount > 1)) {
++      if (firstScissor)
++         return;
++      scissorCount = 1;
++   }
+    VN_CMD_ENQUEUE(vkCmdSetScissor, commandBuffer, firstScissor, scissorCount,
+                   pScissors);
+ }
+@@ -2122,6 +2135,8 @@
+                           uint32_t scissorCount,
+                           const VkRect2D *pScissors)
+ {
++   if ((vn_dd_emu_global & VN_DD_EMU_MULTI_VIEWPORT) && scissorCount > 1)
++      scissorCount = 1;
+    VN_CMD_ENQUEUE(vkCmdSetScissorWithCount, commandBuffer, scissorCount,
+                   pScissors);
+ }
+@@ -2151,6 +2166,8 @@
+                            uint32_t viewportCount,
+                            const VkViewport *pViewports)
+ {
++   if ((vn_dd_emu_global & VN_DD_EMU_MULTI_VIEWPORT) && viewportCount > 1)
++      viewportCount = 1;
+    VN_CMD_ENQUEUE(vkCmdSetViewportWithCount, commandBuffer, viewportCount,
+                   pViewports);
+ }
+@@ -2551,6 +2568,8 @@
+ vn_CmdSetPolygonModeEXT(VkCommandBuffer commandBuffer,
+                         VkPolygonMode polygonMode)
+ {
++   if (vn_dd_emu_global & VN_DD_EMU_FILL_MODE)
++      polygonMode = VK_POLYGON_MODE_FILL;
+    VN_CMD_ENQUEUE(vkCmdSetPolygonModeEXT, commandBuffer, polygonMode);
+ }
+ 
+diff -ruN a/src/virtio/vulkan/vn_device.c b/src/virtio/vulkan/vn_device.c
+--- a/src/virtio/vulkan/vn_device.c
++++ b/src/virtio/vulkan/vn_device.c
+@@ -13,6 +13,7 @@
+ #include <string.h>
+ 
+ #include "vk_enum_to_str.h"
++#include "vn_droiddeck_emu.h"
+ 
+ #include "util/disk_cache.h"
+ #include "util/hex.h"
+@@ -468,8 +469,11 @@
+          break;
+       }
+    }
++   struct vn_dd_emu_saved_features dd_saved;
++   vn_dd_emu_device_features_begin(physical_dev->dd_emu, &final_create_info, &dd_saved);
+    result = vn_call_vkCreateDevice(dev->primary_ring, physical_dev_handle,
+                                    &final_create_info, NULL, &dev_handle);
++   vn_dd_emu_device_features_end(&dd_saved);
+    STACK_ARRAY_FINISH(queue_infos);
+ 
+    /* free the fixed extensions here since no longer needed below */
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_emu.c b/src/virtio/vulkan/vn_droiddeck_emu.c
+new file mode 100644
+--- /dev/null
++++ b/src/virtio/vulkan/vn_droiddeck_emu.c
+@@ -0,0 +1,438 @@
++/*
++ * DroidDeck: features DXVK needs that the GPU behind the bridge lacks (see the header).
++ * SPDX-License-Identifier: MIT
++ */
++
++#include "vn_droiddeck_emu.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "vk_util.h"
++
++#include "vn_physical_device.h"
++
++uint32_t vn_dd_emu_global;
++
++static uint32_t
++vn_dd_emu_mode(void)
++{
++   /* 0: off, 1: what the GPU lacks, 2: everything (testing) */
++   static int mode = -1;
++   if (mode < 0) {
++      const char *e = getenv("DROIDDECK_VN_EMULATE");
++      mode = !e ? 1 : !strcmp(e, "0") ? 0 : !strcmp(e, "mali") ? 2 : 1;
++   }
++   return mode;
++}
++
++void
++vn_dd_emu_init_features(struct vn_physical_device *physical_dev)
++{
++   struct vk_features *f = &physical_dev->base.vk.supported_features;
++   const uint32_t mode = vn_dd_emu_mode();
++   uint32_t emu = 0;
++   physical_dev->dd_emu = 0;
++   if (!mode)
++      return;
++
++   const bool all = mode == 2;
++   /* robustBufferAccess2 rides on the GPU's robustness2 extension (nullDescriptor) */
++   if ((all || !f->robustBufferAccess2) && physical_dev->base.vk.supported_extensions.EXT_robustness2 &&
++       f->robustBufferAccess)
++      emu |= VN_DD_EMU_RBA2;
++   if (all || !f->fillModeNonSolid)
++      emu |= VN_DD_EMU_FILL_MODE;
++   if (all || !f->multiViewport)
++      emu |= VN_DD_EMU_MULTI_VIEWPORT;
++   if (all || !f->shaderClipDistance)
++      emu |= VN_DD_EMU_CLIP_DISTANCE;
++   if (all || !f->shaderCullDistance)
++      emu |= VN_DD_EMU_CULL_DISTANCE;
++
++   if (emu & VN_DD_EMU_RBA2)
++      f->robustBufferAccess2 = true;
++   if (emu & VN_DD_EMU_FILL_MODE)
++      f->fillModeNonSolid = true;
++   if (emu & VN_DD_EMU_MULTI_VIEWPORT)
++      f->multiViewport = true;
++   if (emu & VN_DD_EMU_CLIP_DISTANCE)
++      f->shaderClipDistance = true;
++   if (emu & VN_DD_EMU_CULL_DISTANCE)
++      f->shaderCullDistance = true;
++   physical_dev->dd_emu = emu;
++   vn_dd_emu_global = emu;
++
++   vn_droiddeck_log("emulated for DXVK on %s:%s%s%s%s%s%s", physical_dev->base.vk.properties.deviceName,
++                    emu & VN_DD_EMU_RBA2 ? " robustBufferAccess2" : "",
++                    emu & VN_DD_EMU_FILL_MODE ? " fillModeNonSolid" : "",
++                    emu & VN_DD_EMU_MULTI_VIEWPORT ? " multiViewport" : "",
++                    emu & VN_DD_EMU_CLIP_DISTANCE ? " shaderClipDistance" : "",
++                    emu & VN_DD_EMU_CULL_DISTANCE ? " shaderCullDistance" : "",
++                    emu ? "" : " nothing (the GPU has them all)");
++}
++
++void
++vn_dd_emu_device_features_begin(uint32_t emu,
++                                const VkDeviceCreateInfo *info,
++                                struct vn_dd_emu_saved_features *saved)
++{
++   memset(saved, 0, sizeof(*saved));
++   if (!emu)
++      return;
++   /* The program's structs are changed for the GPU's call and put back right after it
++    * (the call encodes them at once). */
++   VkPhysicalDeviceFeatures *core = (VkPhysicalDeviceFeatures *)info->pEnabledFeatures;
++   vk_foreach_struct_const(ext, info->pNext) {
++      if (ext->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2)
++         core = &((VkPhysicalDeviceFeatures2 *)ext)->features;
++      if (ext->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT && (emu & VN_DD_EMU_RBA2)) {
++         VkPhysicalDeviceRobustness2FeaturesEXT *r = (VkPhysicalDeviceRobustness2FeaturesEXT *)ext;
++         saved->rba2 = &r->robustBufferAccess2;
++         saved->rba2_saved = r->robustBufferAccess2;
++         r->robustBufferAccess2 = VK_FALSE;
++      }
++   }
++   if (core) {
++      saved->core = core;
++      saved->core_saved = *core;
++      if (emu & VN_DD_EMU_FILL_MODE)
++         core->fillModeNonSolid = VK_FALSE;
++      if (emu & VN_DD_EMU_MULTI_VIEWPORT)
++         core->multiViewport = VK_FALSE;
++      if (emu & VN_DD_EMU_CLIP_DISTANCE)
++         core->shaderClipDistance = VK_FALSE;
++      if (emu & VN_DD_EMU_CULL_DISTANCE)
++         core->shaderCullDistance = VK_FALSE;
++      /* robustBufferAccess2 asked: the GPU's robustBufferAccess stands in for it */
++      if (saved->rba2 && saved->rba2_saved)
++         core->robustBufferAccess = VK_TRUE;
++   }
++}
++
++void
++vn_dd_emu_device_features_end(struct vn_dd_emu_saved_features *saved)
++{
++   if (saved->core)
++      *saved->core = saved->core_saved;
++   if (saved->rba2)
++      *saved->rba2 = saved->rba2_saved;
++}
++
++/* ---- SPIR-V: clip/cull distance variables become private ---- */
++
++enum {
++   DD_OpEntryPoint = 15,
++   DD_OpCapability = 17,
++   DD_OpTypePointer = 32,
++   DD_OpVariable = 59,
++   DD_OpAccessChain = 65,
++   DD_OpInBoundsAccessChain = 66,
++   DD_OpPtrAccessChain = 67,
++   DD_OpDecorate = 71,
++   DD_OpMemberDecorate = 72,
++   DD_OpInBoundsPtrAccessChain = 70,
++   DD_DecorationBuiltIn = 11,
++   DD_BuiltInClipDistance = 3,
++   DD_BuiltInCullDistance = 4,
++   DD_CapabilityClipDistance = 32,
++   DD_CapabilityCullDistance = 33,
++   DD_StorageInput = 1,
++   DD_StorageOutput = 3,
++   DD_StoragePrivate = 6,
++};
++
++struct dd_words {
++   uint32_t *w;
++   size_t n, cap;
++};
++
++static bool
++dd_push(struct dd_words *o, const uint32_t *src, size_t count)
++{
++   if (o->n + count > o->cap) {
++      size_t cap = (o->cap ? o->cap * 2 : 1024) + count;
++      uint32_t *w = realloc(o->w, cap * sizeof(uint32_t));
++      if (!w)
++         return false;
++      o->w = w;
++      o->cap = cap;
++   }
++   memcpy(o->w + o->n, src, count * sizeof(uint32_t));
++   o->n += count;
++   return true;
++}
++
++uint32_t *
++vn_dd_emu_rewrite_spirv(uint32_t emu, const uint32_t *code, size_t size, size_t *out_size)
++{
++   if (!(emu & (VN_DD_EMU_CLIP_DISTANCE | VN_DD_EMU_CULL_DISTANCE)) || size < 20 || (size & 3) ||
++       code[0] != 0x07230203)
++      return NULL;
++   const size_t nwords = size / 4;
++   const uint32_t bound = code[3];
++   const uint32_t version = code[1];
++
++   /* pass 1: what is a clip/cull distance and what points into it */
++   uint8_t *mark = calloc(bound, 1);       /* 1: the variable, 2: a pointer derived from it */
++   uint32_t *ptr_class = calloc(bound, sizeof(uint32_t));
++   uint32_t *ptr_pointee = calloc(bound, sizeof(uint32_t));
++   uint32_t *priv_of = calloc(bound, sizeof(uint32_t)); /* pointee -> private pointer type id */
++   uint32_t *new_ptr = calloc(bound, sizeof(uint32_t)); /* old pointer type -> private one */
++   if (!mark || !ptr_class || !ptr_pointee || !priv_of || !new_ptr) {
++      free(mark); free(ptr_class); free(ptr_pointee); free(priv_of); free(new_ptr);
++      return NULL;
++   }
++   bool any = false, member = false;
++   for (size_t i = 5; i < nwords;) {
++      const uint32_t op = code[i] & 0xffff, wc = code[i] >> 16;
++      if (!wc || i + wc > nwords)
++         goto unchanged;
++      if (op == DD_OpDecorate && wc >= 4 && code[i + 2] == DD_DecorationBuiltIn &&
++          (code[i + 3] == DD_BuiltInClipDistance || code[i + 3] == DD_BuiltInCullDistance) &&
++          code[i + 1] < bound) {
++         mark[code[i + 1]] = 1;
++         any = true;
++      }
++      if (op == DD_OpMemberDecorate && wc >= 5 && code[i + 3] == DD_DecorationBuiltIn &&
++          (code[i + 4] == DD_BuiltInClipDistance || code[i + 4] == DD_BuiltInCullDistance))
++         member = true;
++      if (op == DD_OpTypePointer && wc == 4 && code[i + 1] < bound) {
++         ptr_class[code[i + 1]] = code[i + 2];
++         ptr_pointee[code[i + 1]] = code[i + 3];
++         if (code[i + 2] == DD_StoragePrivate && code[i + 3] < bound)
++            priv_of[code[i + 3]] = code[i + 1];
++      }
++      i += wc;
++   }
++   if (member) {
++      static unsigned notes;
++      if (++notes <= 5)
++         vn_droiddeck_log("SPIR-V: a clip/cull distance inside an I/O block: left as it is (not handled yet)");
++   }
++   if (!any)
++      goto unchanged;
++
++   /* pass 2: access chains off marked variables, in order (a chain's base comes first) */
++   uint32_t next_id = bound;
++   for (size_t i = 5; i < nwords;) {
++      const uint32_t op = code[i] & 0xffff, wc = code[i] >> 16;
++      if ((op == DD_OpAccessChain || op == DD_OpInBoundsAccessChain || op == DD_OpPtrAccessChain ||
++           op == DD_OpInBoundsPtrAccessChain) && wc >= 4 && code[i + 2] < bound && code[i + 3] < bound &&
++          mark[code[i + 3]])
++         mark[code[i + 2]] = 2;
++      i += wc;
++   }
++   /* private pointer types needed: for each marked variable's and chain's pointer type */
++   for (size_t i = 5; i < nwords;) {
++      const uint32_t op = code[i] & 0xffff, wc = code[i] >> 16;
++      uint32_t type = 0;
++      if (op == DD_OpVariable && wc >= 4 && code[i + 2] < bound && mark[code[i + 2]] == 1)
++         type = code[i + 1];
++      if ((op == DD_OpAccessChain || op == DD_OpInBoundsAccessChain || op == DD_OpPtrAccessChain ||
++           op == DD_OpInBoundsPtrAccessChain) && wc >= 4 && code[i + 2] < bound && mark[code[i + 2]] == 2)
++         type = code[i + 1];
++      if (type && type < bound && !new_ptr[type]) {
++         const uint32_t pointee = ptr_pointee[type];
++         new_ptr[type] = (pointee < bound && priv_of[pointee]) ? priv_of[pointee] : next_id++;
++         if (pointee < bound && !priv_of[pointee])
++            priv_of[pointee] = new_ptr[type];
++      }
++      i += wc;
++   }
++
++   /* pass 3: write it out */
++   struct dd_words o = { 0 };
++   uint8_t *emitted = calloc(next_id - bound + 1, 1);
++   if (!emitted)
++      goto unchanged;
++   uint32_t header[5] = { code[0], code[1], code[2], next_id, code[4] };
++   if (!dd_push(&o, header, 5))
++      goto fail;
++   for (size_t i = 5; i < nwords;) {
++      const uint32_t op = code[i] & 0xffff, wc = code[i] >> 16;
++      const uint32_t *in = code + i;
++      i += wc;
++      if (op == DD_OpCapability &&
++          (((in[1] == DD_CapabilityClipDistance) && (emu & VN_DD_EMU_CLIP_DISTANCE)) ||
++           ((in[1] == DD_CapabilityCullDistance) && (emu & VN_DD_EMU_CULL_DISTANCE))))
++         continue;
++      if (op == DD_OpDecorate && wc >= 2 && in[1] < bound && mark[in[1]] == 1)
++         continue; /* its BuiltIn (and any Location/etc.) goes with it */
++      if (op == DD_OpEntryPoint && version < 0x00010400) {
++         /* before SPIR-V 1.4 the interface lists only Input/Output variables */
++         uint32_t buf[512];
++         if (wc > 512)
++            goto fail;
++         uint32_t n = 0;
++         /* name is a nul-terminated string after the model and function id */
++         uint32_t k = 3;
++         while (k < wc) {
++            const uint32_t word = in[k++];
++            if (!(word & 0xff000000u))
++               break;
++         }
++         for (uint32_t j = 0; j < wc; j++) {
++            if (j >= k && in[j] < bound && mark[in[j]] == 1)
++               continue;
++            buf[n++] = in[j];
++         }
++         buf[0] = (n << 16) | op;
++         if (!dd_push(&o, buf, n))
++            goto fail;
++         continue;
++      }
++      if (op == DD_OpTypePointer && wc == 4 && in[1] < bound && new_ptr[in[1]] && new_ptr[in[1]] >= bound) {
++         if (!dd_push(&o, in, wc))
++            goto fail;
++         /* the private twin right after the original (its pointee is declared already);
++          * once, when two pointer types (Input and Output) share it */
++         const uint32_t twin_id = new_ptr[in[1]];
++         if (!emitted[twin_id - bound]) {
++            emitted[twin_id - bound] = 1;
++            uint32_t twin[4] = { (4u << 16) | DD_OpTypePointer, twin_id, DD_StoragePrivate, in[3] };
++            if (!dd_push(&o, twin, 4))
++               goto fail;
++         }
++         continue;
++      }
++      if (op == DD_OpVariable && wc >= 4 && in[2] < bound && mark[in[2]] == 1) {
++         uint32_t buf[8];
++         memcpy(buf, in, MIN2(wc, 8) * sizeof(uint32_t));
++         buf[1] = new_ptr[in[1]] ? new_ptr[in[1]] : in[1];
++         buf[3] = DD_StoragePrivate;
++         if (!dd_push(&o, buf, MIN2(wc, 8)))
++            goto fail;
++         continue;
++      }
++      if ((op == DD_OpAccessChain || op == DD_OpInBoundsAccessChain || op == DD_OpPtrAccessChain ||
++           op == DD_OpInBoundsPtrAccessChain) && wc >= 4 && in[2] < bound && mark[in[2]] == 2) {
++         if (!dd_push(&o, in, wc))
++            goto fail;
++         if (new_ptr[in[1]])
++            o.w[o.n - wc + 1] = new_ptr[in[1]];
++         continue;
++      }
++      if (!dd_push(&o, in, wc))
++         goto fail;
++   }
++
++   free(mark); free(ptr_class); free(ptr_pointee); free(priv_of); free(new_ptr); free(emitted);
++   *out_size = o.n * 4;
++   {
++      static unsigned rewrites;
++      unsigned n = ++rewrites;
++      if (n <= 3 || n % 100 == 0)
++         vn_droiddeck_log("SPIR-V: clip/cull distances made private in shader #%u", n);
++      /* DROIDDECK_VN_DUMP_SPIRV=<dir>: the rewritten modules, for spirv-val */
++      const char *dir = getenv("DROIDDECK_VN_DUMP_SPIRV");
++      if (dir && *dir) {
++         char path[512];
++         snprintf(path, sizeof(path), "%s/rewritten-%u.spv", dir, n);
++         FILE *f = fopen(path, "wb");
++         if (f) {
++            fwrite(o.w, 4, o.n, f);
++            fclose(f);
++         }
++      }
++   }
++   return o.w;
++
++fail:
++   free(o.w);
++   free(emitted);
++unchanged:
++   free(mark); free(ptr_class); free(ptr_pointee); free(priv_of); free(new_ptr);
++   return NULL;
++}
++
++/* ---- pipelines ---- */
++
++static void
++dd_patch(struct vn_dd_emu_patches *pt, void *addr, const void *value, size_t bytes)
++{
++   if (pt->n == pt->cap) {
++      unsigned cap = pt->cap ? pt->cap * 2 : 16;
++      void *p = realloc(pt->p, cap * sizeof(*pt->p));
++      if (!p)
++         return;
++      pt->p = p;
++      pt->cap = cap;
++   }
++   pt->p[pt->n].addr = addr;
++   pt->p[pt->n].old = 0;
++   pt->p[pt->n].bytes = bytes;
++   memcpy(&pt->p[pt->n].old, addr, bytes);
++   memcpy(addr, value, bytes);
++   pt->n++;
++}
++
++static void
++dd_keep(struct vn_dd_emu_patches *pt, void *mem)
++{
++   if (pt->nf == pt->capf) {
++      unsigned cap = pt->capf ? pt->capf * 2 : 8;
++      void *p = realloc(pt->frees, cap * sizeof(void *));
++      if (!p) {
++         free(mem); /* leak avoided; the patch pointing at it was not made */
++         return;
++      }
++      pt->frees = p;
++      pt->capf = cap;
++   }
++   pt->frees[pt->nf++] = mem;
++}
++
++void
++vn_dd_emu_graphics_pipelines_begin(uint32_t emu,
++                                   uint32_t count,
++                                   const VkGraphicsPipelineCreateInfo *infos,
++                                   struct vn_dd_emu_patches *pt)
++{
++   memset(pt, 0, sizeof(*pt));
++   if (!emu)
++      return;
++   for (uint32_t i = 0; i < count; i++) {
++      const VkGraphicsPipelineCreateInfo *info = &infos[i];
++      if ((emu & VN_DD_EMU_FILL_MODE) && info->pRasterizationState &&
++          info->pRasterizationState->polygonMode != VK_POLYGON_MODE_FILL) {
++         const VkPolygonMode fill = VK_POLYGON_MODE_FILL;
++         dd_patch(pt, (void *)&info->pRasterizationState->polygonMode, &fill, sizeof(fill));
++      }
++      if ((emu & VN_DD_EMU_MULTI_VIEWPORT) && info->pViewportState) {
++         const uint32_t one = 1;
++         if (info->pViewportState->viewportCount > 1)
++            dd_patch(pt, (void *)&info->pViewportState->viewportCount, &one, sizeof(one));
++         if (info->pViewportState->scissorCount > 1)
++            dd_patch(pt, (void *)&info->pViewportState->scissorCount, &one, sizeof(one));
++      }
++      for (uint32_t j = 0; j < info->stageCount && info->pStages; j++) {
++         vk_foreach_struct_const(ext, info->pStages[j].pNext) {
++            if (ext->sType != VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO)
++               continue;
++            const VkShaderModuleCreateInfo *smci = (const VkShaderModuleCreateInfo *)ext;
++            size_t size = 0;
++            uint32_t *code = vn_dd_emu_rewrite_spirv(emu, smci->pCode, smci->codeSize, &size);
++            if (code) {
++               dd_keep(pt, code);
++               const uint32_t *pc = code;
++               dd_patch(pt, (void *)&smci->pCode, &pc, sizeof(pc));
++               dd_patch(pt, (void *)&smci->codeSize, &size, sizeof(size));
++            }
++         }
++      }
++   }
++}
++
++void
++vn_dd_emu_patches_restore(struct vn_dd_emu_patches *pt)
++{
++   for (unsigned i = pt->n; i-- > 0;)
++      memcpy(pt->p[i].addr, &pt->p[i].old, pt->p[i].bytes);
++   for (unsigned i = 0; i < pt->nf; i++)
++      free(pt->frees[i]);
++   free(pt->p);
++   free(pt->frees);
++   memset(pt, 0, sizeof(*pt));
++}
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_emu.h b/src/virtio/vulkan/vn_droiddeck_emu.h
+new file mode 100644
+--- /dev/null
++++ b/src/virtio/vulkan/vn_droiddeck_emu.h
+@@ -0,0 +1,77 @@
++/*
++ * DroidDeck: device features DXVK requires that the GPU behind the bridge lacks (Mali), made
++ * available by the guest driver. Each is claimed to the program and never asked of the GPU:
++ *   robustBufferAccess2  - the GPU's robustBufferAccess (out-of-bounds reads give 0 or a value
++ *                          from the buffer instead of exactly 0; games do not depend on it)
++ *   fillModeNonSolid     - wireframe/point polygon modes are drawn filled
++ *   multiViewport        - only viewport/scissor 0 is used
++ *   shaderClipDistance   - shaders are rewritten: clip distance outputs become private
++ *   shaderCullDistance     variables (no clipping/culling by them; inputs read 0)
++ * DROIDDECK_VN_EMULATE=0 turns it off; =mali emulates all of them whatever the GPU has
++ * (to test it on a GPU that has them).
++ */
++#ifndef VN_DROIDDECK_EMU_H
++#define VN_DROIDDECK_EMU_H
++
++#include "vn_common.h"
++
++#define VN_DD_EMU_RBA2 (1u << 0)
++#define VN_DD_EMU_FILL_MODE (1u << 1)
++#define VN_DD_EMU_MULTI_VIEWPORT (1u << 2)
++#define VN_DD_EMU_CLIP_DISTANCE (1u << 3)
++#define VN_DD_EMU_CULL_DISTANCE (1u << 4)
++
++struct vn_physical_device;
++struct vn_device;
++
++/* what this process emulates (one GPU behind the bridge) */
++extern uint32_t vn_dd_emu_global;
++
++/* after the GPU's features are known: decide what to emulate and claim it */
++void
++vn_dd_emu_init_features(struct vn_physical_device *physical_dev);
++
++/* around vkCreateDevice on the GPU: emulated features are not asked of it */
++struct vn_dd_emu_saved_features {
++   VkPhysicalDeviceFeatures *core;
++   VkPhysicalDeviceFeatures core_saved;
++   VkBool32 *rba2;
++   VkBool32 rba2_saved;
++   VkPhysicalDeviceFeatures2 *feats2;
++};
++
++void
++vn_dd_emu_device_features_begin(uint32_t emu,
++                                const VkDeviceCreateInfo *info,
++                                struct vn_dd_emu_saved_features *saved);
++void
++vn_dd_emu_device_features_end(struct vn_dd_emu_saved_features *saved);
++
++/* SPIR-V without clip/cull distances; returns a malloc'ed copy or NULL when unchanged */
++uint32_t *
++vn_dd_emu_rewrite_spirv(uint32_t emu,
++                        const uint32_t *code,
++                        size_t size,
++                        size_t *out_size);
++
++/* changes to the program's create infos for the GPU's call, put back right after it */
++struct vn_dd_emu_patches {
++   struct {
++      void *addr;
++      uint64_t old;
++      size_t bytes;
++   } *p;
++   unsigned n, cap;
++   void **frees;
++   unsigned nf, capf;
++};
++
++void
++vn_dd_emu_graphics_pipelines_begin(uint32_t emu,
++                                   uint32_t count,
++                                   const VkGraphicsPipelineCreateInfo *infos,
++                                   struct vn_dd_emu_patches *patches);
++void
++vn_dd_emu_patches_restore(struct vn_dd_emu_patches *patches);
++
++#endif /* VN_DROIDDECK_EMU_H */
+diff -ruN a/src/virtio/vulkan/vn_physical_device.c b/src/virtio/vulkan/vn_physical_device.c
+--- a/src/virtio/vulkan/vn_physical_device.c
++++ b/src/virtio/vulkan/vn_physical_device.c
+@@ -11,6 +11,7 @@
+ #include "vn_physical_device.h"
+ 
+ #include "vk_enum_to_str.h"
++#include "vn_droiddeck_emu.h"
+ 
+ #include <stdio.h>
+ 
+@@ -1639,6 +1640,7 @@
+ 
+    vn_physical_device_init_supported_extensions(physical_dev);
+    vn_physical_device_init_features(physical_dev);
++   vn_dd_emu_init_features(physical_dev);
+    vn_physical_device_init_properties(physical_dev);
+ 
+    /* global priority props caching relies on initialized features */
+diff -ruN a/src/virtio/vulkan/vn_physical_device.h b/src/virtio/vulkan/vn_physical_device.h
+--- a/src/virtio/vulkan/vn_physical_device.h
++++ b/src/virtio/vulkan/vn_physical_device.h
+@@ -73,6 +73,9 @@
+     */
+    uint32_t renderer_version;
+ 
++   /* droiddeck: features emulated for DXVK (vn_droiddeck_emu.h) */
++   uint32_t dd_emu;
++
+    /* For maintenance7 layered api properties. */
+    struct vn_layered_api_properties layered_properties;
+ 
+diff -ruN a/src/virtio/vulkan/vn_pipeline.c b/src/virtio/vulkan/vn_pipeline.c
+--- a/src/virtio/vulkan/vn_pipeline.c
++++ b/src/virtio/vulkan/vn_pipeline.c
+@@ -10,6 +10,10 @@
+ 
+ #include "vn_pipeline.h"
+ 
++#include <stdlib.h>
++
++#include "vn_droiddeck_emu.h"
++
+ #include "venus-protocol/vn_protocol_driver_pipeline.h"
+ #include "venus-protocol/vn_protocol_driver_pipeline_cache.h"
+ #include "venus-protocol/vn_protocol_driver_pipeline_layout.h"
+@@ -263,8 +267,20 @@
+    vn_object_base_init(&mod->base, VK_OBJECT_TYPE_SHADER_MODULE, &dev->base);
+ 
+    VkShaderModule mod_handle = vn_shader_module_to_handle(mod);
++   /* droiddeck: clip/cull distances out of the SPIR-V for a GPU without them */
++   size_t dd_size = 0;
++   uint32_t *dd_code = vn_dd_emu_rewrite_spirv(vn_dd_emu_global, pCreateInfo->pCode,
++                                               pCreateInfo->codeSize, &dd_size);
++   VkShaderModuleCreateInfo dd_info;
++   if (dd_code) {
++      dd_info = *pCreateInfo;
++      dd_info.pCode = dd_code;
++      dd_info.codeSize = dd_size;
++      pCreateInfo = &dd_info;
++   }
+    vn_async_vkCreateShaderModule(dev->primary_ring, device, pCreateInfo, NULL,
+                                  &mod_handle);
++   free(dd_code);
+ 
+    *pShaderModule = mod_handle;
+ 
+@@ -1737,6 +1753,8 @@
+       return vn_error(dev->instance, VK_ERROR_OUT_OF_HOST_MEMORY);
+    }
+ 
++   struct vn_dd_emu_patches dd_patches;
++   vn_dd_emu_graphics_pipelines_begin(vn_dd_emu_global, createInfoCount, pCreateInfos, &dd_patches);
+    if (want_sync || target_ring != dev->primary_ring) {
+       if (target_ring == dev->primary_ring) {
+          VN_TRACE_SCOPE("want sync");
+@@ -1754,6 +1772,7 @@
+                                          pPipelines);
+       result = VK_SUCCESS;
+    }
++   vn_dd_emu_patches_restore(&dd_patches);
+ 
+    vk_free(alloc, fix_tmp);
+    STACK_ARRAY_FINISH(fix_descs);
