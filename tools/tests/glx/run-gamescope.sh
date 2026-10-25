@@ -71,13 +71,13 @@ shots() {  # mode label share
     env VK_LAYER_PATH=$OUT/layers VK_INSTANCE_LAYERS=VK_LAYER_DROIDDECK_gputype tools/tests/glx/shots.sh $OUT/shots $OUT/retire 6 $1 > $OUT/log 2>&1
   python3 - "$2" $OUT/shots <<'PY'
 import glob, sys
-from PIL import Image
+sys.path.insert(0, "tools/tests/glx")
+import pngpix
 label, d = sys.argv[1:]
 both = main_only = menu_only = other = 0
 for f in sorted(glob.glob(d + "/shot*.png")):
-    im = Image.open(f).convert("RGB")
-    w, h = im.size
-    m = im.getpixel((w * 3 // 4, h // 2)); n = im.getpixel((w * 100 // 1600, h // 2))
+    w, h, px = pngpix.read(f)
+    m = px(w * 3 // 4, h // 2); n = px(w * 100 // 1600, h // 2)
     main = m[2] > 150 and m[0] < 80; menu = n[0] > 150 and n[1] > 150 and n[2] < 80
     if main and menu: both += 1
     elif main: main_only += 1
