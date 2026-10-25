@@ -32,7 +32,7 @@ mkdir -p $OUT/vr && tar -xzf drv/virglrenderer-src.tar.gz -C $OUT/vr
 VR=$(dirname $(find $OUT/vr -name meson_options.txt | head -1))
 meson setup $OUT/vrb $VR -Dplatforms= -Dvenus=true -Drender-server=false -Dvideo=false -Dtests=false \
   -Dfuzzer=false -Dminigbm_allocation=false -Dcheck-gl-errors=false > $OUT/vr-setup.log 2>&1 \
-  && ninja -C $OUT/vrb > $OUT/vr-build.log 2>&1 || { echo "FAIL building the server"; tail -n 30 $OUT/vr-setup.log $OUT/vr-build.log; exit 1; }
+  && ninja -C $OUT/vrb > $OUT/vr-build.log 2>&1 || { echo "FAIL building the server"; grep -E "error|Error|undefined" $OUT/vr-build.log | head -20; tail -n 15 $OUT/vr-build.log; exit 1; }
 SERVER_BIN=$(find $OUT/vrb -name virgl_test_server -type f | head -1)
 export LD_LIBRARY_PATH=$(dirname $(find $OUT/vrb -name 'libvirglrenderer.so*' | head -1))
 echo "== server: $SERVER_BIN (built from the release's virglrenderer source)"
