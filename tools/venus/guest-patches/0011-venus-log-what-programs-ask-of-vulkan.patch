@@ -1,7 +1,7 @@
 diff -ru a/src/virtio/vulkan/vn_common.c b/src/virtio/vulkan/vn_common.c
 --- a/src/virtio/vulkan/vn_common.c
 +++ b/src/virtio/vulkan/vn_common.c
-@@ -10,6 +10,12 @@
+@@ -10,10 +10,17 @@
  
  #include "vn_common.h"
  
@@ -14,10 +14,17 @@ diff -ru a/src/virtio/vulkan/vn_common.c b/src/virtio/vulkan/vn_common.c
  #include <stdarg.h>
  
  #include "util/log.h"
-@@ -96,12 +102,91 @@
+ #include "util/os_misc.h"
++#include "util/os_time.h"
+ #include "util/u_debug.h"
+ #include "venus-protocol/vn_protocol_driver_info.h"
+ #include "vk_enum_to_str.h"
+@@ -96,12 +103,93 @@
  #endif
  }
  
++static mtx_t vn_dd_stats_mutex;
++static void vn_dd_lock_init(void) { mtx_init(&vn_dd_stats_mutex, mtx_plain); }
 +static FILE *vn_dd_file;
 +static mtx_t vn_dd_mutex;
 +static char vn_dd_prog[96];
@@ -106,7 +113,7 @@ diff -ru a/src/virtio/vulkan/vn_common.c b/src/virtio/vulkan/vn_common.c
     mesa_log_v(MESA_LOG_DEBUG, "MESA-VIRTIO", format, ap);
     va_end(ap);
  
-@@ -113,7 +198,11 @@
+@@ -113,7 +201,11 @@
                VkResult result,
                const char *where)
  {
@@ -119,10 +126,122 @@ diff -ru a/src/virtio/vulkan/vn_common.c b/src/virtio/vulkan/vn_common.c
     return result;
  }
  
+@@ -160,9 +252,53 @@
+    return true;
+ }
+ 
++/* droiddeck: how long this process waits on the bridge, by reason, every 10 s in
++ * droiddeck_vulkan.txt: waits that cost frames (Steam's UI at 120 Hz) show here. */
++static void
++vn_dd_wait_stats(int reason, const char *name, int64_t start, int64_t end)
++{
++   static mtx_t lock;
++   static once_flag once = ONCE_FLAG_INIT;
++   static int64_t since;
++   static uint64_t count[8], total[8], longest[8];
++   static const char *names[8];
++   static unsigned reports;
++   call_once(&once, vn_dd_lock_init);
++   (void)lock;
++   mtx_lock(&vn_dd_stats_mutex);
++   if (reason >= 0 && reason < 8) {
++      int64_t d = end - start;
++      count[reason]++;
++      total[reason] += d;
++      if (d > (int64_t)longest[reason])
++         longest[reason] = d;
++      names[reason] = name;
++   }
++   if (!since)
++      since = start;
++   if (end - since >= 10000000000ll) {
++      char line[512] = "";
++      for (int i = 0; i < 8; i++) {
++         if (!count[i])
++            continue;
++         size_t len = strlen(line);
++         snprintf(line + len, sizeof(line) - len, "%s %s %" PRIu64 "x %.1f ms (longest %.1f)", len ? ";" : "",
++                  names[i], count[i], total[i] / 1e6, longest[i] / 1e6);
++      }
++      if (line[0] && ++reports <= 120)
++         vn_droiddeck_log("waits over %.0f s:%s", (end - since) / 1e9, line);
++      memset(count, 0, sizeof(count));
++      memset(total, 0, sizeof(total));
++      memset(longest, 0, sizeof(longest));
++      since = end;
++   }
++   mtx_unlock(&vn_dd_stats_mutex);
++}
++
+ void
+ vn_relax_fini(struct vn_relax_state *state)
+ {
++   vn_dd_wait_stats(state->reason, state->reason_str, state->start_ns, os_time_get_nano());
+    vn_watchdog_release(&state->instance->ring.watchdog);
+ }
+ 
+@@ -187,6 +323,19 @@
+    return "";
+ }
+ 
++static uint32_t
++vn_dd_relax_base_us(void)
++{
++   static int us = -1;
++   if (us < 0) {
++      const char *e = getenv("DROIDDECK_VN_RELAX_US");
++      us = e ? atoi(e) : 40;
++      if (us < 1 || us > 1000)
++         us = 40;
++   }
++   return us;
++}
++
+ static struct vn_relax_profile
+ vn_relax_get_profile(enum vn_relax_reason reason)
+ {
+@@ -225,11 +374,15 @@
+        *   ...
+        *   aborting after 895s
+        */
++      /* droiddeck: fence and semaphore waits gate every frame of Steam's UI at 120 Hz (8.3 ms);
++       * sleeping from 160 us up oversleeps by up to a frame's tenth per wait. Start at 40 us
++       * after 32 yields (DROIDDECK_VN_RELAX_US sets the first sleep); the same ~3.5 s to the
++       * first warning is kept by the later, longer sleeps. */
+       return (struct vn_relax_profile){
+-         .base_sleep_us = 160,
+-         .busy_wait_order = 4,
+-         .warn_order = 10,
+-         .abort_order = 14,
++         .base_sleep_us = vn_dd_relax_base_us(),
++         .busy_wait_order = 5,
++         .warn_order = 12,
++         .abort_order = 16,
+       };
+    }
+ 
+@@ -249,6 +402,8 @@
+       .iter = 0,
+       .profile = vn_relax_get_profile(reason),
+       .reason_str = vn_relax_reason_string(reason),
++      .start_ns = os_time_get_nano(),
++      .reason = reason,
+    };
+ }
+ 
 diff -ru a/src/virtio/vulkan/vn_common.h b/src/virtio/vulkan/vn_common.h
 --- a/src/virtio/vulkan/vn_common.h
 +++ b/src/virtio/vulkan/vn_common.h
-@@ -310,6 +310,11 @@
+@@ -261,6 +261,8 @@
+    uint32_t iter;
+    const struct vn_relax_profile profile;
+    const char *reason_str;
++   int64_t start_ns; /* droiddeck: time spent waiting, by reason (droiddeck_vulkan.txt) */
++   int reason;
+ };
+ 
+ /* TLS ring
+@@ -310,6 +312,11 @@
  void
  vn_trace_init(void);
  
