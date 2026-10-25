@@ -14,7 +14,7 @@ index 296056d..06d3ac9 100644
        screen = DefaultScreen(dpy);
     } else {
 diff --git a/src/glx/glxext.c b/src/glx/glxext.c
-index 2511740..33fad0c 100644
+index 2511740..aee18c7 100644
 --- a/src/glx/glxext.c
 +++ b/src/glx/glxext.c
 @@ -17,6 +17,8 @@
@@ -50,7 +50,53 @@ index 2511740..33fad0c 100644
  void
  glx_message(int level, const char *f, ...)
  {
-@@ -325,15 +344,49 @@ static Bool
+@@ -317,6 +336,45 @@ __glXCloseDisplay(Display * dpy, XExtCodes * codes)
+    return 1;
+ }
+ 
++
++/* DroidDeck: why xcb gets no reply on a display whose Xlib side works. Which object each xcb
++ * entry point comes from (another one than libxcb means the program replaced it), whether a
++ * core request gets a reply, the extension query done by hand, and whether Xlib and xcb
++ * talk over the same socket. */
++#include <dlfcn.h>
++static void
++droiddeck_xcb_report(Display *dpy, xcb_connection_t *c)
++{
++   static const char *names[] = {
++      "XGetXCBConnection", "xcb_send_request", "xcb_send_request64", "xcb_send_request_with_fds64",
++      "xcb_wait_for_reply", "xcb_wait_for_reply64", "xcb_query_extension", "xcb_query_extension_reply",
++      "xcb_get_extension_data", "xcb_prefetch_extension_data", "xcb_glx_query_version",
++      "xcb_glx_query_version_reply", "xcb_take_socket", "xcb_poll_for_reply", NULL,
++   };
++   for (int i = 0; names[i]; i++) {
++      void *p = dlsym(RTLD_DEFAULT, names[i]);
++      Dl_info info;
++      droiddeck_glx_log(dpy, "  %s comes from %s", names[i],
++                        !p ? "(nowhere)" : dladdr(p, &info) && info.dli_fname ? info.dli_fname : "?");
++   }
++   xcb_generic_error_t *e = NULL;
++   xcb_get_input_focus_reply_t *focus = xcb_get_input_focus_reply(c, xcb_get_input_focus(c), &e);
++   droiddeck_glx_log(dpy, "  core request over xcb (GetInputFocus): %s, X error %d", focus ? "reply" : "NO reply",
++                     e ? e->error_code : -1);
++   free(focus);
++   free(e);
++   e = NULL;
++   xcb_query_extension_cookie_t qc = xcb_query_extension(c, 3, "GLX");
++   xcb_query_extension_reply_t *q = xcb_query_extension_reply(c, qc, &e);
++   droiddeck_glx_log(dpy, "  QueryExtension(GLX) by hand over xcb: request %u, %s, present %d, opcode %d, X error %d",
++                     qc.sequence, q ? "reply" : "NO reply", q ? q->present : -1, q ? q->major_opcode : -1,
++                     e ? e->error_code : -1);
++   free(q);
++   free(e);
++   droiddeck_glx_log(dpy, "  socket: xcb %d, Xlib %d; xcb connection %p", xcb_get_file_descriptor(c),
++                     ConnectionNumber(dpy), (void *)c);
++}
++
+ /*
+ ** Query the version of the GLX extension.  This procedure works even if
+ ** the client extension is not completely set up.
+@@ -325,15 +383,50 @@ static Bool
  QueryVersion(Display * dpy, int opcode, int *major, int *minor)
  {
     xcb_connection_t *c = XGetXCBConnection(dpy);
@@ -80,6 +126,7 @@ index 2511740..33fad0c 100644
 +                        xcb_connection_has_error(c), ext ? (ext->present ? "present" : "ABSENT") : "unknown",
 +                        ext ? ext->major_opcode : -1, opcode);
 +      free(err);
++      droiddeck_xcb_report(dpy, c);
 +      xGLXQueryVersionReq *req;
 +      xGLXQueryVersionReply rep;
 +      memset(&rep, 0, sizeof(rep));
@@ -103,7 +150,7 @@ index 2511740..33fad0c 100644
  
     if (reply->major_version != GLX_MAJOR_VERSION) {
        free(reply);
-@@ -942,8 +995,11 @@ __glXInitialize(Display * dpy)
+@@ -942,8 +1035,11 @@ __glXInitialize(Display * dpy)
     struct glx_display *dpyPriv, *d;
     int i, majorVersion = 0;
  
@@ -117,7 +164,7 @@ index 2511740..33fad0c 100644
  
     _XLockMutex(_Xglobal_lock);
  
-@@ -957,12 +1013,15 @@ __glXInitialize(Display * dpy)
+@@ -957,12 +1053,15 @@ __glXInitialize(Display * dpy)
     /* Drop the lock while we create the display private. */
     _XUnlockMutex(_Xglobal_lock);
  
@@ -133,7 +180,7 @@ index 2511740..33fad0c 100644
        free(dpyPriv);
        return NULL;
     }
-@@ -975,6 +1034,7 @@ __glXInitialize(Display * dpy)
+@@ -975,6 +1074,7 @@ __glXInitialize(Display * dpy)
  		     &majorVersion, &dpyPriv->minorVersion)
         || (majorVersion != 1)
         || (majorVersion == 1 && dpyPriv->minorVersion < 3)) {
@@ -141,7 +188,7 @@ index 2511740..33fad0c 100644
        free(dpyPriv);
        return NULL;
     }
-@@ -1037,6 +1097,7 @@ __glXInitialize(Display * dpy)
+@@ -1037,6 +1137,7 @@ __glXInitialize(Display * dpy)
        if (glx_driver & GLX_DRIVER_ZINK_YES) {
           /* only print error if zink was explicitly requested */
           CriticalErrorMessageF("DRI3 not available\n");
@@ -149,7 +196,7 @@ index 2511740..33fad0c 100644
           goto init_fail;
        }
        /* if no dri3 and not using dri2, disable zink */
-@@ -1059,7 +1120,11 @@ __glXInitialize(Display * dpy)
+@@ -1059,7 +1160,11 @@ __glXInitialize(Display * dpy)
        goto init_fail;
  #endif
  
@@ -161,7 +208,7 @@ index 2511740..33fad0c 100644
        Bool fail = True;
  #if defined(GLX_DIRECT_RENDERING) && (!defined(GLX_USE_APPLEGL) || defined(GLX_USE_APPLE))
        if (glx_driver & GLX_DRIVER_ZINK_INFER) {
-@@ -1071,6 +1136,15 @@ __glXInitialize(Display * dpy)
+@@ -1071,6 +1176,15 @@ __glXInitialize(Display * dpy)
     }
  
     glxSendClientInfo(dpyPriv, -1);
@@ -177,7 +224,7 @@ index 2511740..33fad0c 100644
  
     /* Grab the lock again and add the display private, unless somebody
      * beat us to initializing on this display in the meantime. */
-@@ -1091,6 +1165,7 @@ __glXInitialize(Display * dpy)
+@@ -1091,6 +1205,7 @@ __glXInitialize(Display * dpy)
  
     return dpyPriv;
  init_fail:
