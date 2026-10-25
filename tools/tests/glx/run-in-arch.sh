@@ -37,6 +37,7 @@ gcc -O2 -Wall -o $OUT/glxcheck tools/tests/glx/glxcheck.c -lGL -lX11 || exit 1
 printf '#include <stdlib.h>\nint main(void) { exit(1); }\n' > $OUT/steam.c && gcc -o $OUT/steam $OUT/steam.c || exit 1
 gcc -O2 -Wall -o $OUT/xcblocal tools/tests/glx/xcblocal.c -ldl || exit 1
 gcc -O2 -Wall -o $OUT/swapint tools/tests/glx/swapint.c -lGL -lX11 || exit 1
+gcc -O0 -g -o $OUT/crashstack tools/tests/glx/crashstack.c -lGL -lX11 || exit 1
 gcc -O2 -Wall -o $OUT/tfptest mali-gl/test/tfptest.c -lGL -lX11 -lXcomposite || exit 1
 gcc -shared -fPIC -O2 -Wall -o $OUT/libblglxaudit.so tools/linuxfs/audit/glxaudit.c -ldl || exit 1
 mkdir -p $OUT/wh && gcc -O2 -Wall -rdynamic -o $OUT/wh/steamwebhelper tools/tests/glx/webhelperend.c -lpthread || exit 1
@@ -161,6 +162,11 @@ if [ -n "$zip" ] && pacman -S --noconfirm --needed unzip >/dev/null 2>&1 && unzi
   # Steam's compositor switches the swap interval often; with the driver's env no switch may
   # make a new swapchain (each showed as a flash).
   for d in :7 :8; do
+    echo "---- driver GL: a GL program crashing shows its stack ($d)"
+    DISPLAY=$d env "${genv[@]}" timeout 60 $OUT/crashstack > $OUT/log 2>&1; rc=$?
+    grep -E "crashstack|droiddeck glx: pid|free\(\)" $OUT/log | head -4; grep -A12 "droiddeck glx: pid" $OUT/log | tail -12 | cut -c1-150
+    if grep -q "droiddeck glx: pid .* got signal 6" $OUT/log && [ $rc != 0 ]; then
+      echo "PASS driver GL crash stack on $d (rc $rc)"; else echo "FAIL driver GL crash stack on $d (rc $rc)"; fails=$((fails+1)); fi
     echo "---- driver GL swap interval switches on $d (expect no new swapchain for them)"
     DISPLAY=$d env "${genv[@]}" timeout 60 $OUT/swapint > $OUT/log 2>&1; rc=$?
     grep -E "swapint|droiddeck kopper" $OUT/log | head -8
