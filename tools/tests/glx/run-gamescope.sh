@@ -69,6 +69,7 @@ shots() {  # mode label share
   rm -rf $OUT/shots
   env "${genv[@]}" DROIDDECK_KOPPER_SHARE_SCREEN=$3 timeout 120 $GS --backend headless -W 1600 -H 720 -w 1600 -h 720 -r 60 -- \
     env VK_LAYER_PATH=$OUT/layers VK_INSTANCE_LAYERS=VK_LAYER_DROIDDECK_gputype tools/tests/glx/shots.sh $OUT/shots $OUT/retire 6 $1 > $OUT/log 2>&1
+  echo "== $(ls $OUT/shots 2>/dev/null | wc -l) screenshot file(s); log:"; sed 's/\x1b\[[0-9;]*m//g' $OUT/log | grep -i "screenshot\|retire:\|xprop\|error" | sort | uniq -c | head -12 | cut -c1-180
   python3 - "$2" $OUT/shots <<'PY'
 import glob, sys
 sys.path.insert(0, "tools/tests/glx")
