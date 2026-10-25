@@ -53,7 +53,12 @@ echo "== host Vulkan for the server: $VK_DRIVER_FILES"; vulkaninfo --summary 2>&
 # install directory, which a build tree does not have)
 export RENDER_SERVER_EXEC_PATH=$(find $OUT/vrb -name virgl_render_server -type f | head -1)
 echo "== render server: $RENDER_SERVER_EXEC_PATH"
-export VKR_DEBUG=all
+# validate: the server runs the GPU calls under the validation layer (when Arch has it);
+# udmabuf: host-visible memory imported as dma-buf, as the phone's (dma-heap) does
+pacman -S --noconfirm --needed vulkan-validation-layers >>/tmp/pacman.log 2>&1 || true
+if ls /usr/share/vulkan/explicit_layer.d/*validation* >/dev/null 2>&1; then export VKR_DEBUG=all; else export VKR_DEBUG=udmabuf; fi
+[ -e /dev/udmabuf ] || echo "== no /dev/udmabuf: host-visible memory is exported by lavapipe instead"
+echo "== VKR_DEBUG=$VKR_DEBUG"
 # the phone's server offers a device-local-only memory type (native GPU memory) because its
 # host-visible memory comes from a dma-heap; here it is turned on by hand
 start_server() {
