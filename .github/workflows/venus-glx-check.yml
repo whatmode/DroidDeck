@@ -43,5 +43,5 @@ jobs:
           gh release download venus-bridge-latest -R "$GITHUB_REPOSITORY" -p 'Venus-Bridge-guest-*.zip' -D drv
           gh release download mali-gl-latest -R "$GITHUB_REPOSITORY" -p 'mali-gl-runtime-aarch64.tar.gz' -D gsrt || echo "no mali-gl release"
       - name: Steam UI pattern under gamescope
-        run: docker run --rm -v "$PWD:/work" -w /work menci/archlinuxarm:base-devel bash tools/tests/glx/run-gamescope.sh
+        run: docker run --rm --shm-size=2g -v "$PWD:/work" -w /work menci/archlinuxarm:base-devel bash tools/tests/glx/run-gamescope.sh
 
