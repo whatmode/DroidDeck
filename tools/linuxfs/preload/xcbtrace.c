@@ -8,6 +8,8 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+void *bl_next_symbol(const char *library, const char *name) __attribute__((visibility("hidden")));
+
 /* BL_XCB_TRACE=1: the first time an X connection reports an error in a process, print the
  * xcb error code and a backtrace to stderr. Steam's webhelper dies with "Fatal IO error 11
  * (Resource temporarily unavailable) on X server :0", which hides the real cause: xcb shuts
@@ -29,7 +31,7 @@ static const char *xcb_error_name(int e) {
 int xcb_connection_has_error(void *c) {
   static int (*real)(void *);
   static int reported;
-  if (!real) real = (int (*)(void *))dlsym(RTLD_NEXT, "xcb_connection_has_error");
+  if (!real) real = (int (*)(void *))bl_next_symbol("libxcb.so.1", "xcb_connection_has_error");
   int saved = errno;
   int r = real ? real(c) : 0;
   if (r && !reported) {
@@ -62,7 +64,7 @@ static void check_extension(void *c, const bl_xcb_protocol_request_t *req) {
   if (enabled < 0) { const char *w = getenv("BL_XCB_TRACE"); enabled = w && !strcmp(w, "1"); }
   if (!enabled || !req || !req->ext) return;
   static const bl_xcb_query_extension_reply_t *(*get_ext)(void *, bl_xcb_extension_t *);
-  if (!get_ext) get_ext = (const bl_xcb_query_extension_reply_t *(*)(void *, bl_xcb_extension_t *))dlsym(RTLD_NEXT, "xcb_get_extension_data");
+  if (!get_ext) get_ext = (const bl_xcb_query_extension_reply_t *(*)(void *, bl_xcb_extension_t *))bl_next_symbol("libxcb.so.1", "xcb_get_extension_data");
   if (!get_ext) return;
   const bl_xcb_query_extension_reply_t *r = get_ext(c, req->ext);
   if (r && r->present) return;
@@ -80,14 +82,14 @@ static void check_extension(void *c, const bl_xcb_protocol_request_t *req) {
 
 unsigned int xcb_send_request(void *c, int flags, void *vector, const bl_xcb_protocol_request_t *req) {
   static unsigned int (*real)(void *, int, void *, const bl_xcb_protocol_request_t *);
-  if (!real) real = (unsigned int (*)(void *, int, void *, const bl_xcb_protocol_request_t *))dlsym(RTLD_NEXT, "xcb_send_request");
+  if (!real) real = (unsigned int (*)(void *, int, void *, const bl_xcb_protocol_request_t *))bl_next_symbol("libxcb.so.1", "xcb_send_request");
   check_extension(c, req);
   return real ? real(c, flags, vector, req) : 0;
 }
 
 unsigned long long xcb_send_request64(void *c, int flags, void *vector, const bl_xcb_protocol_request_t *req) {
   static unsigned long long (*real)(void *, int, void *, const bl_xcb_protocol_request_t *);
-  if (!real) real = (unsigned long long (*)(void *, int, void *, const bl_xcb_protocol_request_t *))dlsym(RTLD_NEXT, "xcb_send_request64");
+  if (!real) real = (unsigned long long (*)(void *, int, void *, const bl_xcb_protocol_request_t *))bl_next_symbol("libxcb.so.1", "xcb_send_request64");
   check_extension(c, req);
   return real ? real(c, flags, vector, req) : 0;
 }
@@ -95,7 +97,7 @@ unsigned long long xcb_send_request64(void *c, int flags, void *vector, const bl
 unsigned int xcb_send_request_with_fds(void *c, int flags, void *vector, const bl_xcb_protocol_request_t *req,
                                        unsigned int num_fds, int *fds) {
   static unsigned int (*real)(void *, int, void *, const bl_xcb_protocol_request_t *, unsigned int, int *);
-  if (!real) real = (unsigned int (*)(void *, int, void *, const bl_xcb_protocol_request_t *, unsigned int, int *))dlsym(RTLD_NEXT, "xcb_send_request_with_fds");
+  if (!real) real = (unsigned int (*)(void *, int, void *, const bl_xcb_protocol_request_t *, unsigned int, int *))bl_next_symbol("libxcb.so.1", "xcb_send_request_with_fds");
   check_extension(c, req);
   return real ? real(c, flags, vector, req, num_fds, fds) : 0;
 }
@@ -103,7 +105,7 @@ unsigned int xcb_send_request_with_fds(void *c, int flags, void *vector, const b
 unsigned long long xcb_send_request_with_fds64(void *c, int flags, void *vector, const bl_xcb_protocol_request_t *req,
                                                unsigned int num_fds, int *fds) {
   static unsigned long long (*real)(void *, int, void *, const bl_xcb_protocol_request_t *, unsigned int, int *);
-  if (!real) real = (unsigned long long (*)(void *, int, void *, const bl_xcb_protocol_request_t *, unsigned int, int *))dlsym(RTLD_NEXT, "xcb_send_request_with_fds64");
+  if (!real) real = (unsigned long long (*)(void *, int, void *, const bl_xcb_protocol_request_t *, unsigned int, int *))bl_next_symbol("libxcb.so.1", "xcb_send_request_with_fds64");
   check_extension(c, req);
   return real ? real(c, flags, vector, req, num_fds, fds) : 0;
 }

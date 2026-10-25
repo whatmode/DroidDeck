@@ -35,6 +35,7 @@ echo "== mesa $(pacman -Q mesa), $(pacman -Q xorg-xwayland)"
 OUT=/tmp/glx; mkdir -p $OUT
 gcc -O2 -Wall -o $OUT/glxcheck tools/tests/glx/glxcheck.c -lGL -lX11 || exit 1
 printf '#include <stdlib.h>\nint main(void) { exit(1); }\n' > $OUT/steam.c && gcc -o $OUT/steam $OUT/steam.c || exit 1
+gcc -O2 -Wall -o $OUT/xcblocal tools/tests/glx/xcblocal.c -ldl || exit 1
 mkdir -p $OUT/audit3 && gcc -O2 -Wall -o $OUT/audit3/steam tools/tests/glx/audittrace.c -ldl || exit 1
 mkdir -p $OUT/audit2 && gcc -O2 -Wall -o $OUT/audit2/steam tools/tests/glx/auditkopper.c -ldl || exit 1
 mkdir -p $OUT/audit && gcc -O2 -Wall -o $OUT/audit/steam tools/tests/glx/auditcheck.c -ldl || exit 1
@@ -73,6 +74,12 @@ run_cases() {
   BL_STEAM_GLX_REPORT=1 LD_PRELOAD=$OUT/libblsession.so $OUT/steam > $OUT/log 2>&1
   grep "glxreport" $OUT/log | grep -v " env \| loaded " | head -12
   if grep -q "glXChooseVisual(rgba): visual" $OUT/log; then echo "PASS $1: report"; else echo "FAIL $1: report"; fails=$((fails+1)); fi
+  # X libraries opened RTLD_LOCAL (as Steam's client does) under the session preload: its xcb
+  # wrappers must pass requests on (they used to send nothing, so GLX found no GLX).
+  echo "---- $1: xcb requests with the X libraries opened locally, session preload (expect replies)"
+  BL_XCB_TRACE=1 LD_PRELOAD=$OUT/libblsession.so $OUT/xcblocal > $OUT/log 2>&1; rc=$?
+  cat $OUT/log | head -5
+  if [ $rc = 0 ]; then echo "PASS $1: xcb local"; else echo "FAIL $1: xcb local (rc $rc)"; fails=$((fails+1)); fi
   # The preload as an audit library (glxaudit.c): Steam's own call seen and rescued.
   for how in "dlsym 0" "gpa 0" "dlsym 3"; do
     echo "---- $1: audited 'steam', lookup $how (expect rescued)"
@@ -130,8 +137,9 @@ if [ -n "$zip" ] && pacman -S --noconfirm --needed unzip >/dev/null 2>&1 && unzi
   echo "== driver GL env: ${genv[*]}"
   echo "---- driver GL, GLX version asked over Xlib (the fallback for a display whose xcb side fails)"
   DISPLAY=:8 env "${genv[@]}" DROIDDECK_GLX_FORCE_XLIB_VERSION=1 timeout 60 $OUT/glxcheck > $OUT/log 2>&1; rc=$?
-  grep -E "droiddeck glx|RESULT" $OUT/log | head -8
-  if [ $rc = 0 ] && grep -q "QueryVersion over Xlib: reply, 1.4" $OUT/log; then echo "PASS driver GL Xlib version"; else echo "FAIL driver GL Xlib version (rc $rc)"; tail -10 $OUT/log; fails=$((fails+1)); fi
+  grep -E "droiddeck glx|RESULT" $OUT/log | head -30
+  if [ $rc = 0 ] && grep -q "QueryVersion over Xlib: reply, 1.4" $OUT/log && grep -q "GetInputFocus): reply" $OUT/log \
+     && grep -q "xcb_query_extension_reply comes from .*libxcb" $OUT/log; then echo "PASS driver GL Xlib version"; else echo "FAIL driver GL Xlib version (rc $rc)"; tail -10 $OUT/log; fails=$((fails+1)); fi
   for d in :7 :8; do
     echo "---- driver GL on $d (expect ok, GL from the driver's Mesa, set-up lines)"
     DISPLAY=$d env "${genv[@]}" timeout 60 $OUT/glxcheck > $OUT/log 2>&1; rc=$?

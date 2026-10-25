@@ -41,8 +41,10 @@ static int is_kgsl(int fd) {
   return kgsl_state > 0 && fstat(fd, &st) == 0 && S_ISCHR(st.st_mode) && st.st_rdev == kgsl_dev;
 }
 
+void *bl_next_symbol(const char *library, const char *name) __attribute__((visibility("hidden")));
+
 static void *real(const char *name) {
-  void *fn = dlsym(RTLD_NEXT, name);
+  void *fn = bl_next_symbol("libdrm.so.2", name);
   if (!fn) {
     errno = ENOSYS;
   }
