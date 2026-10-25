@@ -1,0 +1,234 @@
+diff -ru a/src/gallium/drivers/zink/zink_kopper.c b/src/gallium/drivers/zink/zink_kopper.c
+--- a/src/gallium/drivers/zink/zink_kopper.c
++++ b/src/gallium/drivers/zink/zink_kopper.c
+@@ -946,6 +946,61 @@
+    res->obj->dt_idx = UINT32_MAX;
+ }
+ 
++/* droiddeck: a frame for a window X does not show (unmapped, or covered by a child window).
++ * Under gamescope every present hands the window's toplevel to this swapchain, so a hidden
++ * child (Chromium/ANGLE make them inside Steam's window) presenting there took the toplevel
++ * from the window really drawn: both swapchains retired each other and the UI flashed.
++ * The frame's work is submitted as usual; its present semaphore is waited here instead of
++ * by a present, and the image stays acquired for the next frame. */
++void
++zink_kopper_discard(struct pipe_screen *pscreen, struct pipe_context *pctx, struct pipe_resource *pres)
++{
++   struct zink_screen *screen = zink_screen(pscreen);
++   struct zink_resource *res = zink_resource(pres);
++
++   if (!zink_is_swapchain(res) || !res->obj->dt)
++      return;
++   struct zink_context *ctx = zink_tc_context_unwrap(pctx);
++   if (!zink_kopper_acquired(res->obj->dt, res->obj->dt_idx))
++      return;
++   if (ctx->swapchain || ctx->needs_present) {
++      ctx->bs->has_work = true;
++      pctx->flush(pctx, NULL, PIPE_FLUSH_END_OF_FRAME);
++      if (ctx->last_batch_state && screen->threaded_submit) {
++         struct zink_batch_state *bs = ctx->last_batch_state;
++         util_queue_fence_wait(&bs->flush_completed);
++      }
++   }
++   if (!res->obj->present)
++      return;
++   if (screen->threaded_submit)
++      util_queue_finish(&screen->flush_queue);
++
++   VkFenceCreateInfo fci = {0};
++   fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
++   VkFence fence = VK_NULL_HANDLE;
++   if (VKSCR(CreateFence)(screen->dev, &fci, NULL, &fence) != VK_SUCCESS)
++      return;
++   VkSubmitInfo si = {0};
++   si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
++   si.waitSemaphoreCount = 1;
++   si.pWaitSemaphores = &res->obj->present;
++   VkPipelineStageFlags stages = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
++   si.pWaitDstStageMask = &stages;
++   simple_mtx_lock(&screen->queue_lock);
++   VkResult error = VKSCR(QueueSubmit)(screen->queue, 1, &si, fence);
++   simple_mtx_unlock(&screen->queue_lock);
++   if (error == VK_SUCCESS)
++      VKSCR(WaitForFences)(screen->dev, 1, &fence, VK_TRUE, UINT64_MAX);
++   VKSCR(DestroyFence)(screen->dev, fence, NULL);
++   if (error != VK_SUCCESS) {
++      zink_screen_handle_vkresult(screen, error);
++      return;
++   }
++   VKSCR(DestroySemaphore)(screen->dev, res->obj->present, NULL);
++   res->obj->present = VK_NULL_HANDLE;
++}
++
+ void
+ zink_kopper_update_last_written(struct zink_resource *res)
+ {
+diff -ru a/src/gallium/drivers/zink/zink_kopper.h b/src/gallium/drivers/zink/zink_kopper.h
+--- a/src/gallium/drivers/zink/zink_kopper.h
++++ b/src/gallium/drivers/zink/zink_kopper.h
+@@ -190,6 +190,8 @@
+ zink_kopper_prune_batch_usage(struct kopper_displaytarget *cdt, const struct zink_batch_usage *u);
+ void
+ zink_kopper_set_readback_needs_update(struct zink_resource *res);
++void
++zink_kopper_discard(struct pipe_screen *pscreen, struct pipe_context *pctx, struct pipe_resource *pres);
+ 
+ #ifdef __cplusplus
+ }
+diff -ru a/src/gallium/frontends/dri/dri_drawable.h b/src/gallium/frontends/dri/dri_drawable.h
+--- a/src/gallium/frontends/dri/dri_drawable.h
++++ b/src/gallium/frontends/dri/dri_drawable.h
+@@ -99,6 +99,10 @@
+    bool window_valid;
+ #ifdef VK_USE_PLATFORM_XCB_KHR
+    xcb_special_event_t *special_event;
++   /* droiddeck: frames of a window X does not show are not presented (kopper.c) */
++   int64_t droiddeck_vis_time;
++   bool droiddeck_hidden;
++   bool droiddeck_vis_logged;
+ #endif
+ 
+    /* hooks filled in by dri2 & drisw */
+diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper.c
+--- a/src/gallium/frontends/dri/kopper.c
++++ b/src/gallium/frontends/dri/kopper.c
+@@ -29,6 +29,7 @@
+ #include "util/u_inlines.h"
+ #include "util/box.h"
+ #include "util/log.h"
++#include "util/os_time.h"
+ #include "pipe/p_context.h"
+ #include "pipe-loader/pipe_loader.h"
+ #include "state_tracker/st_context.h"
+@@ -593,6 +594,118 @@
+ #endif
+ }
+ 
++/* droiddeck: windows this process presented to lately (xid, time), so a covering child
++ * counts only when GL really draws it: a child X paints nothing into (no background)
++ * leaves its parent visible. */
++static struct { uint32_t win; int64_t time; } droiddeck_presented[64];
++static simple_mtx_t droiddeck_presented_lock = SIMPLE_MTX_INITIALIZER;
++
++static void
++droiddeck_note_present(uint32_t win, int64_t now)
++{
++   simple_mtx_lock(&droiddeck_presented_lock);
++   unsigned oldest = 0;
++   for (unsigned i = 0; i < ARRAY_SIZE(droiddeck_presented); i++) {
++      if (droiddeck_presented[i].win == win) { oldest = i; break; }
++      if (droiddeck_presented[i].time < droiddeck_presented[oldest].time) oldest = i;
++   }
++   droiddeck_presented[oldest].win = win;
++   droiddeck_presented[oldest].time = now;
++   simple_mtx_unlock(&droiddeck_presented_lock);
++}
++
++static bool
++droiddeck_drawn_lately(uint32_t win, int64_t now)
++{
++   bool drawn = false;
++   simple_mtx_lock(&droiddeck_presented_lock);
++   for (unsigned i = 0; i < ARRAY_SIZE(droiddeck_presented); i++)
++      if (droiddeck_presented[i].win == win && now - droiddeck_presented[i].time < 1000000000ll)
++         drawn = true;
++   simple_mtx_unlock(&droiddeck_presented_lock);
++   return drawn;
++}
++
++/* droiddeck: whether X shows this window at all. A frame for a window it does not show
++ * (unmapped, an unmapped ancestor, or a mapped child covering it whole) is not presented:
++ * under gamescope a present takes over the window's toplevel (zink_kopper_discard).
++ * Checked at most every 50 ms; DROIDDECK_KOPPER_SKIP_HIDDEN=0 turns it off. */
++static bool
++droiddeck_window_hidden(struct dri_drawable *drawable)
++{
++#ifdef VK_USE_PLATFORM_XCB_KHR
++   static int enabled = -1;
++   if (enabled < 0) {
++      const char *e = getenv("DROIDDECK_KOPPER_SKIP_HIDDEN");
++      enabled = !(e && e[0] == '0');
++   }
++   if (!enabled || !drawable->is_window ||
++       drawable->info.bos.sType != VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR)
++      return false;
++   int64_t now = os_time_get_nano();
++   if (drawable->droiddeck_vis_time && now - drawable->droiddeck_vis_time < 50000000ll) {
++      if (!drawable->droiddeck_hidden)
++         droiddeck_note_present(((VkXcbSurfaceCreateInfoKHR *)&drawable->info.bos)->window, now);
++      return drawable->droiddeck_hidden;
++   }
++   drawable->droiddeck_vis_time = now;
++
++   VkXcbSurfaceCreateInfoKHR *xcb = (VkXcbSurfaceCreateInfoKHR *)&drawable->info.bos;
++   xcb_connection_t *conn = xcb->connection;
++   xcb_window_t win = xcb->window;
++   xcb_get_window_attributes_cookie_t ac = xcb_get_window_attributes(conn, win);
++   xcb_get_geometry_cookie_t gc = xcb_get_geometry(conn, win);
++   xcb_query_tree_cookie_t tc = xcb_query_tree(conn, win);
++   xcb_get_window_attributes_reply_t *attr = xcb_get_window_attributes_reply(conn, ac, NULL);
++   xcb_get_geometry_reply_t *geom = xcb_get_geometry_reply(conn, gc, NULL);
++   xcb_query_tree_reply_t *tree = xcb_query_tree_reply(conn, tc, NULL);
++   bool hidden = false;
++   char why[96] = "";
++   if (attr && attr->map_state != XCB_MAP_STATE_VIEWABLE) {
++      hidden = true;
++      snprintf(why, sizeof(why), "%s", attr->map_state == XCB_MAP_STATE_UNMAPPED ? "unmapped" : "inside an unmapped window");
++   } else if (attr && geom && tree) {
++      int n = xcb_query_tree_children_length(tree);
++      xcb_window_t *kids = xcb_query_tree_children(tree);
++      for (int i = n - 1; i >= 0 && !hidden; i--) {
++         xcb_get_window_attributes_cookie_t kac = xcb_get_window_attributes(conn, kids[i]);
++         xcb_get_geometry_cookie_t kgc = xcb_get_geometry(conn, kids[i]);
++         xcb_get_window_attributes_reply_t *ka = xcb_get_window_attributes_reply(conn, kac, NULL);
++         xcb_get_geometry_reply_t *kg = xcb_get_geometry_reply(conn, kgc, NULL);
++         if (ka && kg && ka->map_state == XCB_MAP_STATE_VIEWABLE && ka->_class == XCB_WINDOW_CLASS_INPUT_OUTPUT &&
++             droiddeck_drawn_lately(kids[i], now) &&
++             kg->x <= 0 && kg->y <= 0 &&
++             kg->x + kg->width + 2 * kg->border_width >= geom->width &&
++             kg->y + kg->height + 2 * kg->border_width >= geom->height) {
++            hidden = true;
++            snprintf(why, sizeof(why), "covered by its child 0x%x", kids[i]);
++         }
++         free(ka);
++         free(kg);
++      }
++   }
++   if (hidden != drawable->droiddeck_hidden || !drawable->droiddeck_vis_logged) {
++      static unsigned notes;
++      if (++notes <= 60 || notes % 500 == 0)
++         fprintf(stderr, "droiddeck kopper: window 0x%x (%ux%u, parent 0x%x, %d children) %s%s\n", win,
++                 geom ? geom->width : 0, geom ? geom->height : 0, tree ? tree->parent : 0,
++                 tree ? xcb_query_tree_children_length(tree) : -1,
++                 hidden ? "not shown by X, frames not presented: " : "shown",
++                 hidden ? why : "");
++      drawable->droiddeck_vis_logged = true;
++   }
++   free(attr);
++   free(geom);
++   free(tree);
++   drawable->droiddeck_hidden = hidden;
++   if (!hidden)
++      droiddeck_note_present(win, now);
++   return hidden;
++#else
++   return false;
++#endif
++}
++
+ int64_t
+ kopperSwapBuffersWithDamage(struct dri_drawable *drawable, uint32_t flush_flags, int nrects, const int *rects)
+ {
+@@ -632,6 +745,12 @@
+       }
+    }
+ 
++   if (droiddeck_window_hidden(drawable)) {
++      zink_kopper_discard(drawable->screen->base.screen, ctx->st->pipe, ptex);
++      drawable->lastStamp++;
++      p_atomic_inc(&drawable->base.stamp);
++      return 0;
++   }
+    kopper_copy_to_front(ctx->st->pipe, drawable, ptex, nrects, stack_boxes);
+    if (drawable->is_window && !zink_kopper_check(ptex))
+       return -1;
