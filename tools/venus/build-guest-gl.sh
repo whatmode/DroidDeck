@@ -64,6 +64,9 @@ BL_DRIVER_GL=@GL@
 # Steam's web UI draws on the GPU through ANGLE on this GL (the session's automatic rotation
 # had moved on to the CPU after earlier failures of this path).
 BL_MALI_CEF=gl
+# Swap interval changes keep the window's present mode instead of making a new swapchain
+# (gamescope paces frames itself; each new swapchain showed as a flash in Steam's UI).
+DROIDDECK_KOPPER_KEEP_PRESENT_MODE=1
 ENV
 echo "== GL part:"; ls -la "$D"
 for f in "$D"/libGLX_droiddeck.so.0 "$D"/libEGL_droiddeck.so.0; do
