@@ -1,7 +1,7 @@
 diff -ru a/src/glx/glxext.c b/src/glx/glxext.c
 --- a/src/glx/glxext.c
 +++ b/src/glx/glxext.c
-@@ -80,6 +80,58 @@
+@@ -80,6 +80,73 @@
             dpy ? DisplayString(dpy) : "?", msg);
  }
  
@@ -36,14 +36,22 @@ diff -ru a/src/glx/glxext.c b/src/glx/glxext.c
 +}
 +
 +static void
-+droiddeck_install_crash_stacks(void)
++droiddeck_install_crash_stacks(bool again)
 +{
 +   static bool done;
-+   if (done)
++   if (done && !again)
 +      return;
 +   done = true;
 +   if (!debug_get_bool_option("DROIDDECK_GLX_CRASH_STACKS", true))
 +      return;
++   /* again: the program put its own handlers in since (Steam's crash reporter); ours goes in
++    * front, chaining to them, for the shutdown that follows */
++   if (again) {
++      struct sigaction cur;
++      if (sigaction(SIGABRT, NULL, &cur) == 0 && (cur.sa_flags & SA_SIGINFO) && cur.sa_sigaction == droiddeck_crash)
++         return;
++      fprintf(stderr, "droiddeck glx[%d]: crash stacks set up again at shutdown\n", (int)getpid());
++   }
 +   void *warm[2];
 +   backtrace(warm, 2); /* loads the unwinder now, not inside the handler */
 +   int sigs[] = { SIGSEGV, SIGABRT, SIGBUS };
@@ -57,14 +65,29 @@ diff -ru a/src/glx/glxext.c b/src/glx/glxext.c
 +   }
 +}
 +
++/* and once more when the library goes away at exit */
++static void __attribute__((destructor))
++droiddeck_crash_stacks_at_exit(void)
++{
++   droiddeck_install_crash_stacks(true);
++}
++
  void
  glx_message(int level, const char *f, ...)
  {
-@@ -1054,6 +1106,7 @@
+@@ -318,6 +385,7 @@
+ static int
+ __glXCloseDisplay(Display * dpy, XExtCodes * codes)
+ {
++   droiddeck_install_crash_stacks(true);
+    struct glx_display *priv, **prev;
+ 
+    _XLockMutex(_Xglobal_lock);
+@@ -1054,6 +1122,7 @@
     _XUnlockMutex(_Xglobal_lock);
  
     droiddeck_glx_log(dpy, "setting up GLX (%s Xlib display)", thread_safe ? "thread-safe" : "NOT thread-safe, used anyway:");
-+   droiddeck_install_crash_stacks();
++   droiddeck_install_crash_stacks(false);
  
     dpyPriv = calloc(1, sizeof *dpyPriv);
     if (!dpyPriv)

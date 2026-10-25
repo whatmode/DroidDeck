@@ -165,7 +165,8 @@ if [ -n "$zip" ] && pacman -S --noconfirm --needed unzip >/dev/null 2>&1 && unzi
     echo "---- driver GL: a GL program crashing shows its stack ($d)"
     DISPLAY=$d env "${genv[@]}" timeout 60 $OUT/crashstack > $OUT/log 2>&1; rc=$?
     grep -E "crashstack|droiddeck glx: pid|free\(\)" $OUT/log | head -4; grep -A12 "droiddeck glx: pid" $OUT/log | tail -12 | cut -c1-150
-    if grep -q "droiddeck glx: pid .* got signal 6" $OUT/log && [ $rc != 0 ]; then
+    grep "own handler\|set up again" $OUT/log | head -2
+    if grep -q "droiddeck glx: pid .* got signal 6" $OUT/log && grep -q "own handler ran" $OUT/log && [ $rc = 3 ]; then
       echo "PASS driver GL crash stack on $d (rc $rc)"; else echo "FAIL driver GL crash stack on $d (rc $rc)"; fails=$((fails+1)); fi
     echo "---- driver GL swap interval switches on $d (expect no new swapchain for them)"
     DISPLAY=$d env "${genv[@]}" timeout 60 $OUT/swapint > $OUT/log 2>&1; rc=$?
