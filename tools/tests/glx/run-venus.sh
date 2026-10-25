@@ -31,7 +31,7 @@ sed -i "s|\"library_path\": *\"[^\"]*\"|\"library_path\": \"$OUT/libvulkan_panvk
 mkdir -p $OUT/vr && tar -xzf drv/virglrenderer-src.tar.gz -C $OUT/vr
 VR=$(dirname $(find $OUT/vr -name meson_options.txt | head -1))
 for p in tools/venus/patches/*.patch; do (cd $VR && git init -q . 2>/dev/null; git apply "$OLDPWD/$p") || echo "== server patch $(basename $p) did not apply"; done
-meson setup $OUT/vrb $VR -Dplatforms= -Dvenus=true -Drender-server=false -Dvideo=false -Dtests=false \
+meson setup $OUT/vrb $VR -Dc_std=gnu99 -Dplatforms= -Dvenus=true -Drender-server=false -Dvideo=false -Dtests=false \
   -Dfuzzer=false -Dminigbm_allocation=false -Dcheck-gl-errors=false > $OUT/vr-setup.log 2>&1 \
   && ninja -C $OUT/vrb > $OUT/vr-build.log 2>&1 || { echo "FAIL building the server"; grep -E "error|Error|undefined" $OUT/vr-build.log | head -20; tail -n 15 $OUT/vr-build.log; exit 1; }
 SERVER_BIN=$(find $OUT/vrb -name virgl_test_server -type f | head -1)
