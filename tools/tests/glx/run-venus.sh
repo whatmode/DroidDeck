@@ -133,7 +133,7 @@ glmem_case() {  # name, server env..., -- client env...
     $SERVER_BIN --venus --no-virgl --multi-clients > $OUT/server-$name.log 2>&1 &
   SERVER=$!
   for i in $(seq 1 50); do [ -S /tmp/.virgl_test ] && break; sleep 0.2; done
-  DISPLAY=:9 env "${genv[@]}" MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink LIBGL_KOPPER_DRI2=true DROIDDECK_ZINK_STATS_MS=500 "$@" timeout 120 $OUT/glmem > $OUT/glmem-$name.txt 2>&1; GLRC=$?
+  DISPLAY=:9 env "${genv[@]}" MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink LIBGL_KOPPER_DRI2=true DROIDDECK_ZINK_STATS_MS=500 DROIDDECK_VN_WAIT_STACKS_MS=500 "$@" timeout 120 $OUT/glmem > $OUT/glmem-$name.txt 2>&1; GLRC=$?
   sleep 1.2; DISPLAY=:9 env "${genv[@]}" "$@" timeout 60 $OUT/vkmem 0 > $OUT/vkmem-$name.txt 2>&1
   grep "glmem:" $OUT/glmem-$name.txt; grep "droiddeck zink: device-local" $OUT/glmem-$name.txt | head -1
   grep "vkmem: memory type" $OUT/vkmem-$name.txt | tr '\n' ';'; echo
@@ -152,6 +152,9 @@ glmem_case mali VKR_NATIVE_MEMORY=1 --
 grep "droiddeck zink \[" $OUT/glmem-mali.txt | tail -2 | cut -c1-400
 if grep "droiddeck zink \[" $OUT/glmem-mali.txt | grep -qv " 0 timed" && grep "droiddeck zink \[" $OUT/glmem-mali.txt | grep -q "render passes"; then
   echo "PASS the driver's frame stats (GPU time measured)"; else echo "FAIL the driver's frame stats"; fi
+# who waits (call stacks of fence and server-reply waits, in droiddeck_vulkan.txt)
+grep "wait stack" /tmp/steamroot/logs/droiddeck_vulkan.txt | grep glmem | tail -3 | cut -c1-400
+grep "wait stack" /tmp/steamroot/logs/droiddeck_vulkan.txt | grep glmem | grep -q "libvulkan_panvk.so+0x" && echo "PASS wait stacks with library offsets" || echo "FAIL wait stacks"
 echo "---- the same with the driver keeping the GPU's order (DROIDDECK_ZINK_PREFER_UNMAPPABLE=0: expect none)"
 glmem_case mali-order VKR_NATIVE_MEMORY=1 -- DROIDDECK_ZINK_PREFER_UNMAPPABLE=0
 [ $GLRC = 0 ] && [ "${NATIVE:-0}" = 0 ] && echo "PASS the check notices memory not taken from the native type" \

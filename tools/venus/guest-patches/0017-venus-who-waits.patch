@@ -1,0 +1,139 @@
+diff -ru a/src/virtio/vulkan/vn_common.c b/src/virtio/vulkan/vn_common.c
+--- a/src/virtio/vulkan/vn_common.c
++++ b/src/virtio/vulkan/vn_common.c
+@@ -17,6 +17,9 @@
+ #include <unistd.h>
+ 
+ #include <stdarg.h>
++#include <dlfcn.h>
++#include <execinfo.h>
++#include <inttypes.h>
+ 
+ #include "util/log.h"
+ #include "util/os_misc.h"
+@@ -295,10 +298,124 @@
+    mtx_unlock(&vn_dd_stats_mutex);
+ }
+ 
++/* droiddeck: who waits. For fence and ring waits (a program's vkWaitForFences, or a call that
++ * needs the server's reply), the call stack is kept with its count and time, and the stacks
++ * that waited longest are written to droiddeck_vulkan.txt every 10 s as library+offset frames
++ * (to be symbolized against the driver's libraries). DROIDDECK_VN_WAIT_STACKS=0 turns it off.
++ */
++#define VN_DD_SITE_FRAMES 8
++#define VN_DD_SITES 48
++struct vn_dd_site {
++   void *pc[VN_DD_SITE_FRAMES];
++   int n;
++   int reason;
++   uint64_t count, ns, max;
++};
++static struct vn_dd_site vn_dd_sites[VN_DD_SITES];
++static int64_t vn_dd_sites_since;
++static unsigned vn_dd_sites_reports;
++
++static void
++vn_dd_frame_str(void *pc, char *buf, size_t size)
++{
++   Dl_info info;
++   if (dladdr(pc, &info) && info.dli_fname) {
++      const char *base = strrchr(info.dli_fname, '/');
++      snprintf(buf, size, "%s+0x%lx", base ? base + 1 : info.dli_fname,
++               (unsigned long)((uintptr_t)pc - (uintptr_t)info.dli_fbase));
++   } else {
++      snprintf(buf, size, "%p", pc);
++   }
++}
++
++static int
++vn_dd_site_cmp(const void *a, const void *b)
++{
++   const struct vn_dd_site *x = a, *y = b;
++   return x->ns < y->ns ? 1 : x->ns > y->ns ? -1 : 0;
++}
++
++static void
++vn_dd_wait_site(int reason, int64_t start, int64_t end)
++{
++   static int on = -1;
++   static int64_t interval = 10000000000ll;
++   if (on < 0) {
++      on = debug_get_bool_option("DROIDDECK_VN_WAIT_STACKS", true);
++      /* DROIDDECK_VN_WAIT_STACKS_MS: how often (tests use less than 10 s) */
++      interval = debug_get_num_option("DROIDDECK_VN_WAIT_STACKS_MS", 10000) * 1000000ll;
++   }
++   if (!on || (reason != VN_RELAX_REASON_FENCE && reason != VN_RELAX_REASON_RING_SEQNO))
++      return;
++   void *bt[VN_DD_SITE_FRAMES + 2];
++   int n = backtrace(bt, VN_DD_SITE_FRAMES + 2);
++   /* skip this function and vn_relax_fini */
++   n = n > 2 ? n - 2 : 0;
++   void **pc = bt + 2;
++   const uint64_t d = end - start;
++
++   struct vn_dd_site report[VN_DD_SITES];
++   int report_n = 0;
++   double secs = 0;
++   mtx_lock(&vn_dd_stats_mutex);
++   struct vn_dd_site *site = NULL;
++   for (int i = 0; i < VN_DD_SITES; i++) {
++      struct vn_dd_site *s = &vn_dd_sites[i];
++      if (!s->count) {
++         site = s;
++         s->n = n;
++         s->reason = reason;
++         memcpy(s->pc, pc, n * sizeof(void *));
++         break;
++      }
++      if (s->reason == reason && s->n == n && !memcmp(s->pc, pc, n * sizeof(void *))) {
++         site = s;
++         break;
++      }
++   }
++   if (site) {
++      site->count++;
++      site->ns += d;
++      if (d > site->max)
++         site->max = d;
++   }
++   if (!vn_dd_sites_since)
++      vn_dd_sites_since = start;
++   if (end - vn_dd_sites_since >= interval) {
++      secs = (end - vn_dd_sites_since) / 1e9;
++      for (int i = 0; i < VN_DD_SITES && vn_dd_sites[i].count; i++)
++         report[report_n++] = vn_dd_sites[i];
++      memset(vn_dd_sites, 0, sizeof(vn_dd_sites));
++      vn_dd_sites_since = end;
++      if (++vn_dd_sites_reports > 60)
++         report_n = 0;
++   }
++   mtx_unlock(&vn_dd_stats_mutex);
++
++   if (!report_n)
++      return;
++   qsort(report, report_n, sizeof(report[0]), vn_dd_site_cmp);
++   for (int i = 0; i < report_n && i < 6; i++) {
++      char line[1024];
++      int len = snprintf(line, sizeof(line), "wait stack %d over %.0f s: %s %" PRIu64 "x %.1f ms (max %.1f):",
++                         i + 1, secs, report[i].reason == VN_RELAX_REASON_FENCE ? "fence" : "ring",
++                         report[i].count, report[i].ns / 1e6, report[i].max / 1e6);
++      for (int f = 0; f < report[i].n && len < (int)sizeof(line) - 64; f++) {
++         char frame[160];
++         vn_dd_frame_str(report[i].pc[f], frame, sizeof(frame));
++         len += snprintf(line + len, sizeof(line) - len, " %s", frame);
++      }
++      vn_droiddeck_log("%s", line);
++   }
++}
++
+ void
+ vn_relax_fini(struct vn_relax_state *state)
+ {
+-   vn_dd_wait_stats(state->reason, state->reason_str, state->start_ns, os_time_get_nano());
++   const int64_t dd_end = os_time_get_nano();
++   /* the stats first: they set up the lock both use */
++   vn_dd_wait_stats(state->reason, state->reason_str, state->start_ns, dd_end);
++   vn_dd_wait_site(state->reason, state->start_ns, dd_end);
+    vn_watchdog_release(&state->instance->ring.watchdog);
+ }
+ 
