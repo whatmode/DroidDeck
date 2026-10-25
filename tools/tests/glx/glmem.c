@@ -76,7 +76,7 @@ int main(void) {
     glReadPixels(128, 128, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, c);
     checked++;
     if (c[0] > 1 || c[1] < 253 || c[2] < 254) bad++;
-    glXSwapBuffers(dpy, win);
+    glFlush();
     delfb(1, &fb);
     glDeleteTextures(8, tex);
     usleep(50000);
