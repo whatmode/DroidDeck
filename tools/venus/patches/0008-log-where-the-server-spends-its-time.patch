@@ -1,0 +1,98 @@
+diff -ru a/src/venus/vkr_ring.c b/src/venus/vkr_ring.c
+--- a/src/venus/vkr_ring.c
++++ b/src/venus/vkr_ring.c
+@@ -6,6 +6,8 @@
+ #include "vkr_ring.h"
+ 
+ #include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
+ #include <sys/resource.h>
+ #include <time.h>
+ 
+@@ -205,6 +207,59 @@
+    clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, NULL);
+ }
+ 
++/* DroidDeck: where the bridge's server spends its time, per ring, every 10 s in the server's
++ * log: busy time and the commands that took it (count, total, longest). Steam's UI waited on
++ * the GPU for a large part of each frame; this says whether it is the server itself (decoding,
++ * driver calls such as memory allocation) or the GPU behind it. */
++#define VKR_DD_TYPES 512
++struct vkr_dd_stats {
++   int64_t since, busy;
++   uint32_t count[VKR_DD_TYPES];
++   int64_t total[VKR_DD_TYPES], longest[VKR_DD_TYPES];
++   unsigned reports;
++};
++
++static int64_t
++vkr_dd_now(void)
++{
++   struct timespec ts;
++   clock_gettime(CLOCK_MONOTONIC, &ts);
++   return (int64_t)ts.tv_sec * 1000000000ll + ts.tv_nsec;
++}
++
++static void
++vkr_dd_report(struct vkr_ring *ring, struct vkr_dd_stats *st, int64_t now)
++{
++   if (!st->since) {
++      st->since = now;
++      return;
++   }
++   if (now - st->since < 10000000000ll)
++      return;
++   char line[900];
++   int len = snprintf(line, sizeof(line), "droiddeck: ring %llu busy %.0f ms of %.0f s:",
++                      (unsigned long long)ring->id, st->busy / 1e6, (now - st->since) / 1e9);
++   for (int k = 0; k < 10; k++) {
++      int best = -1;
++      for (int i = 0; i < VKR_DD_TYPES; i++)
++         if (st->count[i] && (best < 0 || st->total[i] > st->total[best]))
++            best = i;
++      if (best < 0 || len >= (int)sizeof(line) - 80)
++         break;
++      len += snprintf(line + len, sizeof(line) - len, " %s %ux %.1f ms (max %.1f);",
++                      vn_dispatch_command_name((VkCommandTypeEXT)best), st->count[best],
++                      st->total[best] / 1e6, st->longest[best] / 1e6);
++      st->count[best] = 0;
++   }
++   if (st->busy > 0 && ++st->reports <= 360)
++      vkr_log("%s", line);
++   memset(st->count, 0, sizeof(st->count));
++   memset(st->total, 0, sizeof(st->total));
++   memset(st->longest, 0, sizeof(st->longest));
++   st->busy = 0;
++   st->since = now;
++}
++
+ static bool
+ vkr_ring_submit_cmd(struct vkr_ring *ring,
+                     const uint8_t *buffer,
+@@ -219,8 +274,25 @@
+ 
+    vkr_cs_decoder_set_buffer_stream(dec, buffer, size);
+ 
++   static __thread struct vkr_dd_stats *dd_stats;
++   if (!dd_stats)
++      dd_stats = calloc(1, sizeof(*dd_stats));
++
+    while (vkr_cs_decoder_has_command(dec)) {
++      uint32_t dd_type = (dec->end - dec->cur >= 4) ? *(const uint32_t *)dec->cur : 0;
++      int64_t dd_t0 = dd_stats ? vkr_dd_now() : 0;
+       vn_dispatch_command(&ring->dispatch);
++      if (dd_stats) {
++         int64_t dd_t1 = vkr_dd_now(), d = dd_t1 - dd_t0;
++         if (dd_type < VKR_DD_TYPES) {
++            dd_stats->count[dd_type]++;
++            dd_stats->total[dd_type] += d;
++            if (d > dd_stats->longest[dd_type])
++               dd_stats->longest[dd_type] = d;
++         }
++         dd_stats->busy += d;
++         vkr_dd_report(ring, dd_stats, dd_t1);
++      }
+       if (vkr_cs_decoder_get_fatal(dec)) {
+          vkr_log("ring_submit_cmd: vn_dispatch_command failed");
+ 
