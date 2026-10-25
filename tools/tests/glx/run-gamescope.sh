@@ -48,7 +48,7 @@ echo "== driver GL env: ${genv[*]}"
 # The gputype layer only for the GL app (gamescope itself runs on lavapipe as it is).
 run_gs() {
   env "${genv[@]}" timeout 120 "$1" --backend headless -W 1600 -H 720 -w 1600 -h 720 -r 60 ${GS_EXTRA:-} -- \
-    env VK_LAYER_PATH=$OUT/layers VK_INSTANCE_LAYERS=VK_LAYER_DROIDDECK_gputype $OUT/retire 4 > $OUT/log 2>&1
+    env VK_LAYER_PATH=$OUT/layers VK_INSTANCE_LAYERS=VK_LAYER_DROIDDECK_gputype $OUT/retire 4 ${RETIRE_MODE:-popups} > $OUT/log 2>&1
   echo "== $1 exit $?"
 }
 run_gs $GS
@@ -58,6 +58,8 @@ report() {
 }
 echo "======== plain"; report
 echo "======== steam mode (-e), as the session runs it"; GS_EXTRA="-e" run_gs $GS; report
+echo "======== the same window from a second X connection"; RETIRE_MODE=twodisplays GS_EXTRA="-e" run_gs $GS; report
+echo "======== the same window from a second context"; RETIRE_MODE=twocontexts GS_EXTRA="-e" run_gs $GS; report
 if ! grep -q "retire: done" $OUT/log && [ "$GS" != /usr/bin/gamescope ]; then
   echo "== the app's gamescope did not run it; its log:"; sed 's/\x1b\[[0-9;]*m//g' $OUT/log | tail -25 | cut -c1-200
   echo "== trying Arch's gamescope"; run_gs /usr/bin/gamescope
