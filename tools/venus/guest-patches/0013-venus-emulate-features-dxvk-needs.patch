@@ -100,7 +100,7 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_emu.c b/src/virtio/vulkan/vn_droiddec
 new file mode 100644
 --- /dev/null
 +++ b/src/virtio/vulkan/vn_droiddeck_emu.c
-@@ -0,0 +1,438 @@
+@@ -0,0 +1,444 @@
 +/*
 + * DroidDeck: features DXVK needs that the GPU behind the bridge lacks (see the header).
 + * SPDX-License-Identifier: MIT
@@ -114,6 +114,7 @@ new file mode 100644
 +
 +#include "vk_util.h"
 +
++#include "vn_instance.h"
 +#include "vn_physical_device.h"
 +
 +uint32_t vn_dd_emu_global;
@@ -141,6 +142,11 @@ new file mode 100644
 +      return;
 +
 +   const bool all = mode == 2;
++   /* only for the D3D translators: GL (Zink, Steam's UI) and native Vulkan programs see the
++    * GPU as it is */
++   const char *engine = physical_dev->instance->base.vk.app_info.engine_name;
++   if (!all && !(engine && (!strncmp(engine, "DXVK", 4) || !strncmp(engine, "vkd3d", 5))))
++      return;
 +   /* robustBufferAccess2 rides on the GPU's robustness2 extension (nullDescriptor) */
 +   if ((all || !f->robustBufferAccess2) && physical_dev->base.vk.supported_extensions.EXT_robustness2 &&
 +       f->robustBufferAccess)
