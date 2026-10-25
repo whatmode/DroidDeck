@@ -1,0 +1,40 @@
+diff -ru a/src/gallium/drivers/zink/zink_screen.c b/src/gallium/drivers/zink/zink_screen.c
+--- a/src/gallium/drivers/zink/zink_screen.c
++++ b/src/gallium/drivers/zink/zink_screen.c
+@@ -3390,6 +3390,36 @@
+       }
+    }
+ 
++   /* droiddeck: device-local memory the CPU cannot map first. Over the Venus bridge on
++    * Android every host-visible allocation is a dma-heap buffer imported into the GPU driver;
++    * the server offers a device-local-only type (allocated natively by the driver) for what
++    * is never mapped, after the GPU's own types. Lazily allocated and protected types keep
++    * their place. DROIDDECK_ZINK_PREFER_UNMAPPABLE=0 keeps the GPU's order.
++    */
++   if (debug_get_bool_option("DROIDDECK_ZINK_PREFER_UNMAPPABLE", true)) {
++      const VkMemoryPropertyFlags avoid = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
++                                          VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT |
++                                          VK_MEMORY_PROPERTY_PROTECTED_BIT;
++      enum zink_heap heaps[] = {ZINK_HEAP_DEVICE_LOCAL, ZINK_HEAP_DEVICE_LOCAL_SPARSE};
++      for (unsigned h = 0; h < ARRAY_SIZE(heaps); h++) {
++         enum zink_heap i = heaps[h];
++         uint8_t sorted[VK_MAX_MEMORY_TYPES];
++         unsigned n = 0;
++         for (unsigned pass = 0; pass < 2; pass++) {
++            for (unsigned k = 0; k < screen->heap_count[i]; k++) {
++               uint8_t t = screen->heap_map[i][k];
++               bool plain = !(screen->info.mem_props.memoryTypes[t].propertyFlags & avoid);
++               if (plain == (pass == 0))
++                  sorted[n++] = t;
++            }
++         }
++         if (n && sorted[0] != screen->heap_map[i][0])
++            mesa_logi("droiddeck zink: device-local memory from type %u (not host-visible) "
++                      "before type %u", sorted[0], screen->heap_map[i][0]);
++         memcpy(screen->heap_map[i], sorted, n);
++      }
++   }
++
+    bool maybe_has_rebar = true;
+    /* iterate again to check for missing heaps */
+    for (enum zink_heap i = 0; i < ZINK_HEAP_MAX; i++) {
