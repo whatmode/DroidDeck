@@ -1,5 +1,5 @@
 diff --git a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper.c
-index 51a9ae2..75e960a 100644
+index 51a9ae2..41e4ac7 100644
 --- a/src/gallium/frontends/dri/kopper.c
 +++ b/src/gallium/frontends/dri/kopper.c
 @@ -53,10 +53,37 @@
@@ -40,14 +40,17 @@ index 51a9ae2..75e960a 100644
  
     if (!screen->kopper_loader) {
        fprintf(stderr, "mesa: Kopper interface not found!\n"
-@@ -77,12 +104,33 @@ kopper_init_screen(struct dri_screen *screen, bool driver_name_is_inferred)
+@@ -77,12 +104,36 @@ kopper_init_screen(struct dri_screen *screen, bool driver_name_is_inferred)
     success = pipe_loader_vk_probe_dri(&screen->dev);
  #endif
  
 -   if (success)
 +   if (share) {
 +      simple_mtx_lock(&droiddeck_shared_lock);
-+      if (droiddeck_shared_screen) {
++      if (droiddeck_shared_screen && success) {
++         /* pipe_loader_create_screen would also load this device's driconf options, which
++          * dri_init_screen reads next. */
++         pipe_loader_load_options(screen->dev);
 +         pscreen = droiddeck_shared_screen;
 +         droiddeck_shared_refs++;
 +         fprintf(stderr, "droiddeck kopper: X connection %u shares the Zink screen\n", droiddeck_shared_refs);
