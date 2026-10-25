@@ -1,0 +1,15 @@
+{
+  "file_format_version": "1.0.0",
+  "layer": {
+    "name": "VK_LAYER_DROIDDECK_malimem",
+    "type": "GLOBAL",
+    "library_path": "/tmp/glx/libmalimem.so",
+    "api_version": "1.4.0",
+    "implementation_version": "1",
+    "description": "Test only: the phone's (Mali) memory types on lavapipe, for the bridge server",
+    "functions": {
+      "vkGetInstanceProcAddr": "malimem_GetInstanceProcAddr",
+      "vkGetDeviceProcAddr": "malimem_GetDeviceProcAddr"
+    }
+  }
+}

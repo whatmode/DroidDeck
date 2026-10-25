@@ -27,7 +27,7 @@ index 9e466f8..08dc1ad 100644
  
  void
 diff --git a/src/venus/vkr_device_memory.c b/src/venus/vkr_device_memory.c
-index c56a45e..a4a35de 100644
+index c56a45e..6bf555b 100644
 --- a/src/venus/vkr_device_memory.c
 +++ b/src/venus/vkr_device_memory.c
 @@ -10,6 +10,8 @@
@@ -39,7 +39,7 @@ index c56a45e..a4a35de 100644
  static bool
  vkr_get_fd_info_from_resource_info(struct vkr_context *ctx,
                                     const VkImportMemoryResourceInfoMESA *res_info,
-@@ -269,6 +271,52 @@ vkr_gbm_get_fd_info_from_allocation_info(UNUSED struct vkr_physical_device *phys
+@@ -269,6 +271,58 @@ vkr_gbm_get_fd_info_from_allocation_info(UNUSED struct vkr_physical_device *phys
  
  #endif /* ENABLE_MINIGBM_ALLOCATION */
  
@@ -71,7 +71,13 @@ index c56a45e..a4a35de 100644
 +   const uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 +   if (!last_ns)
 +      last_ns = now;
-+   if (now - last_ns >= 10000000000ull) {
++   static uint64_t interval_ns;
++   if (!interval_ns) {
++      /* VKR_MEMORY_STATS_MS: how often (default 10 s; tests use less) */
++      const char *env = getenv("VKR_MEMORY_STATS_MS");
++      interval_ns = (env && atoi(env) > 0 ? (uint64_t)atoi(env) : 10000ull) * 1000000ull;
++   }
++   if (now - last_ns >= interval_ns) {
 +      char line[512];
 +      int n = snprintf(line, sizeof(line), "allocations in %.1f s:",
 +                       (double)(now - last_ns) / 1e9);
@@ -92,7 +98,7 @@ index c56a45e..a4a35de 100644
  static void
  vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
                                struct vn_command_vkAllocateMemory *args)
-@@ -279,12 +327,33 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+@@ -279,12 +333,33 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
     struct vkr_physical_device *physical_dev = dev->physical_device;
  
     VkMemoryAllocateInfo *alloc_info = (VkMemoryAllocateInfo *)args->pAllocateInfo;
@@ -127,7 +133,7 @@ index c56a45e..a4a35de 100644
     /* translate VkImportMemoryResourceInfoMESA into VkImportMemoryFdInfoKHR in place */
     VkImportMemoryFdInfoKHR local_import_info = { .fd = -1 };
     VkImportMemoryResourceInfoMESA *res_info = NULL;
-@@ -311,8 +380,6 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+@@ -311,8 +386,6 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
      * Skip forcing external if a valid VkImportMemoryResourceInfoMESA is provided, since
      * the mapping will be directly set up from the existing virgl resource.
      */
@@ -136,7 +142,7 @@ index c56a45e..a4a35de 100644
     uint32_t valid_fd_types = 0;
     int udmabuf_fd = -1;
     void *gbm_bo = NULL;
-@@ -404,6 +471,8 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+@@ -404,6 +477,8 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
     mem->gbm_bo = gbm_bo;
     mem->allocation_size = alloc_info->allocationSize;
     mem->memory_type_index = mem_type_index;
