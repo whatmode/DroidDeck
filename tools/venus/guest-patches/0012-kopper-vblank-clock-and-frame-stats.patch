@@ -1,37 +1,99 @@
+diff -ru a/src/gallium/frontends/dri/dri_drawable.c b/src/gallium/frontends/dri/dri_drawable.c
+--- a/src/gallium/frontends/dri/dri_drawable.c
++++ b/src/gallium/frontends/dri/dri_drawable.c
+@@ -458,6 +458,10 @@
+               args->drawable->textures[ST_ATTACHMENT_BACK_LEFT]);
+    }
+ 
++   if (args->drawable->droiddeck_before_present &&
++       (args->reason == __DRI2_THROTTLE_SWAPBUFFER || args->reason == __DRI2_NOTHROTTLE_SWAPBUFFER))
++      args->drawable->droiddeck_before_present(args->drawable, pipe);
++
+    pipe->flush_resource(pipe, args->drawable->textures[ST_ATTACHMENT_BACK_LEFT]);
+ }
+ 
+diff -ru a/src/gallium/frontends/dri/dri_drawable.h b/src/gallium/frontends/dri/dri_drawable.h
+--- a/src/gallium/frontends/dri/dri_drawable.h
++++ b/src/gallium/frontends/dri/dri_drawable.h
+@@ -110,6 +110,9 @@
+    unsigned droiddeck_w, droiddeck_h;
+    uint64_t droiddeck_order;
+    struct pipe_resource *droiddeck_copy; /* its latest frame, for a shared toplevel */
++   /* runs at a swap's flush after the frame's GL work, before the present layout (kopper.c) */
++   void (*droiddeck_before_present)(struct dri_drawable *drawable, struct pipe_context *pipe);
++   bool droiddeck_want_copy;
+ #endif
+ 
+    /* hooks filled in by dri2 & drisw */
 diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper.c
 --- a/src/gallium/frontends/dri/kopper.c
 +++ b/src/gallium/frontends/dri/kopper.c
-@@ -1184,9 +1184,53 @@
+@@ -965,6 +965,17 @@
+    pipe->blit(pipe, &b);
+ }
+ 
++static void
++droiddeck_before_present(struct dri_drawable *drawable, struct pipe_context *pipe)
++{
++   if (!drawable->droiddeck_want_copy)
++      return;
++   drawable->droiddeck_want_copy = false;
++   struct pipe_resource *ptex = drawable->textures[ST_ATTACHMENT_BACK_LEFT];
++   if (ptex)
++      droiddeck_copy_frame(drawable, pipe, ptex);
++}
++
+ /* true when this frame went into the toplevel's shared swapchain (the window does not present) */
+ static bool
+ droiddeck_composite(struct dri_drawable *drawable, struct pipe_context *pipe, struct pipe_resource *ptex)
+@@ -1184,9 +1195,70 @@
     return done;
  }
  
 +/* droiddeck: frame rate of this process's GL windows, every 10 s in the log (to tune Steam's
 + * UI at the panel's 120 Hz): swaps per second, the longest gap between two, and how long a
 + * swap itself took at most. */
++static __thread int64_t droiddeck_flush_ns;
++static __thread int droiddeck_kind; /* 0 presented, 1 composed, 2 hidden */
++
 +static void
 +droiddeck_frame_stats(int64_t start, int64_t end)
 +{
 +   static simple_mtx_t lock = SIMPLE_MTX_INITIALIZER;
 +   static int64_t since, last;
-+   static unsigned swaps;
-+   static int64_t gap, cost;
++   static unsigned swaps, kinds[3], slow;
++   static int64_t gap, cost, flush_max, flush_sum, rest_max, rest_sum;
 +   simple_mtx_lock(&lock);
 +   if (!since)
 +      since = start;
-+   if (last && start - last > gap)
-+      gap = start - last;
++   int k = droiddeck_kind;
++   if (k == 0 || k == 1) {
++      if (last && start - last > gap)
++         gap = start - last;
++      last = end;
++   }
 +   if (end - start > cost)
 +      cost = end - start;
-+   last = end;
++   int64_t fl = droiddeck_flush_ns, rest = end - start - droiddeck_flush_ns;
++   flush_sum += fl;
++   rest_sum += rest;
++   if (fl > flush_max) flush_max = fl;
++   if (rest > rest_max) rest_max = rest;
++   if (end - start > 8000000) slow++;
++   if (k >= 0 && k < 3) kinds[k]++;
 +   swaps++;
 +   if (end - since >= 10000000000ll) {
 +      static unsigned reports;
++      double secs = (end - since) / 1e9;
 +      if (++reports <= 60)
-+         fprintf(stderr, "droiddeck kopper: frames: %.1f swaps/s over %.0f s, longest gap %.1f ms, slowest swap %.1f ms\n",
-+                 swaps * 1e9 / (end - since), (end - since) / 1e9, gap / 1e6, cost / 1e6);
++         fprintf(stderr, "droiddeck kopper: frames over %.0f s: shown %.1f/s, composed %.1f/s, hidden %.1f/s; "
++                 "longest gap between shown %.1f ms; swap: flush avg %.2f max %.1f ms, present avg %.2f max %.1f ms, "
++                 "%u swaps over 8 ms\n", secs, kinds[0] / secs, kinds[1] / secs, kinds[2] / secs, gap / 1e6,
++                 flush_sum / 1e6 / swaps, flush_max / 1e6, rest_sum / 1e6 / swaps, rest_max / 1e6, slow);
 +      since = end;
-+      swaps = 0;
-+      gap = cost = 0;
++      swaps = slow = 0;
++      memset(kinds, 0, sizeof(kinds));
++      gap = cost = flush_max = flush_sum = rest_max = rest_sum = 0;
 +   }
 +   simple_mtx_unlock(&lock);
 +}
@@ -55,7 +117,54 @@ diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper
     struct dri_context *ctx = dri_get_current();
     struct pipe_resource *ptex;
  
-@@ -1336,6 +1380,93 @@
+@@ -1206,20 +1278,22 @@
+     */
+    _mesa_glthread_finish(ctx->st->ctx);
+ 
+-   /* droiddeck: the frame's copy, before the flush that ends it (that flush puts the image in
+-    * the present layout and signals its present): the GL commands go to the pipe first */
+-   if (drawable->is_window && drawable->info.bos.sType == VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR &&
+-       !drawable->droiddeck_hidden && drawable->droiddeck_top &&
+-       droiddeck_others_in_top(((VkXcbSurfaceCreateInfoKHR *)&drawable->info.bos)->window, drawable->droiddeck_top)) {
+-      st_context_flush(ctx->st, 0, NULL, NULL, NULL);
+-      droiddeck_copy_frame(drawable, ctx->st->pipe, ptex);
+-   }
++   /* droiddeck: the frame's copy, made inside the flush that ends the frame (after its GL work,
++    * before the image goes to the present layout): no extra submit per frame */
++   drawable->droiddeck_want_copy =
++      drawable->is_window && drawable->info.bos.sType == VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR &&
++      !drawable->droiddeck_hidden && drawable->droiddeck_top &&
++      droiddeck_others_in_top(((VkXcbSurfaceCreateInfoKHR *)&drawable->info.bos)->window, drawable->droiddeck_top);
++   drawable->droiddeck_before_present = droiddeck_before_present;
++   int64_t dd_t0 = os_time_get_nano();
+ 
+    drawable->texture_stamp = drawable->lastStamp - 1;
+ 
+    dri_flush(ctx, drawable,
+              __DRI2_FLUSH_DRAWABLE | __DRI2_FLUSH_CONTEXT | flush_flags,
+              __DRI2_THROTTLE_SWAPBUFFER);
++   droiddeck_flush_ns = os_time_get_nano() - dd_t0;
++   droiddeck_kind = 0;
+ 
+    struct pipe_box stack_boxes[64];
+    if (nrects > ARRAY_SIZE(stack_boxes))
+@@ -1237,6 +1311,7 @@
+       droiddeck_group_leave(((VkXcbSurfaceCreateInfoKHR *)&drawable->info.bos)->window);
+    if (!dd_hidden && droiddeck_composite(drawable, ctx->st->pipe, ptex)) {
+       /* its frame went into the toplevel's shared swapchain */
++      droiddeck_kind = 1;
+       zink_kopper_discard(drawable->screen->base.screen, ctx->st->pipe, ptex);
+       drawable->droiddeck_discarding = true;
+       drawable->lastStamp++;
+@@ -1244,6 +1319,7 @@
+       return 0;
+    }
+    if (dd_hidden) {
++      droiddeck_kind = 2;
+       zink_kopper_discard(drawable->screen->base.screen, ctx->st->pipe, ptex);
+       drawable->droiddeck_discarding = true;
+       drawable->lastStamp++;
+@@ -1336,6 +1412,93 @@
     *height = drawable->h;
  }
  
@@ -149,7 +258,7 @@ diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper
  int
  kopperGetSyncValues(struct dri_drawable *drawable, int64_t target_msc, int64_t divisor,
                      int64_t remainder, int64_t *ust, int64_t *msc, int64_t *sbc)
-@@ -1348,6 +1479,9 @@
+@@ -1348,6 +1511,9 @@
     VkXcbSurfaceCreateInfoKHR *xcb = (VkXcbSurfaceCreateInfoKHR *)&info->bos;
     xcb_connection_t *conn = xcb->connection;
  
