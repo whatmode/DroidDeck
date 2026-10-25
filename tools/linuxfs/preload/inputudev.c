@@ -166,7 +166,11 @@ static struct pad *pad_for_syslink(const char *path) {
   return NULL;
 }
 
-static void *next_symbol(const char *name) { return dlsym(RTLD_NEXT, name); }
+void *bl_next_symbol(const char *library, const char *name) __attribute__((visibility("hidden")));
+/* libc's realpath is always global; the udev functions may come from a libudev opened locally. */
+static void *next_symbol(const char *name) {
+  return bl_next_symbol(strncmp(name, "udev_", 5) ? NULL : "libudev.so.1", name);
+}
 
 char *bl_cached_realpath(const char *path, char *resolved, char *(*real)(const char *, char *))
     __attribute__((visibility("hidden")));
