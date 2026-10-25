@@ -1,0 +1,161 @@
+diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper.c
+--- a/src/gallium/frontends/dri/kopper.c
++++ b/src/gallium/frontends/dri/kopper.c
+@@ -1184,9 +1184,53 @@
+    return done;
+ }
+ 
++/* droiddeck: frame rate of this process's GL windows, every 10 s in the log (to tune Steam's
++ * UI at the panel's 120 Hz): swaps per second, the longest gap between two, and how long a
++ * swap itself took at most. */
++static void
++droiddeck_frame_stats(int64_t start, int64_t end)
++{
++   static simple_mtx_t lock = SIMPLE_MTX_INITIALIZER;
++   static int64_t since, last;
++   static unsigned swaps;
++   static int64_t gap, cost;
++   simple_mtx_lock(&lock);
++   if (!since)
++      since = start;
++   if (last && start - last > gap)
++      gap = start - last;
++   if (end - start > cost)
++      cost = end - start;
++   last = end;
++   swaps++;
++   if (end - since >= 10000000000ll) {
++      static unsigned reports;
++      if (++reports <= 60)
++         fprintf(stderr, "droiddeck kopper: frames: %.1f swaps/s over %.0f s, longest gap %.1f ms, slowest swap %.1f ms\n",
++                 swaps * 1e9 / (end - since), (end - since) / 1e9, gap / 1e6, cost / 1e6);
++      since = end;
++      swaps = 0;
++      gap = cost = 0;
++   }
++   simple_mtx_unlock(&lock);
++}
++
++static int64_t
++droiddeck_swap(struct dri_drawable *drawable, uint32_t flush_flags, int nrects, const int *rects);
++
+ int64_t
+ kopperSwapBuffersWithDamage(struct dri_drawable *drawable, uint32_t flush_flags, int nrects, const int *rects)
+ {
++   int64_t t0 = os_time_get_nano();
++   int64_t ret = droiddeck_swap(drawable, flush_flags, nrects, rects);
++   if (drawable->is_window)
++      droiddeck_frame_stats(t0, os_time_get_nano());
++   return ret;
++}
++
++static int64_t
++droiddeck_swap(struct dri_drawable *drawable, uint32_t flush_flags, int nrects, const int *rects)
++{
+    struct dri_context *ctx = dri_get_current();
+    struct pipe_resource *ptex;
+ 
+@@ -1336,6 +1380,93 @@
+    *height = drawable->h;
+ }
+ 
++/* droiddeck: vblank counts and times for GLX_OML_sync_control / GLX_SGI_video_sync from a
++ * clock at the X screen's refresh. Under gamescope a GL window presents straight to it, so
++ * Xwayland never shows it and its Present vblank events come from an idle timer (about once
++ * a second): glXGetSyncValuesOML blocked Chromium's GPU thread and its frame clock (Steam's
++ * UI) had no vsync to follow. Refresh from RandR (Xwayland's mode is gamescope's rate),
++ * looked at every 2 s; DROIDDECK_GLX_REFRESH=<Hz> sets it, DROIDDECK_GLX_REAL_MSC=1 keeps
++ * the X server's counts. */
++#include <dlfcn.h>
++struct droiddeck_randr_info_reply { uint8_t response_type, set_of_rotations; uint16_t sequence; uint32_t length;
++                                    uint32_t root, timestamp, config_timestamp; uint16_t n_sizes, size_id, rotation, rate; };
++typedef struct { unsigned int sequence; } droiddeck_randr_cookie;
++
++static unsigned
++droiddeck_refresh_hz(xcb_connection_t *conn, xcb_window_t win)
++{
++   static int fixed = -1;
++   if (fixed < 0) {
++      const char *e = getenv("DROIDDECK_GLX_REFRESH");
++      fixed = e ? atoi(e) : 0;
++   }
++   if (fixed > 0)
++      return fixed;
++   static simple_mtx_t lock = SIMPLE_MTX_INITIALIZER;
++   static unsigned hz;
++   static int64_t checked;
++   static droiddeck_randr_cookie (*get_info)(xcb_connection_t *, xcb_window_t);
++   static struct droiddeck_randr_info_reply *(*get_info_reply)(xcb_connection_t *, droiddeck_randr_cookie, void **);
++   static bool tried;
++   int64_t now = os_time_get_nano();
++   simple_mtx_lock(&lock);
++   if (!tried) {
++      tried = true;
++      void *lib = dlopen("libxcb-randr.so.0", RTLD_NOW | RTLD_LOCAL);
++      if (lib) {
++         get_info = (droiddeck_randr_cookie (*)(xcb_connection_t *, xcb_window_t))dlsym(lib, "xcb_randr_get_screen_info");
++         get_info_reply = (struct droiddeck_randr_info_reply *(*)(xcb_connection_t *, droiddeck_randr_cookie, void **))
++            dlsym(lib, "xcb_randr_get_screen_info_reply");
++      }
++   }
++   if ((!hz || now - checked > 2000000000ll) && get_info && get_info_reply) {
++      checked = now;
++      unsigned old = hz;
++      struct droiddeck_randr_info_reply *r = get_info_reply(conn, get_info(conn, win), NULL);
++      if (r && r->rate >= 24 && r->rate <= 360)
++         hz = r->rate;
++      free(r);
++      if (hz != old)
++         fprintf(stderr, "droiddeck kopper: vblank clock at %u Hz (the X screen's refresh)\n", hz);
++   }
++   unsigned out = hz ? hz : 60;
++   simple_mtx_unlock(&lock);
++   return out;
++}
++
++static bool
++droiddeck_sync_values(struct dri_drawable *drawable, xcb_connection_t *conn, int64_t target_msc,
++                      int64_t divisor, int64_t remainder, int64_t *ust, int64_t *msc, int64_t *sbc)
++{
++   static int real = -1;
++   if (real < 0)
++      real = debug_get_bool_option("DROIDDECK_GLX_REAL_MSC", false);
++   if (real)
++      return false;
++   uint32_t win = ((VkXcbSurfaceCreateInfoKHR *)&drawable->info.bos)->window;
++   int64_t period = 1000000ll / droiddeck_refresh_hz(conn, win); /* microseconds */
++   int64_t now = os_time_get_nano() / 1000;
++   int64_t cur = now / period;
++   int64_t want = cur;
++   if (target_msc > cur)
++      want = target_msc;
++   else if (divisor > 0) {
++      want = cur - cur % divisor + remainder;
++      if (want <= cur)
++         want += divisor;
++   }
++   if (want > cur) {
++      int64_t wait = want * period - now;
++      if (wait > 0 && wait < 1000000)
++         os_time_sleep(wait);
++      cur = want;
++   }
++   *ust = cur * period;
++   *msc = cur;
++   *sbc = drawable->lastStamp;
++   return true;
++}
++
+ int
+ kopperGetSyncValues(struct dri_drawable *drawable, int64_t target_msc, int64_t divisor,
+                     int64_t remainder, int64_t *ust, int64_t *msc, int64_t *sbc)
+@@ -1348,6 +1479,9 @@
+    VkXcbSurfaceCreateInfoKHR *xcb = (VkXcbSurfaceCreateInfoKHR *)&info->bos;
+    xcb_connection_t *conn = xcb->connection;
+ 
++   if (droiddeck_sync_values(drawable, conn, target_msc, divisor, remainder, ust, msc, sbc))
++      return 1;
++
+    xcb_void_cookie_t cookie =
+       xcb_present_notify_msc(conn, xcb->window, 0, target_msc, divisor, remainder);
+ 
