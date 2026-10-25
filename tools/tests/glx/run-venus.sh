@@ -30,6 +30,16 @@ sed -i "s|\"library_path\": *\"[^\"]*\"|\"library_path\": \"$OUT/libvulkan_panvk
 # the phone's server: the same virglrenderer source and patches, built the same way
 mkdir -p $OUT/vr && tar -xzf drv/virglrenderer-src.tar.gz -C $OUT/vr
 VR=$(dirname $(find $OUT/vr -name meson_options.txt | head -1))
+# glibc 2.34+ declares C11 call_once/once_flag in stdlib.h: use its own in the old compat header
+python3 - "$VR/src/mesa/compat/c11/threads_posix.h" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+s = s.replace("#include <pthread.h>\n", "#include <pthread.h>\n#include <stdlib.h>\n#if defined(__GLIBC__) && (__GLIBC__ > 2 || __GLIBC_MINOR__ >= 34)\n#define DD_GLIBC_ONCE 1\n#endif\n", 1)
+s = s.replace("#define ONCE_FLAG_INIT PTHREAD_ONCE_INIT", "#ifndef DD_GLIBC_ONCE\n#define ONCE_FLAG_INIT PTHREAD_ONCE_INIT\n#endif", 1)
+s = s.replace("typedef pthread_once_t  once_flag;", "#ifndef DD_GLIBC_ONCE\ntypedef pthread_once_t  once_flag;\n#endif", 1)
+s = s.replace("static inline void\ncall_once(once_flag *flag, void (*func)(void))\n{\n    pthread_once(flag, func);\n}", "#ifndef DD_GLIBC_ONCE\nstatic inline void\ncall_once(once_flag *flag, void (*func)(void))\n{\n    pthread_once(flag, func);\n}\n#endif", 1)
+open(p, "w").write(s)
+PY
 for p in tools/venus/patches/*.patch; do (cd $VR && git init -q . 2>/dev/null; git apply "$OLDPWD/$p") || echo "== server patch $(basename $p) did not apply"; done
 meson setup $OUT/vrb $VR -Dc_std=gnu99 -Dplatforms= -Dvenus=true -Drender-server=false -Dvideo=false -Dtests=false \
   -Dfuzzer=false -Dminigbm_allocation=false -Dcheck-gl-errors=false > $OUT/vr-setup.log 2>&1 \
