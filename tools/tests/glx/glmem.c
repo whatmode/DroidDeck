@@ -7,6 +7,7 @@
 #include <GL/glx.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 #include <unistd.h>
 
 typedef void (*GenFb)(GLsizei, GLuint *);
@@ -82,6 +83,25 @@ int main(void) {
     usleep(50000);
   }
   glFinish();
+  /* GL_TIMESTAMP as Chromium asks it every frame: must never go back, and should be cheap */
+  typedef void (*GetI64)(GLenum, GLint64 *);
+  GetI64 geti64 = (GetI64)glXGetProcAddress((const GLubyte *)"glGetInteger64v");
+  if (geti64) {
+    GLint64 prev = 0, t = 0;
+    int back = 0;
+    struct timespec a, b;
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    for (int i = 0; i < 200; i++) {
+      geti64(GL_TIMESTAMP, &t);
+      if (t < prev) back++;
+      prev = t;
+      if (i % 50 == 49) usleep(300000);
+    }
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    double ms = (b.tv_sec - a.tv_sec) * 1e3 + (b.tv_nsec - a.tv_nsec) / 1e6 - 4 * 300.0;
+    printf("glmem: %s GL_TIMESTAMP 200x, never backwards (%d back), %.3f ms each\n", back ? "FAIL" : "PASS", back, ms / 200);
+    if (back) bad++;
+  }
   printf("glmem: %s textures drawn and read back (%u of %u pixels wrong)\n", bad ? "FAIL" : "PASS", bad, checked);
   glXMakeCurrent(dpy, None, NULL);
   glXDestroyContext(dpy, ctx);
