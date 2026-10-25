@@ -1442,7 +1442,8 @@ BUSCONF
       # loaded as an audit library (glxaudit.c; only the client's main process audits).
       _bl_audit=()
       if [ "${BL_VENUS_SINGLE:-0}" = 1 ] && [ "${BL_STEAM_GLX_AUDIT:-1}" = 1 ] && [ -f /usr/local/lib/libblsession.so ]; then
-        _bl_audit=(env LD_AUDIT=/usr/local/lib/libblsession.so)
+        # LIBGL_DEBUG: Mesa's loader messages from the first GLX call on, not only from a retry.
+        _bl_audit=(env LD_AUDIT=/usr/local/lib/libblsession.so LIBGL_DEBUG=verbose)
       fi
       "${_bl_audit[@]}" "${steam_client[@]}" "${_bl_ui[@]}" "${_bl_cdp[@]}" "${_bl_lang[@]}" -clientbeta "$steam_channel" \
         -no-cef-sandbox -cef-ozone-platform=x11 "${_bl_cef[@]}" "${_bl_mali_scale_args[@]}" "$@"

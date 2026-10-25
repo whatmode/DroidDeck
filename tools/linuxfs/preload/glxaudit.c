@@ -180,6 +180,70 @@ static void *audit_choose_visual(void *dpy, int screen, int *attr) {
   return v;
 }
 
+
+/* Every GLX call the client makes through the functions below, up to a limit: name,
+ * display, the result, and for each display the first GLX call on it with the client's GL
+ * environment at that moment. Mesa keeps a display's GLX state from its first GLX call, and
+ * the client's displays fail even on retries with Mesa's loader messages on, so the first
+ * call is the one to see. All these take at most six integer/pointer arguments and return
+ * an integer or a pointer, so one forwarder per function covers them. */
+typedef uintptr_t (*fwd_t)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t);
+enum { TR_STR = 1, TR_INTP2 = 2, TR_INTP3 = 4, TR_NOLOG = 8 };
+static struct { const char *name; int flags; fwd_t real; } traced[] = {
+    {"glXQueryExtension", 0, 0}, {"glXQueryVersion", 0, 0}, {"glXQueryExtensionsString", TR_STR, 0},
+    {"glXQueryServerString", TR_STR, 0}, {"glXGetClientString", TR_STR, 0}, {"glXGetFBConfigs", TR_INTP2, 0},
+    {"glXChooseFBConfig", TR_INTP3, 0}, {"glXGetVisualFromFBConfig", 0, 0}, {"glXCreateContext", 0, 0},
+    {"glXCreateNewContext", 0, 0}, {"glXCreateContextAttribsARB", 0, 0}, {"glXMakeCurrent", 0, 0},
+    {"glXMakeContextCurrent", 0, 0}, {"glXGetConfig", 0, 0}, {"glXIsDirect", 0, 0},
+    {"glXGetCurrentContext", TR_NOLOG, 0}, {"glXSwapBuffers", TR_NOLOG, 0},
+};
+#define NTRACED ((int)(sizeof(traced) / sizeof(traced[0])))
+
+static void *seen_dpy[16];
+static int nseen_dpy, ntrace;
+
+static uintptr_t trace_call(int i, uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e, uintptr_t f) {
+  uintptr_t r = traced[i].real ? traced[i].real(a, b, c, d, e, f) : 0;
+  if (traced[i].flags & TR_NOLOG) return r;
+  /* The first argument is the display for every traced function but glXGetCurrentContext. */
+  void *dpy = (void *)a;
+  int first = 0;
+  if (dpy) {
+    int k;
+    for (k = 0; k < nseen_dpy && seen_dpy[k] != dpy; k++) { }
+    if (k == nseen_dpy && nseen_dpy < 16) { seen_dpy[nseen_dpy++] = dpy; first = 1; }
+  }
+  if (!first && ntrace >= 80) return r;
+  if (!x_display_string) { void *h = x11_map; if (h) x_display_string = (str_dpy_t)dlsym(h, "XDisplayString"); }
+  ntrace++;
+  char res[600];
+  if (traced[i].flags & TR_STR) snprintf(res, sizeof(res), "\"%.500s\"", r ? (const char *)r : "(null)");
+  else if (traced[i].flags & TR_INTP2) snprintf(res, sizeof(res), "%p, %d item(s)", (void *)r, c ? *(int *)c : -1);
+  else if (traced[i].flags & TR_INTP3) snprintf(res, sizeof(res), "%p, %d item(s)", (void *)r, d ? *(int *)d : -1);
+  else snprintf(res, sizeof(res), "0x%lx", (unsigned long)r);
+  char buf[900];
+  snprintf(buf, sizeof(buf), "glxaudit[%d]: %s%s(dpy %p \"%s\", 0x%lx, 0x%lx) -> %s\n", (int)getpid(),
+           first ? "FIRST GLX call on this display: " : "", traced[i].name, dpy,
+           dpy && x_display_string ? x_display_string(dpy) : "?", (unsigned long)b, (unsigned long)c, res);
+  out(buf);
+  if (first) log_env();
+  return r;
+}
+
+#define TR(n) static uintptr_t tr##n(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e, uintptr_t f) { return trace_call(n, a, b, c, d, e, f); }
+TR(0) TR(1) TR(2) TR(3) TR(4) TR(5) TR(6) TR(7) TR(8) TR(9) TR(10) TR(11) TR(12) TR(13) TR(14) TR(15) TR(16)
+static fwd_t tr_fn[] = {tr0, tr1, tr2, tr3, tr4, tr5, tr6, tr7, tr8, tr9, tr10, tr11, tr12, tr13, tr14, tr15, tr16};
+
+static uintptr_t trace_wrap(const char *name, uintptr_t value) {
+  if (!value) return value;
+  for (int i = 0; i < NTRACED; i++)
+    if (!strcmp(name, traced[i].name)) {
+      if (!traced[i].real) traced[i].real = (fwd_t)value;
+      return (uintptr_t)tr_fn[i];
+    }
+  return value;
+}
+
 static void *audit_gpa_common(gpa_t real, const unsigned char *name) {
   void *f = real ? (void *)real(name) : NULL;
   if (f && name && !strcmp((const char *)name, "glXChooseVisual")) {
@@ -187,7 +251,7 @@ static void *audit_gpa_common(gpa_t real, const unsigned char *name) {
     out("glxaudit: glXChooseVisual looked up through glXGetProcAddress\n");
     return (void *)audit_choose_visual;
   }
-  return f;
+  return name ? (void *)trace_wrap((const char *)name, (uintptr_t)f) : f;
 }
 static void *audit_gpa(const unsigned char *name) { return audit_gpa_common(real_gpa, name); }
 static void *audit_gpa_arb(const unsigned char *name) { return audit_gpa_common(real_gpa_arb, name); }
@@ -208,6 +272,7 @@ static uintptr_t audit_bind(uintptr_t value, uintptr_t *refcook, uintptr_t *defc
     real_gpa_arb = (gpa_t)value;
     return (uintptr_t)audit_gpa_arb;
   }
+  else if (!strncmp(name, "glX", 3)) return trace_wrap(name, value);
   return value;
 }
 
