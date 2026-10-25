@@ -28,7 +28,9 @@ zip=$(ls drv/Venus-Bridge-guest-*.zip | head -1)
 unzip -q -o "$zip" libvulkan_panvk.so virtio_icd.aarch64.json -d $OUT
 sed -i "s|\"library_path\": *\"[^\"]*\"|\"library_path\": \"$OUT/libvulkan_panvk.so\"|" $OUT/virtio_icd.aarch64.json
 echo "== virglrenderer $(pacman -Q virglrenderer | cut -d' ' -f2); server: $(command -v virgl_test_server); render server: $(ls /usr/lib/virgl_render_server /usr/libexec/virgl_render_server 2>/dev/null)"
-export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.aarch64.json
+export VK_DRIVER_FILES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -1)
+echo "== host Vulkan for the server: $VK_DRIVER_FILES"; vulkaninfo --summary 2>&1 | grep -E "deviceName|apiVersion" | head -3
+export VKR_DEBUG=all
 virgl_test_server --venus --no-virgl --multi-clients > $OUT/server.log 2>&1 &
 SERVER=$!
 for i in $(seq 1 50); do [ -S /tmp/.virgl_test ] && break; sleep 0.2; done
@@ -59,5 +61,5 @@ spirv-dis $(ls /tmp/dump/*.spv | head -1) 2>/dev/null | grep -E "Capability|Vari
 echo "---- the same without emulation (the GPU here draws wireframe; the check must notice)"
 DROIDDECK_VN_EMULATE=0 timeout 120 $OUT/vkemu $OUT/clip-spv10.spv $OUT/green.spv > $OUT/noemu.txt 2>&1
 grep "vkemu:" $OUT/noemu.txt | head -6
-echo "== server log:"; tail -5 $OUT/server.log
+echo "== server log:"; grep -v "^$" $OUT/server.log | tail -25
 kill $SERVER 2>/dev/null
