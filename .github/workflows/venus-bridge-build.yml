@@ -64,7 +64,7 @@ jobs:
             python3-mako python3-yaml python3-ply glslang-tools libdrm-dev libelf-dev zlib1g-dev libexpat1-dev \
             libwayland-dev wayland-protocols libx11-dev libx11-xcb-dev libxext-dev libxfixes-dev libxcb-dri3-dev \
             libxcb-present-dev libxcb-sync-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-xfixes0-dev libxshmfence-dev \
-            libxrandr-dev libxxf86vm-dev zip libglvnd-dev libxcb-glx0-dev libxcb-dri2-0-dev patchelf >/dev/null
+            libxrandr-dev libxxf86vm-dev zip libglvnd-dev libxcb-glx0-dev libxcb-dri2-0-dev libwayland-egl-backend-dev patchelf >/dev/null
           pip install --break-system-packages -q 'meson>=1.4'
       - name: Build the venus ICD for the Linux side
         run: |
