@@ -254,7 +254,7 @@ diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper
        zink_kopper_discard(drawable->screen->base.screen, ctx->st->pipe, ptex);
        drawable->droiddeck_discarding = true;
        drawable->lastStamp++;
-@@ -1336,6 +1465,93 @@
+@@ -1336,6 +1465,95 @@
     *height = drawable->h;
  }
  
@@ -316,9 +316,11 @@ diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper
 +droiddeck_sync_values(struct dri_drawable *drawable, xcb_connection_t *conn, int64_t target_msc,
 +                      int64_t divisor, int64_t remainder, int64_t *ust, int64_t *msc, int64_t *sbc)
 +{
++   /* Off by default: with this clock Chromium drew at the panel's 120 Hz and the bridge fell
++    * behind until Steam's UI stalled for seconds. DROIDDECK_GLX_FAKE_MSC=1 turns it on. */
 +   static int real = -1;
 +   if (real < 0)
-+      real = debug_get_bool_option("DROIDDECK_GLX_REAL_MSC", false);
++      real = !debug_get_bool_option("DROIDDECK_GLX_FAKE_MSC", false);
 +   if (real)
 +      return false;
 +   uint32_t win = ((VkXcbSurfaceCreateInfoKHR *)&drawable->info.bos)->window;
@@ -348,7 +350,7 @@ diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper
  int
  kopperGetSyncValues(struct dri_drawable *drawable, int64_t target_msc, int64_t divisor,
                      int64_t remainder, int64_t *ust, int64_t *msc, int64_t *sbc)
-@@ -1348,6 +1564,9 @@
+@@ -1348,6 +1566,9 @@
     VkXcbSurfaceCreateInfoKHR *xcb = (VkXcbSurfaceCreateInfoKHR *)&info->bos;
     xcb_connection_t *conn = xcb->connection;
  

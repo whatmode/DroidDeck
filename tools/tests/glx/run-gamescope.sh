@@ -113,7 +113,7 @@ echo "== retired: $(grep -c 'Swapchain retired' $OUT/log), kopper notes: $(grep 
 echo "======== Steam's side menu with the main view still and the toplevel drawn now and then"; shots sidemenustill "menu over a still main view" 1
 echo "== retired: $(grep -c 'Swapchain retired' $OUT/log), kopper notes: $(grep -c 'droiddeck kopper' $OUT/log)"; grep "droiddeck kopper" $OUT/log | grep -v tree | uniq -c | head -16 | cut -c1-200
 echo "======== vblank clock for Chromium's frames (GLX_OML_sync_control) at 120 Hz"
-env "${genv[@]}" timeout 120 $GS --backend headless -W 1600 -H 720 -w 1600 -h 720 -r 120 -- \
+env "${genv[@]}" DROIDDECK_GLX_FAKE_MSC=1 timeout 120 $GS --backend headless -W 1600 -H 720 -w 1600 -h 720 -r 120 -- \
   env VK_LAYER_PATH=$OUT/layers VK_INSTANCE_LAYERS=VK_LAYER_DROIDDECK_gputype $OUT/omlcheck > $OUT/log 2>&1
 grep -E "omlcheck|vblank clock" $OUT/log | head -8
 hz=$(sed -n 's/.* \([0-9.]*\) Hz$/\1/p' $OUT/log | head -1)
