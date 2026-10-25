@@ -107,6 +107,8 @@ echo "======== mapped GL child over the main window"; shots childshown "child sh
 echo "== retired: $(grep -c 'Swapchain retired' $OUT/log), kopper notes: $(grep -c 'droiddeck kopper' $OUT/log)"; grep "droiddeck kopper" $OUT/log | uniq -c | head -24 | cut -c1-160
 echo "======== mapped GL window in a plain child of the main window (Steam: 0x2600034 > 0x1a00005 > 0x1a00006)"; shots childwrapped "child shown in a wrapper: X shows the GL grandchild" 1
 echo "== retired: $(grep -c 'Swapchain retired' $OUT/log), kopper notes: $(grep -c 'droiddeck kopper' $OUT/log)"; grep "droiddeck kopper" $OUT/log | uniq -c | head -24 | cut -c1-160
+echo "======== Steam's side menu: two GL windows in one toplevel (from its logs)"; shots sidemenu "menu in the main window's toplevel" 1
+echo "== retired: $(grep -c 'Swapchain retired' $OUT/log), kopper notes: $(grep -c 'droiddeck kopper' $OUT/log)"; grep "droiddeck kopper" $OUT/log | grep -v tree | uniq -c | head -16 | cut -c1-200
 echo "======== the same window from a second context"; RETIRE_MODE=twocontexts GS_EXTRA="-e" run_gs $GS; report
 if ! grep -q "retire: done" $OUT/log && [ "${fails:-0}" = 0 ] && [ "$GS" != /usr/bin/gamescope ]; then
   echo "== the app's gamescope did not run it; its log:"; sed 's/\x1b\[[0-9;]*m//g' $OUT/log | tail -25 | cut -c1-200

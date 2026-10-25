@@ -75,6 +75,48 @@ int main(int argc, char **argv) {
     printf("retire: done\n");
     return 0;
   }
+  if (!strcmp(mode, "sidemenu")) {
+    /* Steam's layout from its logs: Chromium's toplevel (not drawn by GL) holds plain windows,
+     * each holding a GL window: the main one (blue, whole size) and the side menu (yellow,
+     * 358 px at the left, stacked above), both drawn every frame from another connection. */
+    glXMakeCurrent(x, None, NULL);
+    XUnmapWindow(x, main_win);
+    XSync(x, False);
+    XSetWindowAttributes tswa = {0};
+    tswa.colormap = XCreateColormap(x, RootWindow(x, vi->screen), vi->visual, AllocNone);
+    Window top = XCreateWindow(x, RootWindow(x, vi->screen), 0, 0, 1600, 720, 0, vi->depth, InputOutput, vi->visual,
+                               CWColormap, &tswa);
+    XMapWindow(x, top);
+    XSync(x, False);
+    Display *x2 = XOpenDisplay(NULL);
+    XVisualInfo *vi2 = glXChooseVisual(x2, DefaultScreen(x2), attr);
+    XSetWindowAttributes swa = {0};
+    swa.colormap = XCreateColormap(x2, RootWindow(x2, vi2->screen), vi2->visual, AllocNone);
+    swa.override_redirect = True;
+    unsigned long m = CWColormap | CWOverrideRedirect;
+    Window h1 = XCreateWindow(x2, top, 0, 0, 1600, 720, 0, vi2->depth, InputOutput, vi2->visual, CWColormap, &swa);
+    Window g1 = XCreateWindow(x2, h1, 0, 0, 1600, 720, 0, vi2->depth, InputOutput, vi2->visual, m, &swa);
+    Window h2 = XCreateWindow(x2, top, 0, 0, 358, 720, 0, vi2->depth, InputOutput, vi2->visual, CWColormap, &swa);
+    Window g2 = XCreateWindow(x2, h2, 0, 0, 358, 720, 0, vi2->depth, InputOutput, vi2->visual, m, &swa);
+    XMapWindow(x2, g1); XMapWindow(x2, h1); XMapWindow(x2, g2); XMapWindow(x2, h2);
+    XSync(x2, False);
+    GLXContext c1 = glXCreateContext(x2, vi2, NULL, True), c2 = glXCreateContext(x2, vi2, c1, True);
+    fprintf(stderr, "retire: toplevel 0x%lx with main 0x%lx and menu 0x%lx\n", (unsigned long)top, (unsigned long)g1, (unsigned long)g2);
+    for (int i = 0; i < rounds * 60; i++) {
+      glXMakeCurrent(x2, g1, c1);
+      glClearColor(0.0f, 0.0f, 1.0f, 1);
+      glClear(GL_COLOR_BUFFER_BIT);
+      glXSwapBuffers(x2, g1);
+      glXMakeCurrent(x2, g2, c2);
+      glClearColor(1.0f, 1.0f, 0.0f, 1);
+      glClear(GL_COLOR_BUFFER_BIT);
+      glXSwapBuffers(x2, g2);
+      usleep(16000);
+    }
+    glFinish();
+    printf("retire: done\n");
+    return 0;
+  }
   if (!strncmp(mode, "child", 5)) {
     /* A GL child window the size of the main one, drawn from another X connection (as
      * Chromium and ANGLE make one inside Steam's window): left unmapped ("childhidden",
