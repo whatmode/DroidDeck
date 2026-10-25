@@ -21,8 +21,7 @@ meson setup "$B" "$WORK/mesa" --buildtype release --prefix /usr \
   -Dopengl=true -Dglx=dri -Dglvnd=enabled -Dglvnd-vendor-name=droiddeck \
   -Degl=enabled -Dgles1=disabled -Dgles2=enabled -Dgbm=disabled \
   -Dllvm=disabled -Dzstd=disabled -Dlibunwind=disabled -Dvalgrind=disabled \
-  -Dgallium-va=disabled -Dgallium-vdpau=disabled -Dgallium-xa=disabled -Dgallium-nine=false \
-  -Dgallium-opencl=disabled -Dgallium-rusticl=false -Dlmsensors=disabled -Dbuild-tests=false
+  -Dlmsensors=disabled -Dbuild-tests=false
 ninja -C "$B"
 D="$OUT/venus-gl"
 rm -rf "$D"; mkdir -p "$D"
@@ -52,6 +51,15 @@ json.dump({
     "files": libs,
 }, open(os.path.join(d, "gl.json"), "w"), indent=2)
 PY
+# What the session sets when this driver is selected (read by the app; @GL@ is this folder).
+cat > "$D/env" <<'ENV'
+# DroidDeck reads this at session start when the driver is selected. @GL@ is this folder.
+# GL (GLX and EGL) from this driver's Mesa instead of the system's: glvnd vendor "droiddeck".
+__GLX_VENDOR_LIBRARY_NAME=droiddeck
+__EGL_VENDOR_LIBRARY_FILENAMES=@GL@/50_droiddeck.json
+LD_LIBRARY_PATH+=@GL@
+BL_DRIVER_GL=@GL@
+ENV
 echo "== GL part:"; ls -la "$D"
 for f in "$D"/libGLX_droiddeck.so.0 "$D"/libEGL_droiddeck.so.0; do
   [ -e "$f" ] || { echo "missing $(basename "$f")"; exit 1; }
