@@ -70,6 +70,11 @@ DROIDDECK_KOPPER_KEEP_PRESENT_MODE=1
 # One Zink screen for all X connections of a process: a window drawn from several connections
 # (Steam's client and web UI) keeps one swapchain instead of gamescope retiring one per switch.
 DROIDDECK_KOPPER_SHARE_SCREEN=1
+# Steam's web UI rasterizes its pages on the CPU and only composites them on the GPU: GPU
+# rasterization made ~2,900 render passes a second through Zink and the bridge, half of them
+# reloading tiles from memory (costly on Mali), and the GPU's frame time capped the UI below
+# 60 fps (round 03, 26 Oct). The first three are the session's defaults.
+BL_WEBHELPER_ARGS=--no-zygote --in-process-gpu -AudioServiceOutOfProcess --disable-gpu-rasterization
 # (BL_MALI_REFRESH=0 would give gamescope the panel's 120 Hz; at 120 Hz the bridge fell behind
 # and Steam's UI stalled for seconds: the session's 60 Hz stays for now.)
 ENV
