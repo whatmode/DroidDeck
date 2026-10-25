@@ -128,6 +128,10 @@ if [ -n "$zip" ] && pacman -S --noconfirm --needed unzip >/dev/null 2>&1 && unzi
     genv+=("$k=$v")
   done < $G/env
   echo "== driver GL env: ${genv[*]}"
+  echo "---- driver GL, GLX version asked over Xlib (the fallback for a display whose xcb side fails)"
+  DISPLAY=:8 env "${genv[@]}" DROIDDECK_GLX_FORCE_XLIB_VERSION=1 timeout 60 $OUT/glxcheck > $OUT/log 2>&1; rc=$?
+  grep -E "droiddeck glx|RESULT" $OUT/log | head -8
+  if [ $rc = 0 ] && grep -q "QueryVersion over Xlib: reply, 1.4" $OUT/log; then echo "PASS driver GL Xlib version"; else echo "FAIL driver GL Xlib version (rc $rc)"; tail -10 $OUT/log; fails=$((fails+1)); fi
   for d in :7 :8; do
     echo "---- driver GL on $d (expect ok, GL from the driver's Mesa, set-up lines)"
     DISPLAY=$d env "${genv[@]}" timeout 60 $OUT/glxcheck > $OUT/log 2>&1; rc=$?
