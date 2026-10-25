@@ -1,52 +1,7 @@
-diff -ru a/src/gallium/frontends/dri/dri_drawable.c b/src/gallium/frontends/dri/dri_drawable.c
---- a/src/gallium/frontends/dri/dri_drawable.c
-+++ b/src/gallium/frontends/dri/dri_drawable.c
-@@ -458,6 +458,10 @@
-               args->drawable->textures[ST_ATTACHMENT_BACK_LEFT]);
-    }
- 
-+   if (args->drawable->droiddeck_before_present &&
-+       (args->reason == __DRI2_THROTTLE_SWAPBUFFER || args->reason == __DRI2_NOTHROTTLE_SWAPBUFFER))
-+      args->drawable->droiddeck_before_present(args->drawable, pipe);
-+
-    pipe->flush_resource(pipe, args->drawable->textures[ST_ATTACHMENT_BACK_LEFT]);
- }
- 
-diff -ru a/src/gallium/frontends/dri/dri_drawable.h b/src/gallium/frontends/dri/dri_drawable.h
---- a/src/gallium/frontends/dri/dri_drawable.h
-+++ b/src/gallium/frontends/dri/dri_drawable.h
-@@ -110,6 +110,9 @@
-    unsigned droiddeck_w, droiddeck_h;
-    uint64_t droiddeck_order;
-    struct pipe_resource *droiddeck_copy; /* its latest frame, for a shared toplevel */
-+   /* runs at a swap's flush after the frame's GL work, before the present layout (kopper.c) */
-+   void (*droiddeck_before_present)(struct dri_drawable *drawable, struct pipe_context *pipe);
-+   bool droiddeck_want_copy;
- #endif
- 
-    /* hooks filled in by dri2 & drisw */
 diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper.c
 --- a/src/gallium/frontends/dri/kopper.c
 +++ b/src/gallium/frontends/dri/kopper.c
-@@ -965,6 +965,17 @@
-    pipe->blit(pipe, &b);
- }
- 
-+static void
-+droiddeck_before_present(struct dri_drawable *drawable, struct pipe_context *pipe)
-+{
-+   if (!drawable->droiddeck_want_copy)
-+      return;
-+   drawable->droiddeck_want_copy = false;
-+   struct pipe_resource *ptex = drawable->textures[ST_ATTACHMENT_BACK_LEFT];
-+   if (ptex)
-+      droiddeck_copy_frame(drawable, pipe, ptex);
-+}
-+
- /* true when this frame went into the toplevel's shared swapchain (the window does not present) */
- static bool
- droiddeck_composite(struct dri_drawable *drawable, struct pipe_context *pipe, struct pipe_resource *ptex)
-@@ -1184,9 +1195,70 @@
+@@ -1184,9 +1184,70 @@
     return done;
  }
  
@@ -117,29 +72,18 @@ diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper
     struct dri_context *ctx = dri_get_current();
     struct pipe_resource *ptex;
  
-@@ -1206,20 +1278,22 @@
-     */
+@@ -1207,7 +1268,9 @@
     _mesa_glthread_finish(ctx->st->ctx);
  
--   /* droiddeck: the frame's copy, before the flush that ends it (that flush puts the image in
+    /* droiddeck: the frame's copy, before the flush that ends it (that flush puts the image in
 -    * the present layout and signals its present): the GL commands go to the pipe first */
--   if (drawable->is_window && drawable->info.bos.sType == VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR &&
--       !drawable->droiddeck_hidden && drawable->droiddeck_top &&
--       droiddeck_others_in_top(((VkXcbSurfaceCreateInfoKHR *)&drawable->info.bos)->window, drawable->droiddeck_top)) {
--      st_context_flush(ctx->st, 0, NULL, NULL, NULL);
--      droiddeck_copy_frame(drawable, ctx->st->pipe, ptex);
--   }
-+   /* droiddeck: the frame's copy, made inside the flush that ends the frame (after its GL work,
-+    * before the image goes to the present layout): no extra submit per frame */
-+   drawable->droiddeck_want_copy =
-+      drawable->is_window && drawable->info.bos.sType == VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR &&
-+      !drawable->droiddeck_hidden && drawable->droiddeck_top &&
-+      droiddeck_others_in_top(((VkXcbSurfaceCreateInfoKHR *)&drawable->info.bos)->window, drawable->droiddeck_top);
-+   drawable->droiddeck_before_present = droiddeck_before_present;
++    * the present layout and signals its present): the GL commands go to the pipe first.
++    * (Made inside that flush instead, Steam's UI got slower: back to this.) */
 +   int64_t dd_t0 = os_time_get_nano();
- 
-    drawable->texture_stamp = drawable->lastStamp - 1;
- 
+    if (drawable->is_window && drawable->info.bos.sType == VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR &&
+        !drawable->droiddeck_hidden && drawable->droiddeck_top &&
+        droiddeck_others_in_top(((VkXcbSurfaceCreateInfoKHR *)&drawable->info.bos)->window, drawable->droiddeck_top)) {
+@@ -1220,6 +1283,8 @@
     dri_flush(ctx, drawable,
               __DRI2_FLUSH_DRAWABLE | __DRI2_FLUSH_CONTEXT | flush_flags,
               __DRI2_THROTTLE_SWAPBUFFER);
@@ -148,7 +92,7 @@ diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper
  
     struct pipe_box stack_boxes[64];
     if (nrects > ARRAY_SIZE(stack_boxes))
-@@ -1237,6 +1311,7 @@
+@@ -1237,6 +1302,7 @@
        droiddeck_group_leave(((VkXcbSurfaceCreateInfoKHR *)&drawable->info.bos)->window);
     if (!dd_hidden && droiddeck_composite(drawable, ctx->st->pipe, ptex)) {
        /* its frame went into the toplevel's shared swapchain */
@@ -156,7 +100,7 @@ diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper
        zink_kopper_discard(drawable->screen->base.screen, ctx->st->pipe, ptex);
        drawable->droiddeck_discarding = true;
        drawable->lastStamp++;
-@@ -1244,6 +1319,7 @@
+@@ -1244,6 +1310,7 @@
        return 0;
     }
     if (dd_hidden) {
@@ -164,7 +108,7 @@ diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper
        zink_kopper_discard(drawable->screen->base.screen, ctx->st->pipe, ptex);
        drawable->droiddeck_discarding = true;
        drawable->lastStamp++;
-@@ -1336,6 +1412,93 @@
+@@ -1336,6 +1403,93 @@
     *height = drawable->h;
  }
  
@@ -258,7 +202,7 @@ diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper
  int
  kopperGetSyncValues(struct dri_drawable *drawable, int64_t target_msc, int64_t divisor,
                      int64_t remainder, int64_t *ust, int64_t *msc, int64_t *sbc)
-@@ -1348,6 +1511,9 @@
+@@ -1348,6 +1502,9 @@
     VkXcbSurfaceCreateInfoKHR *xcb = (VkXcbSurfaceCreateInfoKHR *)&info->bos;
     xcb_connection_t *conn = xcb->connection;
  

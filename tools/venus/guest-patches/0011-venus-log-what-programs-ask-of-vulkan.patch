@@ -190,9 +190,9 @@ diff -ru a/src/virtio/vulkan/vn_common.c b/src/virtio/vulkan/vn_common.c
 +   static int us = -1;
 +   if (us < 0) {
 +      const char *e = getenv("DROIDDECK_VN_RELAX_US");
-+      us = e ? atoi(e) : 40;
++      us = e ? atoi(e) : 160;
 +      if (us < 1 || us > 1000)
-+         us = 40;
++         us = 160;
 +   }
 +   return us;
 +}
@@ -200,27 +200,20 @@ diff -ru a/src/virtio/vulkan/vn_common.c b/src/virtio/vulkan/vn_common.c
  static struct vn_relax_profile
  vn_relax_get_profile(enum vn_relax_reason reason)
  {
-@@ -225,11 +374,15 @@
+@@ -225,8 +374,11 @@
         *   ...
         *   aborting after 895s
         */
-+      /* droiddeck: fence and semaphore waits gate every frame of Steam's UI at 120 Hz (8.3 ms);
-+       * sleeping from 160 us up oversleeps by up to a frame's tenth per wait. Start at 40 us
-+       * after 32 yields (DROIDDECK_VN_RELAX_US sets the first sleep); the same ~3.5 s to the
-+       * first warning is kept by the later, longer sleeps. */
++      /* droiddeck: DROIDDECK_VN_RELAX_US sets the first sleep (default 160 us as upstream:
++       * shorter sleeps made every waiting thread poll more and starved the bridge's server
++       * of CPU, which made Steam's UI slower) */
        return (struct vn_relax_profile){
 -         .base_sleep_us = 160,
--         .busy_wait_order = 4,
--         .warn_order = 10,
--         .abort_order = 14,
 +         .base_sleep_us = vn_dd_relax_base_us(),
-+         .busy_wait_order = 5,
-+         .warn_order = 12,
-+         .abort_order = 16,
-       };
-    }
- 
-@@ -249,6 +402,8 @@
+          .busy_wait_order = 4,
+          .warn_order = 10,
+          .abort_order = 14,
+@@ -249,6 +401,8 @@
        .iter = 0,
        .profile = vn_relax_get_profile(reason),
        .reason_str = vn_relax_reason_string(reason),
