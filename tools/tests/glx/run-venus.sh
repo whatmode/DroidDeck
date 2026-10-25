@@ -21,20 +21,28 @@ trap annotate EXIT
 grep -q '^DisableSandbox' /etc/pacman.conf || sed -i 's/^\[options\]/[options]\nDisableSandbox/' /etc/pacman.conf
 { for m in https://ca.us.mirror.archlinuxarm.org https://fl.us.mirror.archlinuxarm.org https://de3.mirror.archlinuxarm.org https://nl.mirror.archlinuxarm.org; do echo "Server = $m/\$arch/\$repo"; done; cat /etc/pacman.d/mirrorlist; } > /etc/pacman.d/mirrorlist.new
 mv /etc/pacman.d/mirrorlist.new /etc/pacman.d/mirrorlist
-pacman -Syu --noconfirm --needed gcc virglrenderer vulkan-swrast vulkan-tools vulkan-headers vulkan-icd-loader \
+pacman -Syu --noconfirm --needed gcc meson ninja pkgconf libdrm libepoxy python-yaml vulkan-swrast vulkan-tools vulkan-headers vulkan-icd-loader \
   glslang spirv-tools unzip >/tmp/pacman.log 2>&1 || { echo "pacman failed"; tail -15 /tmp/pacman.log; exit 1; }
 OUT=/tmp/vn; mkdir -p $OUT
 zip=$(ls drv/Venus-Bridge-guest-*.zip | head -1)
 unzip -q -o "$zip" libvulkan_panvk.so virtio_icd.aarch64.json -d $OUT
 sed -i "s|\"library_path\": *\"[^\"]*\"|\"library_path\": \"$OUT/libvulkan_panvk.so\"|" $OUT/virtio_icd.aarch64.json
-echo "== virglrenderer $(pacman -Q virglrenderer | cut -d' ' -f2); server: $(command -v virgl_test_server); render server: $(ls /usr/lib/virgl_render_server /usr/libexec/virgl_render_server 2>/dev/null)"
+# the phone's server: the same virglrenderer source and patches, built the same way
+mkdir -p $OUT/vr && tar -xzf drv/virglrenderer-src.tar.gz -C $OUT/vr
+VR=$(dirname $(find $OUT/vr -name meson_options.txt | head -1))
+meson setup $OUT/vrb $VR -Dplatforms= -Dvenus=true -Drender-server=false -Dvideo=false -Dtests=false \
+  -Dfuzzer=false -Dminigbm_allocation=false -Dcheck-gl-errors=false > $OUT/vr-setup.log 2>&1 \
+  && ninja -C $OUT/vrb > $OUT/vr-build.log 2>&1 || { echo "FAIL building the server"; tail -25 $OUT/vr-setup.log $OUT/vr-build.log; exit 1; }
+SERVER_BIN=$(find $OUT/vrb -name virgl_test_server -type f | head -1)
+export LD_LIBRARY_PATH=$(dirname $(find $OUT/vrb -name 'libvirglrenderer.so*' | head -1))
+echo "== server: $SERVER_BIN (built from the release's virglrenderer source)"
 export VK_DRIVER_FILES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -1)
 echo "== host Vulkan for the server: $VK_DRIVER_FILES"; vulkaninfo --summary 2>&1 | grep -E "deviceName|apiVersion" | head -3
 export VKR_DEBUG=all
-virgl_test_server --venus --no-virgl --multi-clients > $OUT/server.log 2>&1 &
+$SERVER_BIN --venus --no-virgl --multi-clients > $OUT/server.log 2>&1 &
 SERVER=$!
 for i in $(seq 1 50); do [ -S /tmp/.virgl_test ] && break; sleep 0.2; done
-unset VK_DRIVER_FILES
+unset VK_DRIVER_FILES LD_LIBRARY_PATH
 [ -S /tmp/.virgl_test ] || { echo "FAIL no vtest socket"; cat $OUT/server.log | tail -20; exit 1; }
 export VK_ICD_FILENAMES=$OUT/virtio_icd.aarch64.json VN_DEBUG=vtest,init STEAM_COMPAT_CLIENT_INSTALL_PATH=/tmp/steamroot
 mkdir -p /tmp/steamroot/logs
