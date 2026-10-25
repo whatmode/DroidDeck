@@ -133,7 +133,7 @@ glmem_case() {  # name, server env..., -- client env...
     $SERVER_BIN --venus --no-virgl --multi-clients > $OUT/server-$name.log 2>&1 &
   SERVER=$!
   for i in $(seq 1 50); do [ -S /tmp/.virgl_test ] && break; sleep 0.2; done
-  DISPLAY=:9 env "${genv[@]}" MESA_LOADER_DRIVER_OVERRIDE=zink "$@" timeout 120 $OUT/glmem > $OUT/glmem-$name.txt 2>&1; GLRC=$?
+  DISPLAY=:9 env "${genv[@]}" MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink LIBGL_KOPPER_DRI2=true "$@" timeout 120 $OUT/glmem > $OUT/glmem-$name.txt 2>&1; GLRC=$?
   sleep 1.2; DISPLAY=:9 env "${genv[@]}" "$@" timeout 60 $OUT/vkmem 0 > $OUT/vkmem-$name.txt 2>&1
   grep "glmem:" $OUT/glmem-$name.txt; grep "droiddeck zink: device-local" $OUT/glmem-$name.txt | head -1
   grep "vkmem: memory type" $OUT/vkmem-$name.txt | tr '\n' ';'; echo
