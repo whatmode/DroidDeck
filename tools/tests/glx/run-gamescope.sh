@@ -24,6 +24,7 @@ pacman -Syu --noconfirm --needed gcc mesa vulkan-swrast vulkan-headers libglvnd 
   unzip xorg-xprop >/tmp/pacman.log 2>&1 || { echo "pacman failed"; tail -15 /tmp/pacman.log; exit 1; }
 OUT=/tmp/gs; mkdir -p $OUT
 gcc -O2 -Wall -o $OUT/retire tools/tests/glx/retire.c -lGL -lX11 || exit 1
+gcc -O2 -Wall -o $OUT/omlcheck tools/tests/glx/omlcheck.c -lGL -lX11 || exit 1
 gcc -shared -fPIC -O2 -Wall -o $OUT/libgputype.so tools/tests/glx/gputype_layer.c || exit 1
 mkdir -p $OUT/layers && cp tools/tests/glx/gputype_layer.json $OUT/layers/ && sed -i "s|/tmp/glx/libgputype.so|$OUT/libgputype.so|" $OUT/layers/gputype_layer.json
 GS=/usr/bin/gamescope
@@ -111,6 +112,14 @@ echo "======== Steam's side menu: two GL windows in one toplevel (from its logs)
 echo "== retired: $(grep -c 'Swapchain retired' $OUT/log), kopper notes: $(grep -c 'droiddeck kopper' $OUT/log)"; grep "droiddeck kopper" $OUT/log | grep -v tree | uniq -c | head -16 | cut -c1-200
 echo "======== Steam's side menu with the main view still and the toplevel drawn now and then"; shots sidemenustill "menu over a still main view" 1
 echo "== retired: $(grep -c 'Swapchain retired' $OUT/log), kopper notes: $(grep -c 'droiddeck kopper' $OUT/log)"; grep "droiddeck kopper" $OUT/log | grep -v tree | uniq -c | head -16 | cut -c1-200
+echo "======== vblank clock for Chromium's frames (GLX_OML_sync_control) at 120 Hz"
+env "${genv[@]}" timeout 120 $GS --backend headless -W 1600 -H 720 -w 1600 -h 720 -r 120 -- \
+  env VK_LAYER_PATH=$OUT/layers VK_INSTANCE_LAYERS=VK_LAYER_DROIDDECK_gputype $OUT/omlcheck > $OUT/log 2>&1
+grep -E "omlcheck|vblank clock" $OUT/log | head -8
+hz=$(sed -n 's/.* \([0-9.]*\) Hz$/\1/p' $OUT/log | head -1)
+if grep -q "omlcheck: done" $OUT/log && grep -q "calls 1 1" $OUT/log && awk -v h="${hz:-0}" 'BEGIN{exit !(h > 100 && h < 140)}' \
+   && ! grep -E "took ([5-9]|[1-9][0-9]+)\." $OUT/log | grep -q .; then echo "PASS vblank clock at the X screen's 120 Hz, not blocking"
+else echo "FAIL vblank clock (${hz:-?} Hz)"; fi
 echo "======== the same window from a second context"; RETIRE_MODE=twocontexts GS_EXTRA="-e" run_gs $GS; report
 if ! grep -q "retire: done" $OUT/log && [ "${fails:-0}" = 0 ] && [ "$GS" != /usr/bin/gamescope ]; then
   echo "== the app's gamescope did not run it; its log:"; sed 's/\x1b\[[0-9;]*m//g' $OUT/log | tail -25 | cut -c1-200
