@@ -29,7 +29,7 @@ unzip -q -o "$zip" libvulkan_panvk.so virtio_icd.aarch64.json -d $OUT
 sed -i "s|\"library_path\": *\"[^\"]*\"|\"library_path\": \"$OUT/libvulkan_panvk.so\"|" $OUT/virtio_icd.aarch64.json
 echo "== virglrenderer $(pacman -Q virglrenderer | cut -d' ' -f2); server: $(command -v virgl_test_server); render server: $(ls /usr/lib/virgl_render_server /usr/libexec/virgl_render_server 2>/dev/null)"
 export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.aarch64.json
-virgl_test_server --venus --multi-clients > $OUT/server.log 2>&1 &
+virgl_test_server --venus --no-virgl --multi-clients > $OUT/server.log 2>&1 &
 SERVER=$!
 for i in $(seq 1 50); do [ -S /tmp/.virgl_test ] && break; sleep 0.2; done
 unset VK_DRIVER_FILES
@@ -39,5 +39,25 @@ mkdir -p /tmp/steamroot/logs
 vulkaninfo --summary > $OUT/vi.txt 2>&1
 grep -E "deviceName|driverName|apiVersion" $OUT/vi.txt | head -6
 if grep -q "Venus" $OUT/vi.txt; then echo "PASS the bridge lists lavapipe through venus"; else echo "FAIL the bridge lists no GPU"; tail -20 $OUT/vi.txt; tail -20 $OUT/server.log; fi
+# DXVK's features on a GPU without them (as Mali): the driver told to emulate them all
+gcc -O2 -Wall -o $OUT/vkemu tools/tests/glx/vkemu/vkemu.c -lvulkan || exit 1
+spirv-as --target-env spv1.0 tools/tests/glx/vkemu/clip.spvasm -o $OUT/clip-spv10.spv || exit 1
+spirv-as --target-env spv1.5 tools/tests/glx/vkemu/clip.spvasm -o $OUT/clip-spv15.spv || exit 1
+glslangValidator -V tools/tests/glx/vkemu/green.frag -o $OUT/green.spv >/dev/null || exit 1
+echo "---- DXVK's features emulated (DROIDDECK_VN_EMULATE=mali)"
+rm -rf /tmp/dump; mkdir -p /tmp/dump
+DROIDDECK_VN_EMULATE=mali DROIDDECK_VN_DUMP_SPIRV=/tmp/dump timeout 120 $OUT/vkemu $OUT/clip-spv10.spv $OUT/clip-spv15.spv $OUT/green.spv > $OUT/emu.txt 2>&1; rc=$?
+grep "vkemu:" $OUT/emu.txt
+grep "emulated for DXVK\|SPIR-V" /tmp/steamroot/logs/droiddeck_vulkan.txt | tail -4 | cut -c1-200
+[ $rc = 0 ] && echo "PASS DXVK's features on a GPU without them" || { echo "FAIL DXVK's features on a GPU without them (rc $rc)"; tail -15 $OUT/emu.txt; }
+v=0; for f in /tmp/dump/*.spv; do
+  [ -f "$f" ] || continue
+  if spirv-val "$f" > $OUT/val.txt 2>&1; then v=$((v+1)); else echo "FAIL rewritten SPIR-V $f: $(head -3 $OUT/val.txt)"; spirv-dis "$f" | head -40; fi
+done
+[ $v -ge 2 ] && echo "PASS rewritten shaders valid ($v checked by spirv-val)" || echo "FAIL rewritten shaders checked: $v"
+spirv-dis $(ls /tmp/dump/*.spv | head -1) 2>/dev/null | grep -E "Capability|Variable|EntryPoint|Pointer" | head -14
+echo "---- the same without emulation (the GPU here draws wireframe; the check must notice)"
+DROIDDECK_VN_EMULATE=0 timeout 120 $OUT/vkemu $OUT/clip-spv10.spv $OUT/green.spv > $OUT/noemu.txt 2>&1
+grep "vkemu:" $OUT/noemu.txt | head -6
 echo "== server log:"; tail -5 $OUT/server.log
 kill $SERVER 2>/dev/null
