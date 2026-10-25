@@ -15,7 +15,9 @@ for p in "$HERE"/guest-patches/*.patch; do
   echo "== applying $(basename "$p")"
   git -C "$WORK/mesa" apply --whitespace=nowarn "$p"
 done
-tar -C "$WORK/mesa" -czf "$OUT/mesa-virtio-src.tar.gz" src/virtio src/vulkan/runtime src/vulkan/wsi include/drm-uapi
+# Also the GL side (GLX, EGL, the DRI frontend, Zink, the loader): read when patching it.
+tar -C "$WORK/mesa" -czf "$OUT/mesa-virtio-src.tar.gz" src/virtio src/vulkan/runtime src/vulkan/wsi include/drm-uapi \
+  src/glx src/egl src/gallium/frontends/dri src/gallium/drivers/zink src/loader src/util/driconf.h
 echo "== venus vtest socket handling:"
 grep -n "getenv\|SOCKET\|socket_name\|sun_path" "$WORK/mesa/src/virtio/vulkan/vn_renderer_vtest.c" | head -20 || true
 grep -rn "VN_DEBUG\|\"vtest\"" "$WORK/mesa/src/virtio/vulkan/vn_common.c" | head -10 || true
@@ -48,5 +50,13 @@ json.dump({
     "sourceCommit": sha,
 }, open(out, "w"), indent=2)
 PY
-(cd "$D" && sha256sum libvulkan_panvk.so > SHA256SUMS.txt && zip -q "$OUT/Venus-Bridge-guest-${MESA_REF}-${SHA:0:8}.zip" *)
+# The GL part (build-guest-gl.sh) goes in under gl/. A failed GL build leaves the Vulkan
+# driver as it was.
+if VENUS_WORK="$WORK" bash "$HERE/build-guest-gl.sh" "$OUT" > "$OUT/gl-build.log" 2>&1; then
+  echo "== GL part built"
+else
+  echo "== GL BUILD FAILED"; tail -40 "$OUT/gl-build.log"; rm -rf "$OUT/venus-gl"
+fi
+if [ -d "$OUT/venus-gl" ]; then rm -rf "$D/gl"; cp -r "$OUT/venus-gl" "$D/gl"; fi
+(cd "$D" && sha256sum libvulkan_panvk.so > SHA256SUMS.txt && zip -qr "$OUT/Venus-Bridge-guest-${MESA_REF}-${SHA:0:8}.zip" .)
 ls -la "$OUT"
