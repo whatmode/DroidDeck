@@ -9,6 +9,7 @@
 #include <X11/Xutil.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 static Display *x;
@@ -34,6 +35,7 @@ static void frame(Window w, GLXContext c, float r, float g, float b) {
 
 int main(int argc, char **argv) {
   int rounds = argc > 1 ? atoi(argv[1]) : 4;
+  const char *mode = argc > 2 ? argv[2] : "popups";
   x = XOpenDisplay(NULL);
   if (!x) { printf("retire: no display\n"); return 2; }
   int attr[] = {GLX_RGBA, GLX_DOUBLEBUFFER, GLX_RED_SIZE, 8, GLX_GREEN_SIZE, 8, GLX_BLUE_SIZE, 8, None};
@@ -44,6 +46,24 @@ int main(int argc, char **argv) {
   GLXContext pop_ctx = glXCreateContext(x, vi, main_ctx, True);
   for (int i = 0; i < 30; i++) frame(main_win, main_ctx, 0.1f, 0.3f, 0.6f);
   fprintf(stderr, "retire: main window up\n");
+  if (!strcmp(mode, "twodisplays") || !strcmp(mode, "twocontexts")) {
+    /* The same window drawn from a second GL context: on another X connection (Steam's
+     * client holds several), or on the same one. */
+    Display *x2 = !strcmp(mode, "twodisplays") ? XOpenDisplay(NULL) : x;
+    XVisualInfo *vi2 = glXChooseVisual(x2, DefaultScreen(x2), attr);
+    GLXContext c2 = glXCreateContext(x2, vi2, NULL, True);
+    for (int r = 0; r < rounds; r++) {
+      for (int i = 0; i < 10; i++) frame(main_win, main_ctx, 0.1f, 0.3f, 0.6f);
+      glXMakeCurrent(x, None, NULL);
+      glXMakeCurrent(x2, main_win, c2);
+      for (int i = 0; i < 10; i++) { glClearColor(0.6f, 0.3f, 0.1f, 1); glClear(GL_COLOR_BUFFER_BIT); glXSwapBuffers(x2, main_win); }
+      glXMakeCurrent(x2, None, NULL);
+      fprintf(stderr, "retire: round %d: drawn from the second context\n", r);
+    }
+    glFinish();
+    printf("retire: done\n");
+    return 0;
+  }
   for (int r = 0; r < rounds; r++) {
     /* Steam's windows also change size (created 1280x800, made fullscreen, back). */
     if (r == 1) { XResizeWindow(x, main_win, 1600, 720); XSync(x, False); fprintf(stderr, "retire: main window resized\n"); }
