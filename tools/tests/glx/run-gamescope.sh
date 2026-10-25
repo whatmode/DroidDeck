@@ -8,6 +8,7 @@ exec 3>&1
 exec > >(tee -a $REPORT) 2>&1
 annotate() {
   sleep 1
+  printf '::notice title=gamescope summary::%s\n' "$(grep -E '^PASS|^FAIL|^== new|^========|exit [0-9]' $REPORT | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"}{print}')" >&3
   local n=0
   split -l 70 $REPORT /tmp/gs-chunk.
   for f in /tmp/gs-chunk.*; do
@@ -53,7 +54,7 @@ run_gs() {
 }
 run_gs $GS
 report() {
-  grep -E "retire|droiddeck kopper|Swapchain retired|Creating swapchain|Failed|OUT_OF_DATE|error|Error" $OUT/log | sed 's/\x1b\[[0-9;]*m//g' | cut -c1-160 | head -60
+  grep -E "retire:|droiddeck kopper|Swapchain retired|Creating swapchain|Failed|OUT_OF_DATE" $OUT/log | sed 's/\x1b\[[0-9;]*m//g' | cut -c1-120 | head -30
   echo "== new swapchains: $(grep -c 'droiddeck kopper: new swapchain' $OUT/log), retired: $(grep -c 'Swapchain retired' $OUT/log), created: $(grep -c 'Creating swapchain' $OUT/log)"
 }
 echo "======== plain"; report
