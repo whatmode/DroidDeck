@@ -1,7 +1,7 @@
 diff -ru a/src/gallium/drivers/zink/zink_screen.c b/src/gallium/drivers/zink/zink_screen.c
 --- a/src/gallium/drivers/zink/zink_screen.c
 +++ b/src/gallium/drivers/zink/zink_screen.c
-@@ -3390,6 +3390,36 @@
+@@ -3390,6 +3390,41 @@
        }
     }
  
@@ -9,7 +9,7 @@ diff -ru a/src/gallium/drivers/zink/zink_screen.c b/src/gallium/drivers/zink/zin
 +    * Android every host-visible allocation is a dma-heap buffer imported into the GPU driver;
 +    * the server offers a device-local-only type (allocated natively by the driver) for what
 +    * is never mapped, after the GPU's own types. Lazily allocated and protected types keep
-+    * their place. DROIDDECK_ZINK_PREFER_UNMAPPABLE=0 keeps the GPU's order.
++    * their place, after them. DROIDDECK_ZINK_PREFER_UNMAPPABLE=0 keeps the GPU's order.
 +    */
 +   if (debug_get_bool_option("DROIDDECK_ZINK_PREFER_UNMAPPABLE", true)) {
 +      const VkMemoryPropertyFlags avoid = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
@@ -20,13 +20,18 @@ diff -ru a/src/gallium/drivers/zink/zink_screen.c b/src/gallium/drivers/zink/zin
 +         enum zink_heap i = heaps[h];
 +         uint8_t sorted[VK_MAX_MEMORY_TYPES];
 +         unsigned n = 0;
-+         for (unsigned pass = 0; pass < 2; pass++) {
-+            for (unsigned k = 0; k < screen->heap_count[i]; k++) {
-+               uint8_t t = screen->heap_map[i][k];
-+               bool plain = !(screen->info.mem_props.memoryTypes[t].propertyFlags & avoid);
-+               if (plain == (pass == 0))
-+                  sorted[n++] = t;
-+            }
++         /* plain types last to first: the server's native type comes after the GPU's own,
++          * and a type the venus driver hides host-visible from (non-coherent cached) is still
++          * a dma-heap buffer on the server */
++         for (int k = screen->heap_count[i] - 1; k >= 0; k--) {
++            uint8_t t = screen->heap_map[i][k];
++            if (!(screen->info.mem_props.memoryTypes[t].propertyFlags & avoid))
++               sorted[n++] = t;
++         }
++         for (unsigned k = 0; k < screen->heap_count[i]; k++) {
++            uint8_t t = screen->heap_map[i][k];
++            if (screen->info.mem_props.memoryTypes[t].propertyFlags & avoid)
++               sorted[n++] = t;
 +         }
 +         if (n && sorted[0] != screen->heap_map[i][0])
 +            mesa_logi("droiddeck zink: device-local memory from type %u (not host-visible) "

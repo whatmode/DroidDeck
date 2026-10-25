@@ -22,7 +22,7 @@ grep -q '^DisableSandbox' /etc/pacman.conf || sed -i 's/^\[options\]/[options]\n
 { for m in https://ca.us.mirror.archlinuxarm.org https://fl.us.mirror.archlinuxarm.org https://de3.mirror.archlinuxarm.org https://nl.mirror.archlinuxarm.org; do echo "Server = $m/\$arch/\$repo"; done; cat /etc/pacman.d/mirrorlist; } > /etc/pacman.d/mirrorlist.new
 mv /etc/pacman.d/mirrorlist.new /etc/pacman.d/mirrorlist
 pacman -Syu --noconfirm --needed gcc git meson ninja pkgconf libdrm libepoxy python-yaml vulkan-swrast vulkan-tools vulkan-headers vulkan-icd-loader \
-  glslang spirv-tools unzip >/tmp/pacman.log 2>&1 || { echo "pacman failed"; tail -15 /tmp/pacman.log; exit 1; }
+  glslang spirv-tools unzip mesa libglvnd libx11 xorg-server-xvfb >/tmp/pacman.log 2>&1 || { echo "pacman failed"; tail -15 /tmp/pacman.log; exit 1; }
 OUT=/tmp/vn; mkdir -p $OUT
 zip=$(ls drv/Venus-Bridge-guest-*.zip | head -1)
 unzip -q -o "$zip" libvulkan_panvk.so virtio_icd.aarch64.json -d $OUT
@@ -63,7 +63,7 @@ echo "== VKR_DEBUG=$VKR_DEBUG"
 # host-visible memory comes from a dma-heap; here it is turned on by hand
 start_server() {
   rm -f /tmp/.virgl_test
-  VK_DRIVER_FILES=$HOST_ICD LD_LIBRARY_PATH=$HOST_LIBS VKR_NATIVE_MEMORY=$1 \
+  VK_DRIVER_FILES=$HOST_ICD LD_LIBRARY_PATH=$HOST_LIBS VKR_NATIVE_MEMORY=$1 VKR_MEMORY_STATS_MS=1000 \
     $SERVER_BIN --venus --no-virgl --multi-clients > $OUT/server-$1.log 2>&1 &
   SERVER=$!
   for i in $(seq 1 50); do [ -S /tmp/.virgl_test ] && break; sleep 0.2; done
@@ -106,6 +106,52 @@ grep "vkmem:" $OUT/mem1.txt
 grep -E "memory type|native device-local|allocations in" $OUT/server-1.log | head -12
 echo "== server log:"; grep -v "^$" $OUT/server-1.log | grep -v "memory type" | tail -25
 kill $SERVER 2>/dev/null; wait $SERVER 2>/dev/null
+# The phone's memory types (Mali: no device-local type without host-visible; a cached type the
+# venus guest hides host-visible from) on the server's lavapipe, and GL from the driver's Zink
+# making textures as Steam's UI does: they must come from the server's native type.
+gcc -shared -fPIC -O2 -Wall -o $OUT/libmalimem.so tools/tests/glx/malimem_layer.c || exit 1
+mkdir -p $OUT/layers && cp tools/tests/glx/malimem_layer.json $OUT/layers/ && sed -i "s|/tmp/glx/libmalimem.so|$OUT/libmalimem.so|" $OUT/layers/malimem_layer.json
+gcc -O2 -Wall -o $OUT/glmem tools/tests/glx/glmem.c -lGL -lX11 || exit 1
+unzip -q -o "$zip" 'gl/*' -d $OUT/drv
+G=$OUT/drv/gl; genv=()
+while IFS= read -r line; do
+  case "$line" in ''|'#'*) continue ;; esac
+  k=${line%%=*}; v=${line#*=}; v=${v//@GL@/$G}
+  if [ "${k%+}" != "$k" ]; then k=${k%+}; v="${!k:+${!k}:}$v"; fi
+  genv+=("$k=$v")
+done < $G/env
+Xvfb :9 -screen 0 640x480x24 >/dev/null 2>&1 & XVFB=$!; sleep 2
+glmem_case() {  # name, server env..., -- client env...
+  local name=$1; shift
+  local senv=(); while [ $# -gt 0 ] && [ "$1" != -- ]; do senv+=("$1"); shift; done; shift
+  kill $SERVER 2>/dev/null; wait $SERVER 2>/dev/null; rm -f /tmp/.virgl_test
+  env VK_DRIVER_FILES=$HOST_ICD LD_LIBRARY_PATH=$HOST_LIBS VKR_MEMORY_STATS_MS=1000 \
+    VK_LAYER_PATH=$OUT/layers VK_INSTANCE_LAYERS=VK_LAYER_DROIDDECK_malimem "${senv[@]}" \
+    $SERVER_BIN --venus --no-virgl --multi-clients > $OUT/server-$name.log 2>&1 &
+  SERVER=$!
+  for i in $(seq 1 50); do [ -S /tmp/.virgl_test ] && break; sleep 0.2; done
+  DISPLAY=:9 env "${genv[@]}" "$@" timeout 120 $OUT/glmem > $OUT/glmem-$name.txt 2>&1; GLRC=$?
+  sleep 1.2; DISPLAY=:9 env "${genv[@]}" "$@" timeout 60 $OUT/vkmem 0 > $OUT/vkmem-$name.txt 2>&1
+  grep "glmem:" $OUT/glmem-$name.txt; grep "droiddeck zink: device-local" $OUT/glmem-$name.txt | head -1
+  grep "vkmem: memory type" $OUT/vkmem-$name.txt | tr '\n' ';'; echo
+  grep "memory type\|native device-local memory" $OUT/server-$name.log | sort -u | head -6
+  NATIVE=$(grep "allocations in" $OUT/server-$name.log | sed 's/.*native device-local [0-9]* ([0-9.]* MiB, total \([0-9]*\).*/\1/' | sort -n | tail -1)
+  HEAP=$(grep "allocations in" $OUT/server-$name.log | sed 's/.*dma-heap [0-9]* ([0-9.]* MiB, total \([0-9]*\).*/\1/' | sort -n | tail -1)
+  grep "allocations in" $OUT/server-$name.log | tail -1
+  echo "== $name: native allocations ${NATIVE:-0}, dma-buf ones ${HEAP:-0}"
+}
+echo "---- phone memory types, GL textures from the driver's Zink (expect native memory)"
+glmem_case mali VKR_NATIVE_MEMORY=1 --
+[ $GLRC = 0 ] && [ "${NATIVE:-0}" -gt 0 ] && echo "PASS GL textures in native memory with the phone's types (native ${NATIVE:-0}, dma-buf ${HEAP:-0})" \
+  || { echo "FAIL GL textures in native memory with the phone's types (rc $GLRC, native ${NATIVE:-0}, dma-buf ${HEAP:-0})"; tail -8 $OUT/glmem-mali.txt; grep -i "error\|fail" $OUT/server-mali.log | head -5; }
+echo "---- the same with the driver keeping the GPU's order (DROIDDECK_ZINK_PREFER_UNMAPPABLE=0: expect none)"
+glmem_case mali-order VKR_NATIVE_MEMORY=1 -- DROIDDECK_ZINK_PREFER_UNMAPPABLE=0
+[ $GLRC = 0 ] && [ "${NATIVE:-0}" = 0 ] && echo "PASS the check notices memory not taken from the native type" \
+  || echo "FAIL GPU order case (rc $GLRC, native ${NATIVE:-0})"
+echo "---- an older app (no native type): GL still right"
+glmem_case mali-old VKR_NATIVE_MEMORY=0 --
+[ $GLRC = 0 ] && echo "PASS GL textures with an older app's server" || echo "FAIL GL textures with an older app's server (rc $GLRC)"
+kill $XVFB 2>/dev/null
 echo "---- the same with the alias off (VKR_NATIVE_MEMORY=0, as before)"
 start_server 0
 timeout 120 $OUT/vkmem 0 > $OUT/mem0.txt 2>&1; rc=$?
