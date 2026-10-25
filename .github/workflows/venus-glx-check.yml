@@ -61,6 +61,7 @@ jobs:
         run: |
           mkdir -p drv
           gh release download venus-bridge-latest -R "$GITHUB_REPOSITORY" -p 'Venus-Bridge-guest-*.zip' -D drv
+          gh release download venus-bridge-latest -R "$GITHUB_REPOSITORY" -p 'virglrenderer-src.tar.gz' -D drv
       - name: The bridge end to end (guest driver -> vtest server -> lavapipe)
         run: |
           sudo modprobe udmabuf || true
