@@ -110,7 +110,10 @@ kill $SERVER 2>/dev/null; wait $SERVER 2>/dev/null
 # venus guest hides host-visible from) on the server's lavapipe, and GL from the driver's Zink
 # making textures as Steam's UI does: they must come from the server's native type.
 gcc -shared -fPIC -O2 -Wall -o $OUT/libmalimem.so tools/tests/glx/malimem_layer.c || exit 1
-mkdir -p $OUT/layers && cp tools/tests/glx/malimem_layer.json $OUT/layers/ && sed -i "s|/tmp/glx/libmalimem.so|$OUT/libmalimem.so|" $OUT/layers/malimem_layer.json
+gcc -shared -fPIC -O2 -Wall -o $OUT/libgputype.so tools/tests/glx/gputype_layer.c || exit 1
+mkdir -p $OUT/layers && cp tools/tests/glx/malimem_layer.json tools/tests/glx/gputype_layer.json $OUT/layers/
+sed -i "s|/tmp/glx/libmalimem.so|$OUT/libmalimem.so|" $OUT/layers/malimem_layer.json
+sed -i "s|/tmp/glx/libgputype.so|$OUT/libgputype.so|" $OUT/layers/gputype_layer.json
 gcc -O2 -Wall -o $OUT/glmem tools/tests/glx/glmem.c -lGL -lX11 || exit 1
 unzip -q -o "$zip" 'gl/*' -d $OUT/drv
 G=$OUT/drv/gl; genv=()
@@ -126,11 +129,11 @@ glmem_case() {  # name, server env..., -- client env...
   local senv=(); while [ $# -gt 0 ] && [ "$1" != -- ]; do senv+=("$1"); shift; done; shift
   kill $SERVER 2>/dev/null; wait $SERVER 2>/dev/null; rm -f /tmp/.virgl_test
   env VK_DRIVER_FILES=$HOST_ICD LD_LIBRARY_PATH=$HOST_LIBS VKR_MEMORY_STATS_MS=1000 \
-    VK_LAYER_PATH=$OUT/layers VK_INSTANCE_LAYERS=VK_LAYER_DROIDDECK_malimem "${senv[@]}" \
+    VK_ADD_LAYER_PATH=$OUT/layers VK_INSTANCE_LAYERS=VK_LAYER_DROIDDECK_malimem:VK_LAYER_DROIDDECK_gputype "${senv[@]}" \
     $SERVER_BIN --venus --no-virgl --multi-clients > $OUT/server-$name.log 2>&1 &
   SERVER=$!
   for i in $(seq 1 50); do [ -S /tmp/.virgl_test ] && break; sleep 0.2; done
-  DISPLAY=:9 env "${genv[@]}" "$@" timeout 120 $OUT/glmem > $OUT/glmem-$name.txt 2>&1; GLRC=$?
+  DISPLAY=:9 env "${genv[@]}" MESA_LOADER_DRIVER_OVERRIDE=zink "$@" timeout 120 $OUT/glmem > $OUT/glmem-$name.txt 2>&1; GLRC=$?
   sleep 1.2; DISPLAY=:9 env "${genv[@]}" "$@" timeout 60 $OUT/vkmem 0 > $OUT/vkmem-$name.txt 2>&1
   grep "glmem:" $OUT/glmem-$name.txt; grep "droiddeck zink: device-local" $OUT/glmem-$name.txt | head -1
   grep "vkmem: memory type" $OUT/vkmem-$name.txt | tr '\n' ';'; echo
@@ -139,6 +142,7 @@ glmem_case() {  # name, server env..., -- client env...
   HEAP=$(grep "allocations in" $OUT/server-$name.log | sed 's/.*dma-heap [0-9]* ([0-9.]* MiB, total \([0-9]*\).*/\1/' | sort -n | tail -1)
   grep "allocations in" $OUT/server-$name.log | tail -1
   echo "== $name: native allocations ${NATIVE:-0}, dma-buf ones ${HEAP:-0}"
+  if [ $GLRC != 0 ]; then tail -6 $OUT/glmem-$name.txt; tail -4 $OUT/vkmem-$name.txt; grep -v "^$" $OUT/server-$name.log | tail -6; fi
 }
 echo "---- phone memory types, GL textures from the driver's Zink (expect native memory)"
 glmem_case mali VKR_NATIVE_MEMORY=1 --
