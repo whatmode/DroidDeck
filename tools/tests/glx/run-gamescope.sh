@@ -64,6 +64,32 @@ echo "======== the same window from a second X connection"; RETIRE_MODE=twodispl
 retired=$(grep -c 'Swapchain retired' $OUT/log)
 if grep -q "retire: done" $OUT/log && [ "${fails:-0}" = 0 ] && [ "$retired" = 0 ]; then echo "PASS one swapchain for a window drawn from two connections"
 else echo "FAIL: $retired swapchain(s) retired for a window drawn from two connections"; fails=1; fi
+# Steam's side menu over its main window: screenshots must show both, every time.
+shots() {  # mode label share
+  rm -rf $OUT/shots
+  env "${genv[@]}" DROIDDECK_KOPPER_SHARE_SCREEN=$3 timeout 120 $GS --backend headless -W 1600 -H 720 -w 1600 -h 720 -r 60 -- \
+    env VK_LAYER_PATH=$OUT/layers VK_INSTANCE_LAYERS=VK_LAYER_DROIDDECK_gputype tools/tests/glx/shots.sh $OUT/shots $OUT/retire 6 $1 > $OUT/log 2>&1
+  python3 - "$2" $OUT/shots <<'PY'
+import glob, sys
+from PIL import Image
+label, d = sys.argv[1:]
+both = main_only = menu_only = other = 0
+for f in sorted(glob.glob(d + "/shot*.png")):
+    im = Image.open(f).convert("RGB")
+    w, h = im.size
+    m = im.getpixel((w * 3 // 4, h // 2)); n = im.getpixel((w * 100 // 1600, h // 2))
+    main = m[2] > 150 and m[0] < 80; menu = n[0] > 150 and n[1] > 150 and n[2] < 80
+    if main and menu: both += 1
+    elif main: main_only += 1
+    elif menu: menu_only += 1
+    else: other += 1
+print(f"== {label}: {both} screenshot(s) with both windows, {main_only} main only, {menu_only} menu only, {other} neither")
+print(("PASS " if both and not (main_only or menu_only or other) else "FAIL ") + label)
+PY
+}
+echo "======== side menu from another X connection, shared Zink screen"; shots menu2 "menu from a second connection, shared screen" 1
+echo "======== side menu from another X connection, a Zink screen per connection"; shots menu2 "menu from a second connection, screen per connection" 0
+echo "======== side menu from the same X connection, shared Zink screen"; shots menu1 "menu from the same connection, shared screen" 1
 echo "======== the same window from a second context"; RETIRE_MODE=twocontexts GS_EXTRA="-e" run_gs $GS; report
 if ! grep -q "retire: done" $OUT/log && [ "${fails:-0}" = 0 ] && [ "$GS" != /usr/bin/gamescope ]; then
   echo "== the app's gamescope did not run it; its log:"; sed 's/\x1b\[[0-9;]*m//g' $OUT/log | tail -25 | cut -c1-200

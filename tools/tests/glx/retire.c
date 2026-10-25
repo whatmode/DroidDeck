@@ -46,6 +46,34 @@ int main(int argc, char **argv) {
   GLXContext pop_ctx = glXCreateContext(x, vi, main_ctx, True);
   for (int i = 0; i < 30; i++) frame(main_win, main_ctx, 0.1f, 0.3f, 0.6f);
   fprintf(stderr, "retire: main window up\n");
+  if (!strncmp(mode, "menu", 4)) {
+    /* Steam's side menu: a second window (358 px wide, at the left) over the main one, both
+     * drawn every frame, the menu from another X connection ("menu2") or the same ("menu1").
+     * The main window is blue, the menu yellow; screenshots tell whether both show. */
+    XResizeWindow(x, main_win, 1600, 720);
+    Display *x2 = !strcmp(mode, "menu2") ? XOpenDisplay(NULL) : x;
+    XVisualInfo *vi2 = glXChooseVisual(x2, DefaultScreen(x2), attr);
+    XSetWindowAttributes swa = {0};
+    swa.colormap = XCreateColormap(x2, RootWindow(x2, vi2->screen), vi2->visual, AllocNone);
+    swa.override_redirect = True;
+    Window menu = XCreateWindow(x2, RootWindow(x2, vi2->screen), 0, 0, 358, 720, 0, vi2->depth, InputOutput, vi2->visual,
+                                CWColormap | CWOverrideRedirect, &swa);
+    XMapRaised(x2, menu);
+    XSync(x2, False);
+    GLXContext c2 = glXCreateContext(x2, vi2, NULL, True);
+    fprintf(stderr, "retire: menu window up\n");
+    for (int i = 0; i < rounds * 60; i++) {
+      frame(main_win, main_ctx, 0.0f, 0.0f, 1.0f);
+      glXMakeCurrent(x2, menu, c2);
+      glClearColor(1.0f, 1.0f, 0.0f, 1);
+      glClear(GL_COLOR_BUFFER_BIT);
+      glXSwapBuffers(x2, menu);
+      usleep(16000);
+    }
+    glFinish();
+    printf("retire: done\n");
+    return 0;
+  }
   if (!strcmp(mode, "twodisplays") || !strcmp(mode, "twocontexts")) {
     /* The same window drawn from a second GL context: on another X connection (Steam's
      * client holds several), or on the same one. */
