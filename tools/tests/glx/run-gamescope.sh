@@ -80,17 +80,31 @@ for f in sorted(glob.glob(d + "/shot*.png")):
     w, h, px = pngpix.read(f)
     m = px(w * 3 // 4, h // 2); n = px(w * 100 // 1600, h // 2)
     main = m[2] > 150 and m[0] < 80; menu = n[0] > 150 and n[1] > 150 and n[2] < 80
+    if label.startswith("child"):
+        # one window over the whole screen: blue (main) or yellow (child), as X shows it
+        main, menu = main and not menu, menu and m[0] > 150 and m[1] > 150 and m[2] < 80
+        if main: main_only += 1
+        elif menu: menu_only += 1
+        else: other += 1
+        continue
     if main and menu: both += 1
     elif main: main_only += 1
     elif menu: menu_only += 1
     else: other += 1
-print(f"== {label}: {both} screenshot(s) with both windows, {main_only} main only, {menu_only} menu only, {other} neither")
-print(("PASS " if both and not (main_only or menu_only or other) else "FAIL ") + label)
+print(f"== {label}: {both} screenshot(s) with both windows, {main_only} main only, {menu_only} menu/child only, {other} neither")
+if label.startswith("child hidden"): ok = main_only and not (both or menu_only or other)
+elif label.startswith("child shown"): ok = menu_only and not (both or main_only or other)
+else: ok = both and not (main_only or menu_only or other)
+print(("PASS " if ok else "FAIL ") + label)
 PY
 }
 echo "======== side menu from another X connection, shared Zink screen"; shots menu2 "menu from a second connection, shared screen" 1
 echo "======== side menu from another X connection, a Zink screen per connection"; shots menu2 "menu from a second connection, screen per connection" 0
 echo "======== side menu from the same X connection, shared Zink screen"; shots menu1 "menu from the same connection, shared screen" 1
+echo "======== unmapped GL child inside the main window (Chromium/ANGLE)"; shots childhidden "child hidden: X shows the main window" 1
+echo "== retired: $(grep -c 'Swapchain retired' $OUT/log), kopper notes: $(grep -c 'droiddeck kopper' $OUT/log)"; grep "droiddeck kopper" $OUT/log | sort | uniq -c | head -8 | cut -c1-160
+echo "======== mapped GL child over the main window"; shots childshown "child shown: X shows the child" 1
+echo "== retired: $(grep -c 'Swapchain retired' $OUT/log), kopper notes: $(grep -c 'droiddeck kopper' $OUT/log)"; grep "droiddeck kopper" $OUT/log | sort | uniq -c | head -8 | cut -c1-160
 echo "======== the same window from a second context"; RETIRE_MODE=twocontexts GS_EXTRA="-e" run_gs $GS; report
 if ! grep -q "retire: done" $OUT/log && [ "${fails:-0}" = 0 ] && [ "$GS" != /usr/bin/gamescope ]; then
   echo "== the app's gamescope did not run it; its log:"; sed 's/\x1b\[[0-9;]*m//g' $OUT/log | tail -25 | cut -c1-200
