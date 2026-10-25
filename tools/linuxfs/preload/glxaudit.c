@@ -19,7 +19,12 @@
  * Only the client's main process audits (not its update UI child, not other programs). */
 
 static int audit_on;
-static struct link_map *x11_map;
+/* Handles to the program's own libraries: dlmopen in the base namespace (a link map pointer
+ * from la_objopen is not usable with dlsym from here). */
+static void *base_lib(const char *name) { return dlmopen(LM_ID_BASE, name, RTLD_LAZY | RTLD_NOLOAD); }
+#define x11_map base_lib("libX11.so.6")
+#define libc_map base_lib("libc.so.6")
+#define gl_map base_lib("libGL.so.1")
 
 static void out(const char *s) { if (write(2, s, strlen(s)) < 0) { } }
 
@@ -55,11 +60,8 @@ static int wanted_target(const char *name) {
 }
 
 unsigned int la_objopen(struct link_map *map, Lmid_t lmid, uintptr_t *cookie) {
-  (void)lmid;
   *cookie = (uintptr_t)map;
   if (!audit_on) return 0;
-  const char *b = map->l_name ? strrchr(map->l_name, '/') : NULL;
-  if (b && !strncmp(b + 1, "libX11.so", 9)) x11_map = map;
   return LA_FLG_BINDFROM | (wanted_target(map->l_name) ? LA_FLG_BINDTO : 0);
 }
 
@@ -90,10 +92,79 @@ static void log_attribs(const char *what, void *dpy, int screen, const int *attr
   out(buf);
 }
 
+/* The program's own environment (its libc, not this audit namespace's copy, which does not
+ * see later setenv calls). */
+static char ***main_environ(void) { return libc_map ? (char ***)dlsym(libc_map, "environ") : NULL; }
+
+static void log_env(void) {
+  static const char *prefixes[] = {"LIBGL_", "MESA_", "GALLIUM_", "ZINK_", "VK_", "__GLX_", "__EGL_", "DISPLAY=",
+                                   "XAUTHORITY=", "LD_LIBRARY_PATH=", NULL};
+  char ***env = main_environ();
+  if (!env || !*env) { out("glxaudit: program environment not found\n"); return; }
+  for (char **e = *env; *e; e++)
+    for (int i = 0; prefixes[i]; i++)
+      if (!strncmp(*e, prefixes[i], strlen(prefixes[i]))) {
+        char buf[1100];
+        snprintf(buf, sizeof(buf), "glxaudit[%d]: env at the call: %.1000s\n", (int)getpid(), *e);
+        out(buf);
+        break;
+      }
+}
+
+typedef int (*setenv_t)(const char *, const char *, int);
+typedef int (*unsetenv_t)(const char *);
+typedef char *(*getenv_t)(const char *);
+
+/* GLX as seen on the program's own display. */
+static void log_glx(void *dpy, int screen) {
+  if (!gl_map) return;
+  int (*query_ext)(void *, int *, int *) = (int (*)(void *, int *, int *))dlsym(gl_map, "glXQueryExtension");
+  int (*query_ver)(void *, int *, int *) = (int (*)(void *, int *, int *))dlsym(gl_map, "glXQueryVersion");
+  const char *(*server_string)(void *, int, int) = (const char *(*)(void *, int, int))dlsym(gl_map, "glXQueryServerString");
+  void **(*get_fbconfigs)(void *, int, int *) = (void **(*)(void *, int, int *))dlsym(gl_map, "glXGetFBConfigs");
+  int eb = 0, ev = 0, maj = 0, min = 0, n = 0;
+  int ext = query_ext ? query_ext(dpy, &eb, &ev) : -1;
+  int ver = query_ver ? query_ver(dpy, &maj, &min) : -1;
+  const char *vendor = server_string ? server_string(dpy, screen, 1) : NULL;
+  void **cfgs = get_fbconfigs ? get_fbconfigs(dpy, screen, &n) : NULL;
+  char buf[512];
+  snprintf(buf, sizeof(buf), "glxaudit[%d]: on this display: GLX extension %d, version %d (%d.%d), server vendor %s, %d FB config(s)\n",
+           (int)getpid(), ext, ver, maj, min, vendor ? vendor : "(none)", cfgs ? n : 0);
+  out(buf);
+}
+
 static void *audit_choose_visual(void *dpy, int screen, int *attr) {
   void *v = real_choose ? real_choose(dpy, screen, attr) : NULL;
   log_attribs("glXChooseVisual", dpy, screen, attr, v);
   if (v || !real_choose || !dpy) return v;
+  static int once;
+  setenv_t set = libc_map ? (setenv_t)dlsym(libc_map, "setenv") : NULL;
+  unsetenv_t unset = libc_map ? (unsetenv_t)dlsym(libc_map, "unsetenv") : NULL;
+  getenv_t get = libc_map ? (getenv_t)dlsym(libc_map, "getenv") : NULL;
+  if (!once++) {
+    log_env();
+    log_glx(dpy, screen);
+    /* Mesa forgets a display whose GLX set-up failed, so a retry sets it up again: with its
+     * loader's messages this time. */
+    if (set && get && !get("LIBGL_DEBUG")) {
+      set("LIBGL_DEBUG", "verbose", 1);
+      v = real_choose(dpy, screen, attr);
+      log_attribs("retry with LIBGL_DEBUG=verbose", dpy, screen, attr, v);
+      if (unset) unset("LIBGL_DEBUG");
+      if (v) { out("glxaudit: rescued by simply retrying\n"); return v; }
+    }
+  }
+  /* Steam sets LIBGL_KOPPER_DISABLE=true for its webhelper; if the client's own GLX sees it,
+   * Zink cannot draw on this Xwayland. The webhelper drops it again (webhelper.c). */
+  if (get && unset && get("LIBGL_KOPPER_DISABLE")) {
+    char saved[64];
+    snprintf(saved, sizeof(saved), "%s", get("LIBGL_KOPPER_DISABLE"));
+    unset("LIBGL_KOPPER_DISABLE");
+    v = real_choose(dpy, screen, attr);
+    log_attribs("retry without LIBGL_KOPPER_DISABLE", dpy, screen, attr, v);
+    if (v) { out("glxaudit: rescued: LIBGL_KOPPER_DISABLE stays unset in the client\n"); return v; }
+    if (set) set("LIBGL_KOPPER_DISABLE", saved, 1);
+  }
   /* GLX_RGBA 4, GLX_DOUBLEBUFFER 5, GLX_DEPTH_SIZE 12 */
   static int plain[][8] = {{4, 5, 12, 24, 0}, {4, 5, 0}, {4, 0}};
   int screens[2] = {screen, 0};

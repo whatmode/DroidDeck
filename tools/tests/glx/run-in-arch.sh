@@ -17,6 +17,9 @@ annotate() {
     n=$((n+1)); [ $n -gt 9 ] && break
     printf '::notice title=glx report %d::%s\n' $n "$(sed 's/%/%25/g' "$f" | cut -c1-300 | awk 'BEGIN{ORS="%0A"}{print}')" >&3
   done
+  echo "---- $1: audited 'steam' that sets LIBGL_KOPPER_DISABLE itself (report)"
+  LD_AUDIT=$OUT/libblsession.so $OUT/audit2/steam > $OUT/log 2>&1; echo "exit $?"
+  grep "glxaudit\|program got" $OUT/log | grep -v "env at" | head -12
 }
 trap annotate EXIT
 grep -q '^DisableSandbox' /etc/pacman.conf || sed -i 's/^\[options\]/[options]\nDisableSandbox/' /etc/pacman.conf
@@ -28,6 +31,7 @@ echo "== mesa $(pacman -Q mesa), $(pacman -Q xorg-xwayland)"
 OUT=/tmp/glx; mkdir -p $OUT
 gcc -O2 -Wall -o $OUT/glxcheck tools/tests/glx/glxcheck.c -lGL -lX11 || exit 1
 printf '#include <stdlib.h>\nint main(void) { exit(1); }\n' > $OUT/steam.c && gcc -o $OUT/steam $OUT/steam.c || exit 1
+mkdir -p $OUT/audit2 && gcc -O2 -Wall -o $OUT/audit2/steam tools/tests/glx/auditkopper.c -ldl || exit 1
 mkdir -p $OUT/audit && gcc -O2 -Wall -o $OUT/audit/steam tools/tests/glx/auditcheck.c -ldl || exit 1
 gcc -shared -fPIC -O2 -Wall -pthread -o $OUT/libblsession.so tools/linuxfs/preload/*.c -ldl || exit 1
 
