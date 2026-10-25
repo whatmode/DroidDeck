@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 
 static Display *x;
 static XVisualInfo *vi;
@@ -98,6 +99,8 @@ int main(int argc, char **argv) {
     XSync(x2, False);
     GLXContext c2 = glXCreateContext(x2, vi2, NULL, True);
     fprintf(stderr, "retire: child window 0x%lx %s\n", (unsigned long)child, shown ? "mapped" : "unmapped");
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
     for (int i = 0; i < rounds * 60; i++) {
       frame(main_win, main_ctx, 0.0f, 0.0f, 1.0f);
       glXMakeCurrent(x2, child, c2);
@@ -107,6 +110,9 @@ int main(int argc, char **argv) {
       usleep(16000);
     }
     glFinish();
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double ms = (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+    fprintf(stderr, "retire: %d frame pairs in %.0f ms (%.1f ms each, 16 ms of it sleeping)\n", rounds * 60, ms, ms / (rounds * 60));
     printf("retire: done\n");
     return 0;
   }
