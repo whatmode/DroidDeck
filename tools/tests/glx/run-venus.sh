@@ -128,7 +128,7 @@ glmem_case() {  # name, server env..., -- client env...
   local name=$1; shift
   local senv=(); while [ $# -gt 0 ] && [ "$1" != -- ]; do senv+=("$1"); shift; done; shift
   kill $SERVER 2>/dev/null; wait $SERVER 2>/dev/null; rm -f /tmp/.virgl_test
-  env VK_DRIVER_FILES=$HOST_ICD LD_LIBRARY_PATH=$HOST_LIBS VKR_MEMORY_STATS_MS=1000 \
+  env VK_DRIVER_FILES=$HOST_ICD LD_LIBRARY_PATH=$HOST_LIBS VKR_MEMORY_STATS_MS=200 \
     VK_ADD_LAYER_PATH=$OUT/layers VK_INSTANCE_LAYERS=VK_LAYER_DROIDDECK_malimem:VK_LAYER_DROIDDECK_gputype "${senv[@]}" \
     $SERVER_BIN --venus --no-virgl --multi-clients > $OUT/server-$name.log 2>&1 &
   SERVER=$!
