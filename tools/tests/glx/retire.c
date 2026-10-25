@@ -82,6 +82,10 @@ int main(int argc, char **argv) {
      * "sidemenustill": as Steam with its menu open, the main view stops drawing after a few
      * frames and Chromium draws its toplevel (red) now and then; X still shows main + menu. */
     int still = !strcmp(mode, "sidemenustill");
+    /* "sidemenulate": the menu comes up only after the main view went still (Steam's webhelper
+     * crashed there reading the main view's released swapchain image) */
+    int late = !strcmp(mode, "sidemenulate");
+    if (late) still = 1;
     glXMakeCurrent(x, None, NULL);
     XUnmapWindow(x, main_win);
     XSync(x, False);
@@ -101,7 +105,8 @@ int main(int argc, char **argv) {
     Window g1 = XCreateWindow(x2, h1, 0, 0, 1600, 720, 0, vi2->depth, InputOutput, vi2->visual, m, &swa);
     Window h2 = XCreateWindow(x2, top, 0, 0, 358, 720, 0, vi2->depth, InputOutput, vi2->visual, CWColormap, &swa);
     Window g2 = XCreateWindow(x2, h2, 0, 0, 358, 720, 0, vi2->depth, InputOutput, vi2->visual, m, &swa);
-    XMapWindow(x2, g1); XMapWindow(x2, h1); XMapWindow(x2, g2); XMapWindow(x2, h2);
+    XMapWindow(x2, g1); XMapWindow(x2, h1); XMapWindow(x2, g2);
+    if (!late) XMapWindow(x2, h2);
     XSync(x2, False);
     GLXContext c1 = glXCreateContext(x2, vi2, NULL, True), c2 = glXCreateContext(x2, vi2, c1, True);
     fprintf(stderr, "retire: toplevel 0x%lx with main 0x%lx and menu 0x%lx\n", (unsigned long)top, (unsigned long)g1, (unsigned long)g2);
@@ -119,6 +124,8 @@ int main(int argc, char **argv) {
         glClear(GL_COLOR_BUFFER_BIT);
         glXSwapBuffers(x, top);
       }
+      if (late && i == 60) { XMapWindow(x2, h2); XSync(x2, False); fprintf(stderr, "retire: menu up over the still main view\n"); }
+      if (late && i < 60) { usleep(16000); continue; }
       glXMakeCurrent(x2, g2, c2);
       glClearColor(1.0f, 1.0f, 0.0f, 1);
       glClear(GL_COLOR_BUFFER_BIT);
