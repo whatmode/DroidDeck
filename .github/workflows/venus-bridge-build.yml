@@ -93,6 +93,7 @@ jobs:
           path: |
             out/Venus-Bridge-guest-*.zip
             out/mesa-virtio-src.tar.gz
+            out/mesa-virtio-gen.tar.gz
 
   publish:
     needs: [server, guest]

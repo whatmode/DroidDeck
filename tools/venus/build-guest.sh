@@ -26,6 +26,9 @@ meson setup "$WORK/build-mesa" "$WORK/mesa" --buildtype release \
   -Degl=disabled -Dgles1=disabled -Dgles2=disabled -Dopengl=false -Dglx=disabled -Dgbm=disabled \
   -Dllvm=disabled -Dzstd=disabled -Dlibunwind=disabled -Dvalgrind=disabled
 ninja -C "$WORK/build-mesa"
+# The generated headers (entrypoints, dispatch tables, format tables): with the source above,
+# enough to compile-check a driver change outside this build.
+(cd "$WORK/build-mesa" && find src -name '*.h' -print0 | tar --null -czf "$OUT/mesa-virtio-gen.tar.gz" -T -)
 SO="$WORK/build-mesa/src/virtio/vulkan/libvulkan_virtio.so"
 ICD=$(ls "$WORK"/build-mesa/src/virtio/vulkan/virtio_icd.*.json | head -1)
 D="$OUT/venus-guest"

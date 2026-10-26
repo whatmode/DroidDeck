@@ -95,6 +95,12 @@ v=0; for f in /tmp/dump/*.spv; do
 done
 [ $v -ge 2 ] && echo "PASS rewritten shaders valid ($v checked by spirv-val)" || echo "FAIL rewritten shaders checked: $v"
 spirv-dis $(ls /tmp/dump/*.spv | head -1) 2>/dev/null | grep -E "Capability|Variable|EntryPoint|Pointer" | head -14
+echo "---- BC textures emulated (DROIDDECK_VN_EMULATE=mali)"
+gcc -O2 -Wall -o $OUT/vkbc tools/tests/glx/vkemu/vkbc.c -lvulkan || exit 1
+DROIDDECK_VN_EMULATE=mali timeout 120 $OUT/vkbc > $OUT/bc.txt 2>&1; rc=$?
+grep "vkbc:" $OUT/bc.txt
+grep "BC textures" /tmp/steamroot/logs/droiddeck_vulkan.txt | grep vkbc | tail -3 | cut -c1-300
+[ $rc = 0 ] && echo "PASS BC textures on a GPU without them" || { echo "FAIL BC textures on a GPU without them (rc $rc)"; tail -8 $OUT/bc.txt; }
 echo "---- the same without emulation (the GPU here draws wireframe; the check must notice)"
 DROIDDECK_VN_EMULATE=0 timeout 120 $OUT/vkemu $OUT/clip-spv10.spv $OUT/green.spv > $OUT/noemu.txt 2>&1
 grep "vkemu:" $OUT/noemu.txt | head -6
