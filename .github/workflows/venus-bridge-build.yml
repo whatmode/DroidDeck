@@ -54,6 +54,10 @@ jobs:
   guest:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
+    env:
+      # A fixed work dir so the BC band check can reuse the checkout and build dir the guest
+      # build leaves behind (build-guest.sh honours VENUS_WORK).
+      VENUS_WORK: ${{ runner.temp }}/venus
     steps:
       - uses: actions/checkout@v4
       - name: Build dependencies
@@ -87,6 +91,11 @@ jobs:
           [ -f out/gl-build.log ] || exit 0
           echo "::notice title=GL part (start)::$(grep -nE "^== |Run-time dependency|Program |ERROR|error:|not found|WARNING" out/gl-build.log | head -70 | enc)"
           echo "::notice title=GL part (end)::$(tail -60 out/gl-build.log | enc)"
+      - name: Check the BC band split against the driver's own decode code
+        # Runs before the artifact upload: the fast paths and the row-band split meet in
+        # bc_decode_task, and a mismatch there is the "map is cut in half" bug.
+        run: |
+          bash tools/venus/bc-band-test/run.sh "$VENUS_WORK/mesa" "$VENUS_WORK/build-mesa"
       - uses: actions/upload-artifact@v4
         with:
           name: venus-guest

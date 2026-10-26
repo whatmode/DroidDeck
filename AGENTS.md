@@ -332,6 +332,15 @@ after editing one file it takes seconds, because the build dir is reused.
   source of truth; a copied `-D` list drifts (it needs 111 defines here, including
   `-DPACKAGE_VERSION` and the `HAVE_*` set) and produces errors that are the harness's, not the
   driver's.
+- The script needs `ninja`, `meson`, `pkg-config`, the X11/xcb/Wayland dev headers and libdrm.
+  On a bare Debian container that is
+  `apt-get install -y pkg-config libdrm-dev libx11-dev libx11-xcb-dev libxext-dev libxfixes-dev
+  libxcb1-dev libxcb-dri3-dev libxcb-present-dev libxcb-shm0-dev libxcb-sync-dev
+  libxcb-randr0-dev libxcb-xfixes0-dev libxshmfence-dev libxrandr-dev libxxf86vm-dev
+  libwayland-dev libwayland-egl-backend-dev` plus `pip install ninja meson mako packaging`.
+  The failures are misleading without them: a missing `packaging` module surfaces as "mako
+  module >= 0.8.0 required", and a missing `pkg-config` as a libdrm lookup failure. CI's guest
+  job already installs all of it.
 - `vn_android.c` is Android-only: meson adds it under `with_platform_android` and it needs the NDK's
   `vndk/hardware_buffer.h`. Skip it on the Linux side.
 - `build-guest.sh` also publishes `mesa-virtio-src.tar.gz` "enough to compile-check a driver change
@@ -370,6 +379,28 @@ CPU (`DROIDDECK_VN_BC_THREADS` overrides; `=1` keeps the old serial path).
   serial decode on the submit thread. The same fallback covers a failed task-list `realloc`; the
   split loop must not drop jobs when it bails out.
 
+## Check the BC band split (`tools/venus/bc-band-test/run.sh`)
+
+`tools/venus/bc-band-test/run.sh <mesa-src> <build-dir>` extracts the BC decode functions from
+`vn_droiddeck_bc.c` **verbatim** (via `genbcband.py`) and checks the row-band split end to end:
+it replicates `bc_decode_cmd`'s split, runs each task through the real `bc_decode_task`, and
+compares the assembled image byte-for-byte with a whole-image decode, across BC1/2/3/4/5, band
+counts from 1 to 64, and array/cubemap slices (75 cases). It needs a build dir from
+`check-guest.sh` (it uses the build's own flags and its `libmesa_util.a` for the reference
+decode) and exits non-zero on any mismatch. CI runs it in the guest job, after the ICD build.
+
+- This exists because testing the decoders and the split **separately** is not enough. The
+  decoders were correct without bands, the split was correct with the generic decoder, and the
+  fast paths still ignored the band offset, so every band after the first overwrote the top rows
+  and the rest of the texture stayed staging garbage. On the phone that is "the map is cut in
+  half". Both earlier harnesses passed while the phone was broken.
+- Extract the code, never copy it. A hand-copied "verbatim copy" had the correct BC5 source
+  stride (`s += block`) while the driver shipped `s += 8`, so the copy passed and the phone did
+  not. `genbcband.py` reads the function bodies out of the driver, so a copy cannot drift.
+- The check is what to reach for when a texture looks partially decoded, half-black, or
+  "cut in half": if it passes, the bug is not in this decode path, and if it fails the mismatch
+  line names the first bad byte and the row it is in.
+
 ## BC decode: block-at-a-time fast path (`bc_decode_s3tc`, `bc_decode_rgtc`)
 Mesa's generic path (`util_format_translate` -> `u_format_s3tc.c`) decodes one texel at a time
 and rebuilds the block's palette for each of the 16 texels. Mesa's own comment says it: *"to be
@@ -391,9 +422,18 @@ formats DXVK actually ships.
   to R8_SNORM, so `translate` picks `util_format_rgtc1_snorm_unpack_r_8snorm`, which works.
 - Unhandled formats (BC6H/BC7, and anything the generic path would scale) fall through to
   `util_format_translate`, so the fast path cannot silently corrupt them.
-- These functions index only rows `0..height-1` from the task's `src`, which is a band within a
-  slice, so they compose with the row-band split: the band's `src` is already offset to the band
-  start. Do not add a `y0` term inside them.
+- These functions start at block `(0,0)` of whatever pointer they are given, and a task's `src` is
+  the **slice** start, not the band start. So the caller (`bc_decode_task`) must add the band
+  offset before calling them: `src + (y0/4) * src_row` and `dst + y0 * dst_row`. Getting this
+  wrong is the "texture is cut in half" bug: band 0 decodes correctly and every later band
+  overwrites the top rows, leaving the rest of the image as staging garbage. The generic path
+  needs no such fixup because it is handed `dst_y`/`src_y` directly. **A previous version of this
+  note claimed the opposite** ("the band's `src` is already offset ... do not add a `y0` term"),
+  which is what shipped the bug.
+- These functions must take their per-block source stride from `util_format_get_blocksize(fmt)`,
+  never a literal. A BC5 block is 16 bytes (two 8-byte channels), so the `s += 8` that is right for
+  BC4 walks BC5 at half speed and decodes half the blocks. This one is invisible to a test that
+  only checks BC4.
 - They also assume the job's `width`/`height` are multiples of 4, which the submit path guarantees:
   it rounds up with `w4 = align(imageExtent.width, 4)` and sizes the destination as `w4 * h4`, so
   a whole-block write is always in range. That is why a 6x6 BC texture works (it decodes an 8x8

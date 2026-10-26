@@ -149,7 +149,7 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck
 new file mode 100644
 --- /dev/null
 +++ b/src/virtio/vulkan/vn_droiddeck_bc.c
-@@ -0,0 +1,897 @@
+@@ -0,0 +1,905 @@
 +/*
 + * DroidDeck: BC compressed textures on a GPU without them (see the header).
 + * SPDX-License-Identifier: MIT
@@ -847,12 +847,13 @@ new file mode 100644
 +      return false;
 +
 +   const unsigned comps = bc5 ? 2 : 1;
++   const unsigned block = util_format_get_blocksize(fmt); /* 8 for BC4, 16 for BC5 */
 +   const unsigned bw = width / 4, bh = height / 4;
 +
 +   for (unsigned by = 0; by < bh; by++) {
 +      const uint8_t *s = src + (size_t)by * src_row;
 +      uint8_t *d = dst + (size_t)by * 4 * dst_row;
-+      for (unsigned bx = 0; bx < bw; bx++, s += 8, d += 4 * comps) {
++      for (unsigned bx = 0; bx < bw; bx++, s += block, d += 4 * comps) {
 +         for (unsigned ch = 0; ch < comps; ch++) {
 +            const uint8_t *blk = s + ch * 8;
 +            uint8_t pal[8];
@@ -873,10 +874,17 @@ new file mode 100644
 +bc_decode_task(void *job, void *gdata, int thread_index)
 +{
 +   const struct vn_dd_bc_task *task = job;
-+   if (bc_decode_s3tc(task->job.src_format, task->dst, task->job.dst_row, task->src,
++   /* A task is a band at y0 within the slice. util_format_translate is told that with its
++    * dst_y/src_y arguments, but the fast paths always start at their own first block, so the
++    * band offset has to be added to their pointers. y0 is a whole number of 4-texel block rows
++    * (the split rounds the band height down to a multiple of 4). */
++   const unsigned src_y = task->y0 / 4;
++   const uint8_t *src = task->src + (size_t)src_y * task->job.src_row;
++   uint8_t *dst = task->dst + (size_t)task->y0 * task->job.dst_row;
++   if (bc_decode_s3tc(task->job.src_format, dst, task->job.dst_row, src,
 +                      (unsigned)task->job.src_row, task->job.width, task->height))
 +      return;
-+   if (bc_decode_rgtc(task->job.src_format, task->dst, task->job.dst_row, task->src,
++   if (bc_decode_rgtc(task->job.src_format, dst, task->job.dst_row, src,
 +                      (unsigned)task->job.src_row, task->job.width, task->height))
 +      return;
 +   /* src_y is in block rows, not texel rows, because src_row is one block row. */
