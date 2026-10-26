@@ -149,7 +149,7 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck
 new file mode 100644
 --- /dev/null
 +++ b/src/virtio/vulkan/vn_droiddeck_bc.c
-@@ -0,0 +1,596 @@
+@@ -0,0 +1,897 @@
 +/*
 + * DroidDeck: BC compressed textures on a GPU without them (see the header).
 + * SPDX-License-Identifier: MIT
@@ -165,8 +165,12 @@ new file mode 100644
 +#include "util/simple_mtx.h"
 +#include "util/u_atomic.h"
 +#include "util/os_time.h"
++#include "util/u_debug.h"
++#include "util/u_cpu_detect.h"
 +#include "util/u_dynarray.h"
 +#include "util/u_math.h"
++#include "util/u_queue.h"
++#include "util/u_thread.h"
 +#include "vk_format.h"
 +#include "vk_util.h"
 +
@@ -243,6 +247,12 @@ new file mode 100644
 +   int64_t since;
 +   unsigned reports;
 +} bc_stats;
++
++/* The decoder threads, made on first use (see bc_decode_tasks). */
++static struct util_queue bc_queue;
++
++static void
++bc_decode_task(void *job, void *gdata, int thread_index);
 +
 +static void
 +bc_stats_add(uint64_t images, uint64_t copies, uint64_t regions, uint64_t bytes_in,
@@ -457,6 +467,24 @@ new file mode 100644
 +   uint8_t *dst;
 +   uint32_t dst_row;
 +   VkDeviceSize dst_slice;
++};
++
++/* The decoded bytes a job writes, which the decoder threads share.  src_row is left out on
++ * purpose: it is only read, so it stays on the job. */
++#define VN_DD_BC_JOB_READ_WRITE \
++   ((uint64_t)(offsetof(struct vn_dd_bc_job, src_offset)) | \
++    (uint64_t)(offsetof(struct vn_dd_bc_job, slices)) | \
++    (uint64_t)(offsetof(struct vn_dd_bc_job, width)) | \
++    (uint64_t)(offsetof(struct vn_dd_bc_job, dst)))
++
++/* One unit of decode work: one slice of one job, or part of a big slice.  Fields with an
++ * offset in VN_DD_BC_JOB_READ_WRITE are the job's, so that the thread that takes the unit can
++ * read them without another thread changing them underneath it. */
++struct vn_dd_bc_task {
++   struct vn_dd_bc_job job;
++   const uint8_t *src; /* the slice in the source buffer */
++   uint8_t *dst;
++   uint32_t y0, height;
 +};
 +
 +struct vn_dd_bc_cmd {
@@ -696,6 +724,216 @@ new file mode 100644
 +   buf->dd_memory_offset = bind->memoryOffset;
 +}
 +
++/* ---- block-at-a-time decode for S3TC ----
++ *
++ * Mesa's generic path (u_format_s3tc.c) decodes one texel at a time and rebuilds the block's
++ * palette for each of the 16 texels; its own source notes "to be efficient, it would be
++ * necessary to decode 16 pixels at once".  These are the linear formats the driver asks for
++ * (the sRGB cases map here through util_format_linear), so one pass per block is enough.
++ * Anything not listed keeps the generic path.
++ */
++
++static inline void
++bc_expand565(unsigned c, uint8_t *out)
++{
++   const unsigned r5 = (c >> 11) & 0x1f, g6 = (c >> 5) & 0x3f, b5 = c & 0x1f;
++   out[0] = (r5 << 3) | (r5 >> 2);
++   out[1] = (g6 << 2) | (g6 >> 4);
++   out[2] = (b5 << 3) | (b5 >> 2);
++}
++
++/* The 8 alpha values of a BC4/BC5 block or the alpha half of a BC3 block. */
++static inline void
++bc_alpha_palette(const uint8_t *blk, uint8_t pal[8])
++{
++   const unsigned a0 = blk[0], a1 = blk[1];
++   pal[0] = a0;
++   pal[1] = a1;
++   if (a0 > a1) {
++      for (unsigned c = 2; c < 8; c++)
++         pal[c] = (a0 * (8 - c) + a1 * (c - 1)) / 7;
++   } else {
++      for (unsigned c = 2; c < 6; c++)
++         pal[c] = (a0 * (6 - c) + a1 * (c - 1)) / 5;
++      pal[6] = 0;
++      pal[7] = 255;
++   }
++}
++
++static inline uint64_t
++bc_alpha_bits(const uint8_t *blk)
++{
++   uint64_t bits = 0;
++   for (unsigned i = 0; i < 6; i++)
++      bits |= (uint64_t)blk[2 + i] << (8 * i);
++   return bits;
++}
++
++static bool
++bc_decode_s3tc(enum pipe_format fmt, uint8_t *dst, unsigned dst_row, const uint8_t *src,
++               unsigned src_row, unsigned width, unsigned height)
++{
++   const bool dxt1 = fmt == PIPE_FORMAT_DXT1_RGB || fmt == PIPE_FORMAT_DXT1_RGBA;
++   const bool dxt1_rgba = fmt == PIPE_FORMAT_DXT1_RGBA;
++   const bool dxt3 = fmt == PIPE_FORMAT_DXT3_RGBA;
++   const bool dxt5 = fmt == PIPE_FORMAT_DXT5_RGBA;
++   if (!dxt1 && !dxt3 && !dxt5)
++      return false;
++
++   const unsigned block = util_format_get_blocksize(fmt); /* 8 for DXT1, 16 for DXT3/DXT5 */
++   const unsigned bw = width / 4, bh = height / 4;
++
++   for (unsigned by = 0; by < bh; by++) {
++      const uint8_t *s = src + (size_t)by * src_row;
++      uint8_t *d = dst + (size_t)by * 4 * dst_row;
++      for (unsigned bx = 0; bx < bw; bx++, s += block, d += 16) {
++         /* BC2/BC3 always use 4 colors; BC1 uses 3 when color0 <= color1. */
++         const uint8_t *cb = dxt1 ? s : s + 8;
++         const unsigned c0 = cb[0] | (cb[1] << 8);
++         const unsigned c1 = cb[2] | (cb[3] << 8);
++         const bool four = !dxt1 || c0 > c1;
++         const uint32_t cbits = cb[4] | (cb[5] << 8) | (cb[6] << 16) | ((uint32_t)cb[7] << 24);
++
++         uint8_t pal[4][3];
++         bc_expand565(c0, pal[0]);
++         bc_expand565(c1, pal[1]);
++         for (unsigned k = 0; k < 3; k++) {
++            if (four) {
++               pal[2][k] = (pal[0][k] * 2 + pal[1][k]) / 3;
++               pal[3][k] = (pal[0][k] + pal[1][k] * 2) / 3;
++            } else {
++               pal[2][k] = (pal[0][k] + pal[1][k]) / 2;
++               pal[3][k] = 0;
++            }
++         }
++
++         uint8_t apal[8];
++         uint64_t abits = 0;
++         if (dxt5) {
++            bc_alpha_palette(s, apal);
++            abits = bc_alpha_bits(s);
++         }
++         /* BC1_RGBA in 3-color mode is transparent; BC1_RGB has no alpha. */
++         const uint8_t c3_alpha = dxt1_rgba && !four ? 0 : 255;
++
++         for (unsigned j = 0; j < 4; j++) {
++            uint8_t *row = d + (size_t)j * dst_row;
++            for (unsigned i = 0; i < 4; i++) {
++               const unsigned t = j * 4 + i;
++               const unsigned code = (cbits >> (2 * t)) & 3;
++               row[i * 4 + 0] = pal[code][0];
++               row[i * 4 + 1] = pal[code][1];
++               row[i * 4 + 2] = pal[code][2];
++               if (dxt1)
++                  row[i * 4 + 3] = code == 3 ? c3_alpha : 255;
++               else if (dxt3)
++                  row[i * 4 + 3] = (s[t >> 1] >> ((t & 1) * 4) & 0xf) * 17;
++               else
++                  row[i * 4 + 3] = apal[(abits >> (3 * t)) & 7];
++            }
++         }
++      }
++   }
++   return true;
++}
++
++/* BC4/BC5: one 8-byte block per channel, same endpoint scheme as the alpha half of BC3. */
++static bool
++bc_decode_rgtc(enum pipe_format fmt, uint8_t *dst, unsigned dst_row, const uint8_t *src,
++               unsigned src_row, unsigned width, unsigned height)
++{
++   const bool bc5 = fmt == PIPE_FORMAT_RGTC2_UNORM;
++   if (!bc5 && fmt != PIPE_FORMAT_RGTC1_UNORM)
++      return false;
++
++   const unsigned comps = bc5 ? 2 : 1;
++   const unsigned bw = width / 4, bh = height / 4;
++
++   for (unsigned by = 0; by < bh; by++) {
++      const uint8_t *s = src + (size_t)by * src_row;
++      uint8_t *d = dst + (size_t)by * 4 * dst_row;
++      for (unsigned bx = 0; bx < bw; bx++, s += 8, d += 4 * comps) {
++         for (unsigned ch = 0; ch < comps; ch++) {
++            const uint8_t *blk = s + ch * 8;
++            uint8_t pal[8];
++            bc_alpha_palette(blk, pal);
++            const uint64_t bits = bc_alpha_bits(blk);
++            for (unsigned j = 0; j < 4; j++) {
++               uint8_t *row = d + (size_t)j * dst_row;
++               for (unsigned i = 0; i < 4; i++)
++                  row[i * comps + ch] = pal[(bits >> (3 * (j * 4 + i))) & 7];
++            }
++         }
++      }
++   }
++   return true;
++}
++
++static void
++bc_decode_task(void *job, void *gdata, int thread_index)
++{
++   const struct vn_dd_bc_task *task = job;
++   if (bc_decode_s3tc(task->job.src_format, task->dst, task->job.dst_row, task->src,
++                      (unsigned)task->job.src_row, task->job.width, task->height))
++      return;
++   if (bc_decode_rgtc(task->job.src_format, task->dst, task->job.dst_row, task->src,
++                      (unsigned)task->job.src_row, task->job.width, task->height))
++      return;
++   /* src_y is in block rows, not texel rows, because src_row is one block row. */
++   util_format_translate(task->job.dst_format, task->dst, task->job.dst_row, 0, task->y0,
++                         task->job.src_format, task->src, (unsigned)task->job.src_row, 0,
++                         task->y0 / util_format_get_blockheight(task->job.src_format),
++                         task->job.width, task->height);
++}
++
++/* Threads to decode with: one per CPU, or DROIDDECK_VN_BC_THREADS (1 keeps the old
++ * single-threaded path). */
++static unsigned bc_thread_count;
++
++static void
++bc_threads_init(void)
++{
++   int64_t n = debug_get_num_option("DROIDDECK_VN_BC_THREADS", 0);
++   if (n <= 0)
++      n = util_get_cpu_caps()->nr_cpus;
++   bc_thread_count = (unsigned)CLAMP(n, 1, 16);
++}
++
++static unsigned
++bc_threads(void)
++{
++   static once_flag threads_once = ONCE_FLAG_INIT;
++
++   /* Two threads can reach a submit at the same time, so the choice has to be made once. */
++   call_once(&threads_once, bc_threads_init);
++   return bc_thread_count;
++}
++
++/* The decoder threads, made on first use. */
++static void
++bc_decoder_init(void)
++{
++   if (bc_threads() > 1)
++      util_queue_init(&bc_queue, "ddbc", 64, bc_threads(), 0, NULL);
++}
++
++static void
++bc_decode_tasks(struct vn_dd_bc_task *tasks, unsigned count)
++{
++   static once_flag decode_once = ONCE_FLAG_INIT;
++
++   call_once(&decode_once, bc_decoder_init);
++
++   if (util_queue_is_initialized(&bc_queue)) {
++      for (unsigned i = 0; i < count; i++)
++         util_queue_add_job(&bc_queue, &tasks[i], NULL, bc_decode_task, NULL, sizeof(tasks[i]));
++      util_queue_finish(&bc_queue);
++   } else {
++      for (unsigned i = 0; i < count; i++)
++         bc_decode_task(&tasks[i], NULL, 0);
++   }
++}
++
 +static void
 +bc_decode_cmd(struct vn_command_buffer *cmd)
 +{
@@ -705,7 +943,20 @@ new file mode 100644
 +   struct vn_device *dev = vn_device_from_vk(cmd->base.vk.pool->base.device);
 +   const int64_t start = os_time_get_nano();
 +   uint64_t missing = 0;
-+   util_dynarray_foreach(&state->jobs, struct vn_dd_bc_job, job) {
++
++   const unsigned n_jobs = util_dynarray_num_elements(&state->jobs, struct vn_dd_bc_job);
++   struct vn_dd_bc_job *jobs = util_dynarray_begin(&state->jobs);
++
++   /* A texture is often uploaded in one slice: split slices so that such an upload still has
++    * work for every thread. */
++   const unsigned threads = bc_threads();
++   const unsigned target = threads * 4;
++   struct vn_dd_bc_task *tasks = NULL;
++   unsigned n_tasks = 0, cap = 0;
++   bool split_failed = false;
++
++   for (unsigned i = 0; i < n_jobs && !split_failed; i++) {
++      struct vn_dd_bc_job *job = &jobs[i];
 +      struct vn_buffer *buf = vn_buffer_from_handle(job->src);
 +      struct vn_device_memory *mem = buf ? vn_device_memory_from_handle(buf->dd_memory) : NULL;
 +      const uint8_t *base = mem && mem->base_bo ? vn_renderer_bo_map(dev->renderer, mem->base_bo) : NULL;
@@ -715,12 +966,62 @@ new file mode 100644
 +         missing++;
 +         continue;
 +      }
++      unsigned rows_per_slice = job->height;
++      if (n_jobs < target && job->slices == 1 && job->height > 4) {
++         rows_per_slice = (job->height / DIV_ROUND_UP(target, n_jobs) / 4) * 4;
++         if (!rows_per_slice)
++            rows_per_slice = job->height;
++      }
 +      for (uint32_t s = 0; s < job->slices; s++) {
-+         util_format_translate(job->dst_format, job->dst + s * job->dst_slice, job->dst_row, 0, 0,
-+                               job->src_format, base + start_off + s * job->src_slice,
-+                               (unsigned)job->src_row, 0, 0, job->width, job->height);
++         const uint8_t *slice = base + start_off + s * job->src_slice;
++         for (uint32_t y = 0; y < job->height; y += rows_per_slice) {
++            const uint32_t h = MIN2(rows_per_slice, job->height - y);
++            if (n_tasks == cap) {
++               cap = cap ? cap * 2 : 64;
++               struct vn_dd_bc_task *grown = realloc(tasks, cap * sizeof(*tasks));
++               if (!grown) {
++                  split_failed = true;
++                  break;
++               }
++               tasks = grown;
++            }
++            tasks[n_tasks++] = (struct vn_dd_bc_task){
++               .job = *job,
++               .src = slice,
++               .dst = job->dst + s * job->dst_slice,
++               .y0 = y,
++               .height = h,
++            };
++         }
++         if (split_failed)
++            break;
 +      }
 +   }
++
++   if (!split_failed) {
++      if (n_tasks > 1)
++         bc_decode_tasks(tasks, n_tasks);
++      else if (n_tasks == 1)
++         bc_decode_task(&tasks[0], NULL, 0);
++   } else {
++      /* the split ran out of memory: decode the jobs one slice at a time instead */
++      for (unsigned i = 0; i < n_jobs; i++) {
++         struct vn_dd_bc_job *job = &jobs[i];
++         struct vn_buffer *buf = vn_buffer_from_handle(job->src);
++         struct vn_device_memory *mem = buf ? vn_device_memory_from_handle(buf->dd_memory) : NULL;
++         const uint8_t *base = mem && mem->base_bo ? vn_renderer_bo_map(dev->renderer, mem->base_bo) : NULL;
++         if (!base)
++            continue;
++         const VkDeviceSize start_off = buf->dd_memory_offset + job->src_offset;
++         for (uint32_t s = 0; s < job->slices; s++) {
++            util_format_translate(job->dst_format, job->dst + s * job->dst_slice, job->dst_row, 0, 0,
++                                  job->src_format, base + start_off + s * job->src_slice,
++                                  (unsigned)job->src_row, 0, 0, job->width, job->height);
++         }
++      }
++   }
++   free(tasks);
++
 +   if (missing) {
 +      static int logged;
 +      bc_log_once(&logged, "a BC upload from memory the driver has not mapped: that texture stays empty");

@@ -344,3 +344,57 @@ after editing one file it takes seconds, because the build dir is reused.
 - The published `mesa-virtio-gen.tar.gz` holds generated headers but no `src/vulkan/registry/vk.xml`,
   so the gen scripts cannot be re-run from the tarballs alone; the local harness sidesteps this by
   compiling against a real checkout's build dir.
+
+## BC decode is parallel now (`vn_droiddeck_bc.c`), and the numbers behind it
+The BC upload path (`vn_dd_bc_submit` -> `bc_decode_cmd`) decodes on the submit thread, so its
+cost lands directly on `vkQueueSubmit`. It is now split across a `util_queue` of one thread per
+CPU (`DROIDDECK_VN_BC_THREADS` overrides; `=1` keeps the old serial path).
+
+- The decode is embarrassingly parallel across (job, slice) pairs and safe to split further
+  along rows: `util_format_translate` writes only the destination band it is given. `bcpar.c`
+  and `bcsplit.c` confirm this byte-for-byte for BC1/3/4/5/6H/7 and sRGB variants, 384/384 cases
+  exact, including heights that are not multiples of 4.
+- Measured on the 4-core sandbox (AMD EPYC): BC3 4096x4096 goes from ~178 ms serial to ~71 ms at
+  4 threads (2.5x). Scaling is ~2x on 2 cores, which is the ceiling on this shared sandbox, not
+  the phone. The phone's 8 cores (X4 + 3xA720 + 4xA520) should scale better.
+- Do not add a "too small to thread" threshold: 7 tiny mip-chain tasks (64 KiB out) measured
+  0.93x (i.e. no regression) through the queue. Per-submit the pool costs one `util_queue_finish`
+  (a barrier, `num_threads` fences), not a thread wake.
+- `src_y` for a compressed source counts **block** rows, not texel rows, because `src_row` is one
+  block row. Getting this wrong produces band-to-band mismatches that look like a driver race but
+  are a harness bug; the fix is `y0 / util_format_get_blockheight(src_format)`.
+- The decoder queue must be file-scope (not on the stack): `util_queue_init` registers an atexit
+  handler. A stack queue segfaults after `main` returns, which is a harness artifact, not a driver
+  bug.
+- `util_queue_is_initialized` is false when `util_queue_init` fails, so the code falls back to
+  serial decode on the submit thread. The same fallback covers a failed task-list `realloc`; the
+  split loop must not drop jobs when it bails out.
+
+## BC decode: block-at-a-time fast path (`bc_decode_s3tc`, `bc_decode_rgtc`)
+Mesa's generic path (`util_format_translate` -> `u_format_s3tc.c`) decodes one texel at a time
+and rebuilds the block's palette for each of the 16 texels. Mesa's own comment says it: *"to be
+efficient, it would be necessary to decode 16 pixels at once"*. DroidDeck now does, for the
+formats DXVK actually ships.
+
+- Measured on the 4-core sandbox, versus the generic path, byte-for-byte exact:
+  BC1/BC2/BC3 **3.3-4.5x**, BC4/BC5 **6.1-6.7x** (4096x4096 BC5 139 ms -> 23 ms). Combined with
+  the thread pool that is roughly **9x** for S3TC and **15x** for BC4/5 versus the original code.
+- Only the **linear** source formats need a case. `util_format_linear(vk_format_to_pipe_format(orig))`
+  maps every sRGB BC format to its UNORM twin (BC1_RGB_SRGB -> DXT1_RGB, BC5_SNORM -> RGTC2_UNORM,
+  ...), so sRGB needs no special handling: the substitute image is sRGB, so the decoded bytes must
+  be the raw sRGB bytes. Verified with a format probe, not assumed.
+- Two easy-to-get-wrong details, both caught by testing against the generic path: BC2/BC3 always
+  use 4-color interpolation (`dxt_type > 1`), and BC1_RGBA in 3-color mode is transparent while
+  BC1_RGB is opaque. Decoding BC3 with BC1's `color0 > color1` test mismatches every block.
+- BC4/BC5 SNORM is fine on this path: `util_format_rgtc*_snorm_unpack_rgba_8unorm` in
+  `u_format_rgtc.c` is a stub that only prints, but the driver never calls it. BC4_SNORM substitutes
+  to R8_SNORM, so `translate` picks `util_format_rgtc1_snorm_unpack_r_8snorm`, which works.
+- Unhandled formats (BC6H/BC7, and anything the generic path would scale) fall through to
+  `util_format_translate`, so the fast path cannot silently corrupt them.
+- These functions index only rows `0..height-1` from the task's `src`, which is a band within a
+  slice, so they compose with the row-band split: the band's `src` is already offset to the band
+  start. Do not add a `y0` term inside them.
+- They also assume the job's `width`/`height` are multiples of 4, which the submit path guarantees:
+  it rounds up with `w4 = align(imageExtent.width, 4)` and sizes the destination as `w4 * h4`, so
+  a whole-block write is always in range. That is why a 6x6 BC texture works (it decodes an 8x8
+  region). Do not call these with unaligned dimensions; fall through to the generic path instead.
