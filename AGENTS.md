@@ -389,18 +389,33 @@ time plus GPU time in series instead of their maximum.
   is taken. The fence is the one passed to the blit `QueueSubmit`, so waiting on it is another
   `vn_WaitForFences` -> `vn_relax_fini`, landing in the same `VN_RELAX_REASON_FENCE` bucket as the
   `vn_QueueWaitIdle` drain. So there are two places to remove the per-present sync, not one.
-- The caveat, which is why 0021 also adds `DROIDDECK_VN_SYNC_PRESENT` (default = current
-  behaviour, so it is a no-op unless set to 0): `venus_implicit_fencing` only switches the guest's
-  assumption about the kernel driver. Here the server and the Android driver are also in play, and
-  the virtio-gpu kernel driver treats everything as one fence context ("no synchronization
-  needed"). Skipping the guest drain stops the guest from blocking on the queue, but the
-  `WaitForFences` above still blocks the present until the blit fence signals, so the knob does
-  not by itself make the present asynchronous. That wait is not removable on its own: the CPU is
-  about to read the image, so it must wait for the blit.
-- So what the frame line decides is which wait dominates. If `present GPU wait` is most of
-  `ms/frame`, the cost is the server round trip the drain waits on, and removing the drain
-  pipelines the frames and helps. If it is small and `ms/frame` is still ~41 ms, the cost is real
-  GPU time or the CPU read-back itself, and the fix is the CPU present path, not the sync.
+- **The drain is now off by default.** 0021 added `DROIDDECK_VN_SYNC_PRESENT` with the old
+  behaviour as the default (a no-op unless set to 0) because correctness had not been shown. The
+  on-device numbers settled it: on Lake with FEX defaults the drain was **89% of the frame**
+  (present GPU wait 17.6-18.0 ms of a 19.8 ms frame) and the game's own wait report agreed
+  (`fence 1558x 5952.8 ms`, `semaphore 1560x 5838.1 ms` in one 10 s window). The default is now
+  `false`; `DROIDDECK_VN_SYNC_PRESENT=1` restores the drain, so a title that tears or flickers can
+  be A/B'd against the old behaviour without a rebuild.
+- The caveat that still stands: `venus_implicit_fencing` only switches the guest's assumption
+  about the kernel driver. Here the server and the Android driver are also in play, and the
+  virtio-gpu kernel driver treats everything as one fence context ("no synchronization needed").
+  Skipping the guest drain stops the guest blocking on the queue, but the `WaitForFences` above
+  (the CPU-present blit fence, 0020) still blocks the present until the blit fence signals. That
+  wait is not removable on its own: the CPU is about to read the image, so it must wait for the
+  blit. If a title still tears after this default, that wait is the next suspect.
+- What the frame line decided: `present GPU wait` was most of `ms/frame`, so the drain was the
+  frame, and skipping it is the fix. With FEX defaults the CPU side of the frame fell to ~2 ms
+  (it was ~16 ms at 24 fps), so the drain was all that was left between the game and 60.
+- **The bottleneck moved, and the fix is a knob, not a rebuild.** Same 0021 frame line, two runs:
+  at 24 fps the CPU was ~16 ms of the frame and the GPU wait ~4 ms; with FEX defaults the CPU is
+  ~2 ms and the GPU wait is ~17.6 ms. `1000/18 = 55 fps` is the ceiling while the drain
+  serialises the two, and the measured peak was 51.0 fps, consistent with that plus jitter.
+  Removing the drain should let CPU and GPU overlap.
+- **A `frames:` line near 59-60 fps is vsync, not a ceiling to chase.** gamescope's own engine
+  holds 59.1-59.4 fps at a steady 16.85 ms for 50 s, which is the 60 Hz panel. That is also why
+  lowering the game's resolution changes nothing: the cost being measured is per-frame (the drain,
+  then the GPU work), not per-pixel. The game renders 1920x1080 into gamescope and gamescope
+  composites to the 1602x720 screen, so the game's own resolution setting does not move this.
 - Both the `wsi_mem` drain and the `mem_signal` chaining only happen on the non-dma-buf path.
   `has_external_sync = false` on the vtest renderer, so `wsi_prepare_signal_dma_buf_from_semaphore`
   returns `VK_ERROR_FEATURE_NOT_PRESENT` and the submit chains `wsi_memory_signal_submit_info`,

@@ -78,19 +78,24 @@ diff -ru a/src/virtio/vulkan/vn_queue.c b/src/virtio/vulkan/vn_queue.c
  
     if (!submit->wsi_mem)
        return;
-@@ -1022,8 +1025,22 @@
+@@ -1022,8 +1025,27 @@
                     "forcing vkQueueWaitIdle before presenting");
        }
  
 -      vn_QueueWaitIdle(submit->queue_handle);
-+      /* DroidDeck: with no implicit fencing the queue is drained to idle before every present,
-+       * so the CPU cannot run ahead of the GPU by even one frame. DROIDDECK_VN_SYNC_PRESENT=0
-+       * skips the drain: the server still orders the present after the submitted work (the
-+       * ring submission is ordered), it just stops the guest from blocking on it. Off by
-+       * default, since correctness on every path has not been shown yet. */
++      /* DroidDeck: with no implicit fencing the queue was drained to idle before every present,
++       * so the CPU could not run ahead of the GPU by even one frame: the frame time was CPU
++       * time plus GPU time in series instead of their maximum. On Lake that drain was 89% of
++       * the frame (17.6 ms of 19.8 ms), and the game's own fence waits showed it: 1558 fence
++       * waits totalling 5.95 s inside a 10 s window. Skip it by default. The present still
++       * happens in order, because the submit carrying wsi_memory_signal_submit_info is what
++       * hands the buffer to the server and it is ordered after the submitted work on the ring.
++       * That ordering is the design intent, not something this change proves: the drain was
++       * upstream's blunt way to be sure. DROIDDECK_VN_SYNC_PRESENT=1 restores it, so a title
++       * that tears or flickers with this default can be A/B'd against the old behaviour. */
 +      static int sync_present = -1;
 +      if (sync_present < 0)
-+         sync_present = debug_get_bool_option("DROIDDECK_VN_SYNC_PRESENT", true);
++         sync_present = debug_get_bool_option("DROIDDECK_VN_SYNC_PRESENT", false);
 +      if (sync_present) {
 +         const int64_t start = os_time_get_nano();
 +         vn_QueueWaitIdle(submit->queue_handle);
