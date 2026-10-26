@@ -1,0 +1,104 @@
+diff -ru a/src/virtio/vulkan/vn_common.c b/src/virtio/vulkan/vn_common.c
+--- a/src/virtio/vulkan/vn_common.c
++++ b/src/virtio/vulkan/vn_common.c
+@@ -298,6 +298,41 @@
+    mtx_unlock(&vn_dd_stats_mutex);
+ }
+ 
++/* droiddeck: the frame rate, and how much of each frame is the GPU drain before presenting.
++ * One call per present: the interval since the last present is the frame time, and
++ * present_wait_ns is what the present path itself blocked on the GPU (see vn_queue_wsi_present,
++ * which waits for the queue to go idle when the renderer has no implicit or explicit fencing).
++ * Every 10 s the averages go to droiddeck_vulkan.txt. This is the measurement the 24->60 fps
++ * work needs: if the wait is most of the frame, the fix is pipelining, not the CPU work. */
++void
++vn_dd_frame_stats(int64_t present_wait_ns)
++{
++   static int64_t last, since;
++   static uint64_t frames, wait_total;
++   static unsigned reports;
++   const int64_t now = os_time_get_nano();
++
++   mtx_lock(&vn_dd_stats_mutex);
++   if (last && now > last) {
++      frames++;
++      wait_total += present_wait_ns > 0 ? (uint64_t)present_wait_ns : 0;
++   }
++   last = now;
++   if (!since)
++      since = now;
++   if (now - since >= 10000000000ll) {
++      if (frames && ++reports <= 120) {
++         const double span = (double)(now - since);
++         vn_droiddeck_log("frames: %.1f fps (%.2f ms/frame); present GPU wait %.2f ms/frame",
++                          frames * 1e9 / span, span / 1e6 / frames,
++                          (double)wait_total / 1e6 / frames);
++      }
++      frames = wait_total = 0;
++      since = now;
++   }
++   mtx_unlock(&vn_dd_stats_mutex);
++}
++
+ /* droiddeck: who waits. For fence and ring waits (a program's vkWaitForFences, or a call that
+  * needs the server's reply), the call stack is kept with its count and time, and the stacks
+  * that waited longest are written to droiddeck_vulkan.txt every 10 s as library+offset frames
+diff -ru a/src/virtio/vulkan/vn_common.h b/src/virtio/vulkan/vn_common.h
+--- a/src/virtio/vulkan/vn_common.h
++++ b/src/virtio/vulkan/vn_common.h
+@@ -317,6 +317,11 @@
+ void
+ vn_droiddeck_log(const char *format, ...) PRINTFLIKE(1, 2);
+ 
++/* DroidDeck: one call per present, to report the frame rate and the GPU wait inside the frame
++ * (see vn_common.c). present_wait_ns is the time the present path blocked on the GPU, or 0. */
++void
++vn_dd_frame_stats(int64_t present_wait_ns);
++
+ void
+ vn_log(struct vn_instance *instance, const char *format, ...)
+    PRINTFLIKE(2, 3);
+diff -ru a/src/virtio/vulkan/vn_queue.c b/src/virtio/vulkan/vn_queue.c
+--- a/src/virtio/vulkan/vn_queue.c
++++ b/src/virtio/vulkan/vn_queue.c
+@@ -12,6 +12,8 @@
+ #include "vn_droiddeck_bc.h"
+ 
+ #include "util/libsync.h"
++#include "util/os_time.h"
++#include "util/u_debug.h"
+ #include "venus-protocol/vn_protocol_driver_event.h"
+ #include "venus-protocol/vn_protocol_driver_fence.h"
+ #include "venus-protocol/vn_protocol_driver_queue.h"
+@@ -986,6 +988,7 @@
+ {
+    struct vk_queue *queue_vk = vk_queue_from_handle(submit->queue_handle);
+    struct vn_device *dev = vn_device_from_vk(queue_vk->base.device);
++   int64_t present_wait_ns = 0;
+ 
+    if (!submit->wsi_mem)
+       return;
+@@ -1022,8 +1025,22 @@
+                    "forcing vkQueueWaitIdle before presenting");
+       }
+ 
+-      vn_QueueWaitIdle(submit->queue_handle);
++      /* DroidDeck: with no implicit fencing the queue is drained to idle before every present,
++       * so the CPU cannot run ahead of the GPU by even one frame. DROIDDECK_VN_SYNC_PRESENT=0
++       * skips the drain: the server still orders the present after the submitted work (the
++       * ring submission is ordered), it just stops the guest from blocking on it. Off by
++       * default, since correctness on every path has not been shown yet. */
++      static int sync_present = -1;
++      if (sync_present < 0)
++         sync_present = debug_get_bool_option("DROIDDECK_VN_SYNC_PRESENT", true);
++      if (sync_present) {
++         const int64_t start = os_time_get_nano();
++         vn_QueueWaitIdle(submit->queue_handle);
++         present_wait_ns = os_time_get_nano() - start;
++      }
+    }
++
++   vn_dd_frame_stats(present_wait_ns);
+ }
+ 
+ static VkResult

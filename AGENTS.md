@@ -353,6 +353,59 @@ after editing one file it takes seconds, because the build dir is reused.
 - The published `mesa-virtio-gen.tar.gz` holds generated headers but no `src/vulkan/registry/vk.xml`,
   so the gen scripts cannot be re-run from the tarballs alone; the local harness sidesteps this by
   compiling against a real checkout's build dir.
+- Where the dev headers cannot be installed (a container with no root), the check still runs by
+  dropping minimal stub headers for the X11/xcb/Xrandr types `include/vulkan/vulkan*.h` needs onto
+  an extra `-I`, then compiling each `vn_*.c` with the build dir's recorded flags (the ones in
+  `compile_commands.json` are the same `ninja -t commands` output). Every guest file compiles that
+  way except `vn_renderer_virtgpu.c`, which needs `xf86drm.h` (libdrm) and fails before reaching
+  any driver code — a missing system header, not a driver problem.
+
+## The 24 fps ceiling: the guest drains the GPU before every present (`tools/venus/guest-patches/0021`)
+
+The guest ICD sits near 24 fps on titles whose BC decode is only 4.6 ms of a ~41 ms frame, so the
+cost is not decode. `vn_queue_wsi_present` (`src/virtio/vulkan/vn_queue.c`) explains it: the
+renderer reports `has_implicit_fencing = false` (`vn_renderer_vtest.c`) and
+`DRI_CONF_VENUS_IMPLICIT_FENCING` defaults to false (`vn_instance.c`), so the present takes the
+else-branch that calls `vn_QueueWaitIdle` **once per present**. That is a full GPU drain with no
+CPU/GPU overlap: the CPU cannot start frame N+1 until frame N is done, so the frame time is CPU
+time plus GPU time in series instead of their maximum.
+
+- Two ways to confirm before changing anything, both already instrumented:
+  - `vn_QueueWaitIdle` -> `vn_WaitForFences` -> `vn_relax_fini` is already reported as
+    `VN_RELAX_REASON_FENCE` in `droiddeck_vulkan.txt` by the "who waits" code (0017). If the drain
+    is the ceiling, that reason dominates the per-frame time.
+  - 0021 adds a frame-rate line to `droiddeck_vulkan.txt` every 10 s:
+    `frames: N fps (M ms/frame); present GPU wait W ms/frame`. If `W` is most of `M`, the present
+    drain is the frame.
+- **A/B it with no rebuild.** `driParseOptionInfo` (`src/util/xmlconfig.c`) overrides a driconf
+  default from an environment variable named exactly like the option (`os_get_option`, i.e.
+  `getenv`). So `venus_implicit_fencing=true` in the environment takes the other branch, and
+  `venus_implicit_fencing=false` forces the drain — no `.drirc`, no recompile. The XML section name
+  is `venus`. This is the cheapest first experiment; the caveat below is why it may not help.
+- `tools/venus/patches/0020` adds a second per-present wait that matters here: in
+  `wsi_common_queue_present`, when `swapchain->dd_cpu_present` (the CPU-present path 0020
+  introduces), it calls `wsi->WaitForFences(..., UINT64_MAX)` on the blit fence before presenting.
+  `dd_cpu` is set when the X server has no DRI3 or no present (which is this guest), so that wait
+  is taken. The fence is the one passed to the blit `QueueSubmit`, so waiting on it is another
+  `vn_WaitForFences` -> `vn_relax_fini`, landing in the same `VN_RELAX_REASON_FENCE` bucket as the
+  `vn_QueueWaitIdle` drain. So there are two places to remove the per-present sync, not one.
+- The caveat, which is why 0021 also adds `DROIDDECK_VN_SYNC_PRESENT` (default = current
+  behaviour, so it is a no-op unless set to 0): `venus_implicit_fencing` only switches the guest's
+  assumption about the kernel driver. Here the server and the Android driver are also in play, and
+  the virtio-gpu kernel driver treats everything as one fence context ("no synchronization
+  needed"). Skipping the guest drain stops the guest from blocking on the queue, but the
+  `WaitForFences` above still blocks the present until the blit fence signals, so the knob does
+  not by itself make the present asynchronous. That wait is not removable on its own: the CPU is
+  about to read the image, so it must wait for the blit.
+- So what the frame line decides is which wait dominates. If `present GPU wait` is most of
+  `ms/frame`, the cost is the server round trip the drain waits on, and removing the drain
+  pipelines the frames and helps. If it is small and `ms/frame` is still ~41 ms, the cost is real
+  GPU time or the CPU read-back itself, and the fix is the CPU present path, not the sync.
+- Both the `wsi_mem` drain and the `mem_signal` chaining only happen on the non-dma-buf path.
+  `has_external_sync = false` on the vtest renderer, so `wsi_prepare_signal_dma_buf_from_semaphore`
+  returns `VK_ERROR_FEATURE_NOT_PRESENT` and the submit chains `wsi_memory_signal_submit_info`,
+  which is what sets `submit->wsi_mem`. If external sync is ever enabled, the drain stops running
+  and this whole analysis moves.
 
 ## BC decode is parallel now (`vn_droiddeck_bc.c`), and the numbers behind it
 The BC upload path (`vn_dd_bc_submit` -> `bc_decode_cmd`) decodes on the submit thread, so its
