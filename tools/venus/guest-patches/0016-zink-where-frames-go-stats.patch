@@ -345,18 +345,20 @@ diff -ruN a/src/gallium/drivers/zink/zink_pipeline.c b/src/gallium/drivers/zink/
 diff -ruN a/src/gallium/drivers/zink/zink_screen.c b/src/gallium/drivers/zink/zink_screen.c
 --- a/src/gallium/drivers/zink/zink_screen.c
 +++ b/src/gallium/drivers/zink/zink_screen.c
-@@ -22,6 +22,10 @@
+@@ -22,6 +22,12 @@
   */
  
  #include "zink_screen.h"
 +#include "zink_dd_stats.h"
 +#include "util/u_process.h"
++#include <dirent.h>
 +#include <inttypes.h>
++#include <stdio.h>
 +#include <unistd.h>
  
  #include "zink_kopper.h"
  #include "zink_compiler.h"
-@@ -2430,6 +2434,80 @@
+@@ -2430,6 +2436,206 @@
  #endif
  }
  
@@ -390,6 +392,131 @@ diff -ruN a/src/gallium/drivers/zink/zink_screen.c b/src/gallium/drivers/zink/zi
 +   zink_dd_stats_tick();
 +}
 +
++/* droiddeck: which threads of the whole session (Steam's web UI renderer, its GPU thread,
++ * gamescope, Xwayland, ...) used the CPU over the interval, top ones as % of one core. Shows
++ * whether the UI is held back by the CPU (JavaScript, layout, raster) rather than the GPU. */
++#define ZINK_DD_TASKS 4096
++struct zink_dd_task {
++   int tid;
++   int pid;
++   uint64_t ticks;
++   uint64_t delta;
++   char name[40];
++};
++static struct zink_dd_task zink_dd_tasks[2][ZINK_DD_TASKS];
++static int zink_dd_task_count[2];
++static int zink_dd_task_cur;
++
++static bool
++zink_dd_read_task(int pid, int tid, uint64_t *ticks, char *name, size_t name_size)
++{
++   char path[64], buf[512];
++   snprintf(path, sizeof(path), "/proc/%d/task/%d/stat", pid, tid);
++   FILE *f = fopen(path, "re");
++   if (!f)
++      return false;
++   size_t n = fread(buf, 1, sizeof(buf) - 1, f);
++   fclose(f);
++   buf[n] = 0;
++   char *open = strchr(buf, '('), *close = strrchr(buf, ')');
++   if (!open || !close || close < open)
++      return false;
++   size_t len = MIN2((size_t)(close - open - 1), name_size - 1);
++   memcpy(name, open + 1, len);
++   name[len] = 0;
++   /* after ") ": state(3) ppid pgrp session tty_nr tpgid flags minflt cminflt majflt cmajflt utime(14) stime(15) */
++   unsigned long long ut = 0, st = 0;
++   if (sscanf(close + 2, "%*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu", &ut, &st) != 2)
++      return false;
++   *ticks = ut + st;
++   return true;
++}
++
++static int
++zink_dd_task_cmp(const void *a, const void *b)
++{
++   const struct zink_dd_task *x = a, *y = b;
++   return x->delta < y->delta ? 1 : x->delta > y->delta ? -1 : 0;
++}
++
++static void
++zink_dd_cpu_report(double secs)
++{
++   static int on = -1;
++   if (on < 0)
++      on = debug_get_bool_option("DROIDDECK_ZINK_CPU_STATS", true);
++   if (!on)
++      return;
++   const int cur = zink_dd_task_cur ^ 1, prev = zink_dd_task_cur;
++   struct zink_dd_task *now = zink_dd_tasks[cur];
++   int count = 0;
++   DIR *proc = opendir("/proc");
++   if (!proc)
++      return;
++   struct dirent *pe;
++   while ((pe = readdir(proc)) && count < ZINK_DD_TASKS) {
++      const int pid = atoi(pe->d_name);
++      if (pid <= 0)
++         continue;
++      char tpath[64];
++      snprintf(tpath, sizeof(tpath), "/proc/%d/task", pid);
++      DIR *tasks = opendir(tpath);
++      if (!tasks)
++         continue;
++      struct dirent *te;
++      while ((te = readdir(tasks)) && count < ZINK_DD_TASKS) {
++         const int tid = atoi(te->d_name);
++         if (tid <= 0)
++            continue;
++         struct zink_dd_task *t = &now[count];
++         if (!zink_dd_read_task(pid, tid, &t->ticks, t->name, sizeof(t->name)))
++            continue;
++         t->tid = tid;
++         t->pid = pid;
++         t->delta = 0;
++         for (int i = 0; i < zink_dd_task_count[prev]; i++) {
++            if (zink_dd_tasks[prev][i].tid == tid) {
++               if (t->ticks >= zink_dd_tasks[prev][i].ticks)
++                  t->delta = t->ticks - zink_dd_tasks[prev][i].ticks;
++               break;
++            }
++         }
++         count++;
++      }
++      closedir(tasks);
++   }
++   closedir(proc);
++   const bool have_prev = zink_dd_task_count[prev] > 0;
++   zink_dd_task_count[cur] = count;
++   zink_dd_task_cur = cur;
++   if (!have_prev || !count)
++      return;
++   struct zink_dd_task *sorted = malloc(count * sizeof(*sorted));
++   if (!sorted)
++      return;
++   memcpy(sorted, now, count * sizeof(*sorted));
++   qsort(sorted, count, sizeof(*sorted), zink_dd_task_cmp);
++   const double hz = sysconf(_SC_CLK_TCK) > 0 ? (double)sysconf(_SC_CLK_TCK) : 100.0;
++   uint64_t total = 0;
++   for (int i = 0; i < count; i++)
++      total += sorted[i].delta;
++   char line[1400];
++   int len = snprintf(line, sizeof(line), "droiddeck cpu over %.0f s: all %.0f%% of a core;", secs,
++                      total / hz / secs * 100.0);
++   for (int i = 0; i < count && i < 14 && sorted[i].delta; i++) {
++      char pname[40] = "";
++      uint64_t dummy;
++      if (sorted[i].pid != sorted[i].tid)
++         zink_dd_read_task(sorted[i].pid, sorted[i].pid, &dummy, pname, sizeof(pname));
++      len += snprintf(line + len, sizeof(line) - len, " %s%s%s[%d] %.0f%%", pname, pname[0] ? "/" : "",
++                      sorted[i].name, sorted[i].tid, sorted[i].delta / hz / secs * 100.0);
++      if (len >= (int)sizeof(line) - 80)
++         break;
++   }
++   free(sorted);
++   mesa_logi("%s", line);
++}
++
 +void
 +zink_dd_stats_tick(void)
 +{
@@ -411,6 +538,7 @@ diff -ruN a/src/gallium/drivers/zink/zink_screen.c b/src/gallium/drivers/zink/zi
 +   simple_mtx_unlock(&zink_dd_lock);
 +   if (!s.batches)
 +      return;
++   zink_dd_cpu_report(secs);
 +#define DD_MS(x) ((x) / 1e6)
 +   mesa_logi("droiddeck zink [%d %s]: over %.0f s: %" PRIu64 " batches, GPU busy %.1f ms (%" PRIu64
 +             " timed, avg %.2f, max %.2f ms); %" PRIu64 " render passes (+%" PRIu64 " clear-only): "
@@ -437,7 +565,7 @@ diff -ruN a/src/gallium/drivers/zink/zink_screen.c b/src/gallium/drivers/zink/zi
  bool
  zink_screen_timeline_wait(struct zink_screen *screen, uint64_t batch_id, uint64_t timeout)
  {
-@@ -2445,7 +2523,13 @@
+@@ -2445,7 +2651,13 @@
     bool success = false;
     if (screen->device_lost)
        return true;
@@ -451,7 +579,7 @@ diff -ruN a/src/gallium/drivers/zink/zink_screen.c b/src/gallium/drivers/zink/zi
     success = zink_screen_handle_vkresult(screen, ret);
  
     if (success)
-@@ -3396,6 +3480,7 @@
+@@ -3396,6 +3608,7 @@
      * is never mapped, after the GPU's own types. Lazily allocated and protected types keep
      * their place, after them. DROIDDECK_ZINK_PREFER_UNMAPPABLE=0 keeps the GPU's order.
      */

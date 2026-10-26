@@ -155,6 +155,8 @@ if grep "droiddeck zink \[" $OUT/glmem-mali.txt | grep -qv " 0 timed" && grep "d
 # who waits (call stacks of fence and server-reply waits, in droiddeck_vulkan.txt)
 grep "wait stack" /tmp/steamroot/logs/droiddeck_vulkan.txt | grep glmem | tail -3 | cut -c1-400
 grep "wait stack" /tmp/steamroot/logs/droiddeck_vulkan.txt | grep glmem | grep -q "libvulkan_panvk.so+0x" && echo "PASS wait stacks with library offsets" || echo "FAIL wait stacks"
+grep "droiddeck cpu over" $OUT/glmem-mali.txt | tail -1 | cut -c1-300
+grep -q "droiddeck cpu over .*glmem" $OUT/glmem-mali.txt && echo "PASS the session's CPU use by thread" || echo "FAIL the session's CPU use by thread"
 echo "---- the same with the driver keeping the GPU's order (DROIDDECK_ZINK_PREFER_UNMAPPABLE=0: expect none)"
 glmem_case mali-order VKR_NATIVE_MEMORY=1 -- DROIDDECK_ZINK_PREFER_UNMAPPABLE=0
 [ $GLRC = 0 ] && [ "${NATIVE:-0}" = 0 ] && echo "PASS the check notices memory not taken from the native type" \
