@@ -17,7 +17,7 @@ for p in "$HERE"/guest-patches/*.patch; do
 done
 # Also the GL side (GLX, EGL, the DRI frontend, Zink, the loader): read when patching it.
 tar -C "$WORK/mesa" -czf "$OUT/mesa-virtio-src.tar.gz" src/virtio src/vulkan/runtime src/vulkan/wsi include/drm-uapi \
-  src/glx src/egl src/gallium/frontends/dri src/gallium/drivers/zink src/gallium/auxiliary/pipe-loader src/loader src/util/driconf.h src/x11 meson.options meson.build
+  src/glx src/egl src/gallium/frontends/dri src/gallium/drivers/zink src/gallium/auxiliary/pipe-loader src/loader src/util src/vulkan/util include/vulkan src/x11 meson.options meson.build
 echo "== venus vtest socket handling:"
 grep -n "getenv\|SOCKET\|socket_name\|sun_path" "$WORK/mesa/src/virtio/vulkan/vn_renderer_vtest.c" | head -20 || true
 grep -rn "VN_DEBUG\|\"vtest\"" "$WORK/mesa/src/virtio/vulkan/vn_common.c" | head -10 || true
