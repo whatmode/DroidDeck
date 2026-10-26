@@ -851,15 +851,16 @@ new file mode 100644
 diff -ruN a/src/virtio/vulkan/vn_droiddeck_emu.c b/src/virtio/vulkan/vn_droiddeck_emu.c
 --- a/src/virtio/vulkan/vn_droiddeck_emu.c
 +++ b/src/virtio/vulkan/vn_droiddeck_emu.c
-@@ -10,6 +10,7 @@
+@@ -10,6 +10,8 @@
  #include <string.h>
  
  #include "vk_util.h"
 +#include "util/u_debug.h"
++#include "util/bitscan.h"
  
  #include "vn_instance.h"
  #include "vn_physical_device.h"
-@@ -56,6 +57,9 @@
+@@ -56,6 +58,9 @@
        emu |= VN_DD_EMU_CLIP_DISTANCE;
     if (all || !f->shaderCullDistance)
        emu |= VN_DD_EMU_CULL_DISTANCE;
@@ -869,7 +870,7 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_emu.c b/src/virtio/vulkan/vn_droiddec
  
     if (emu & VN_DD_EMU_RBA2)
        f->robustBufferAccess2 = true;
-@@ -67,15 +71,18 @@
+@@ -67,15 +72,18 @@
        f->shaderClipDistance = true;
     if (emu & VN_DD_EMU_CULL_DISTANCE)
        f->shaderCullDistance = true;
@@ -889,7 +890,7 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_emu.c b/src/virtio/vulkan/vn_droiddec
                      emu ? "" : " nothing (the GPU has them all)");
  }
  
-@@ -111,6 +118,8 @@
+@@ -111,6 +119,8 @@
           core->shaderClipDistance = VK_FALSE;
        if (emu & VN_DD_EMU_CULL_DISTANCE)
           core->shaderCullDistance = VK_FALSE;
@@ -898,6 +899,391 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_emu.c b/src/virtio/vulkan/vn_droiddec
        /* robustBufferAccess2 asked: the GPU's robustBufferAccess stands in for it */
        if (saved->rba2 && saved->rba2_saved)
           core->robustBufferAccess = VK_TRUE;
+@@ -170,11 +180,10 @@
+    return true;
+ }
+ 
+-uint32_t *
+-vn_dd_emu_rewrite_spirv(uint32_t emu, const uint32_t *code, size_t size, size_t *out_size)
++static uint32_t *
++dd_rewrite_standalone(uint32_t emu, const uint32_t *code, size_t size, size_t *out_size)
+ {
+-   if (!(emu & (VN_DD_EMU_CLIP_DISTANCE | VN_DD_EMU_CULL_DISTANCE)) || size < 20 || (size & 3) ||
+-       code[0] != 0x07230203)
++   if (size < 20 || (size & 3) || code[0] != 0x07230203)
+       return NULL;
+    const size_t nwords = size / 4;
+    const uint32_t bound = code[3];
+@@ -215,7 +224,7 @@
+    if (member) {
+       static unsigned notes;
+       if (++notes <= 5)
+-         vn_droiddeck_log("SPIR-V: a clip/cull distance inside an I/O block: left as it is (not handled yet)");
++         vn_droiddeck_log("SPIR-V: a clip/cull distance inside an I/O block after the block pass: left as it is");
+    }
+    if (!any)
+       goto unchanged;
+@@ -353,6 +362,360 @@
+    return NULL;
+ }
+ 
++/* Clip/cull distances as members of an I/O block (gl_PerVertex: DXVK's vertex, geometry and
++ * tessellation shaders): the members are removed from the block type, and access chains to
++ * them go to a Private variable of the member's type instead (one per block member,
++ * zero-initialised); chains to later members get their index lowered. The capabilities go
++ * too. Whole-block values (OpCompositeExtract/Insert on the block type) are counted and left.
++ * Returns a malloc'ed module or NULL when there is nothing to do. */
++enum {
++   DD_OpMemberName = 6,
++   DD_OpTypeInt = 21,
++   DD_OpTypeArray = 28,
++   DD_OpTypeRuntimeArray = 29,
++   DD_OpTypeStruct = 30,
++   DD_OpConstant = 43,
++   DD_OpConstantNull = 46,
++   DD_OpCompositeExtract = 81,
++   DD_OpCompositeInsert = 82,
++};
++
++#define DD_MAX_NEW 256
++
++static uint32_t *
++dd_rewrite_blocks(uint32_t emu, const uint32_t *code, size_t size, size_t *out_size)
++{
++   if (size < 20 || (size & 3) || code[0] != 0x07230203)
++      return NULL;
++   const size_t nwords = size / 4;
++   const uint32_t bound = code[3];
++   const uint32_t version = code[1];
++
++   uint32_t *removed = calloc(bound, sizeof(uint32_t)); /* struct id -> member bits */
++   size_t *def = calloc(bound, sizeof(size_t));          /* id -> word index of its definition */
++   uint32_t *val_type = calloc(bound, sizeof(uint32_t)); /* pointer value -> its pointer type */
++   uint32_t *priv_ptr = calloc(bound, sizeof(uint32_t)); /* pointee -> Private pointer type */
++   uint8_t *is_priv = calloc(bound, 1);                  /* pointer value now Private */
++   if (!removed || !def || !val_type || !priv_ptr || !is_priv)
++      goto none;
++
++   bool any = false;
++   for (size_t i = 5; i < nwords;) {
++      const uint32_t op = code[i] & 0xffff, wc = code[i] >> 16;
++      if (!wc || i + wc > nwords)
++         goto none;
++      switch (op) {
++      case DD_OpTypeInt:
++      case DD_OpTypeArray:
++      case DD_OpTypeRuntimeArray:
++      case DD_OpTypeStruct:
++         if (wc >= 2 && code[i + 1] < bound)
++            def[code[i + 1]] = i;
++         break;
++      case DD_OpTypePointer:
++         if (wc == 4 && code[i + 1] < bound) {
++            def[code[i + 1]] = i;
++            if (code[i + 2] == DD_StoragePrivate && code[i + 3] < bound)
++               priv_ptr[code[i + 3]] = code[i + 1];
++         }
++         break;
++      case DD_OpConstant:
++      case DD_OpVariable:
++         if (wc >= 3 && code[i + 2] < bound) {
++            def[code[i + 2]] = i;
++            val_type[code[i + 2]] = code[i + 1];
++         }
++         break;
++      case DD_OpMemberDecorate:
++         if (wc >= 5 && code[i + 3] == DD_DecorationBuiltIn &&
++             (code[i + 4] == DD_BuiltInClipDistance || code[i + 4] == DD_BuiltInCullDistance) &&
++             code[i + 1] < bound && code[i + 2] < 32) {
++            removed[code[i + 1]] |= 1u << code[i + 2];
++            any = true;
++         }
++         break;
++      default:
++         break;
++      }
++      i += wc;
++   }
++   if (!any)
++      goto none;
++
++   /* new ids: Private pointer types (by pointee), per (struct, member) a variable and its null
++    * initializer, and index constants (by old constant) */
++   uint32_t next = bound;
++   struct { uint32_t pointee, id; } nptr[DD_MAX_NEW];
++   unsigned n_nptr = 0;
++   struct { uint32_t st, m, type, ptr, null_id, var; } pv[32];
++   unsigned n_pv = 0;
++   struct { uint32_t old_const, value, id; } ncon[DD_MAX_NEW];
++   unsigned n_ncon = 0;
++   unsigned composites = 0;
++
++#define DD_PRIV_PTR(pointee_, out_) do { \
++      uint32_t p_ = (pointee_) < bound ? priv_ptr[(pointee_)] : 0; \
++      for (unsigned q_ = 0; !p_ && q_ < n_nptr; q_++) \
++         if (nptr[q_].pointee == (pointee_)) p_ = nptr[q_].id; \
++      if (!p_) { \
++         if (n_nptr == DD_MAX_NEW) goto none; \
++         p_ = next++; nptr[n_nptr].pointee = (pointee_); nptr[n_nptr].id = p_; n_nptr++; \
++      } \
++      (out_) = p_; \
++   } while (0)
++
++   /* chains: what each becomes (by word index) */
++   struct dd_chain { size_t at; uint32_t res_type; uint32_t base; int cut; int idx_pos; uint32_t idx_new; };
++   struct dd_chain *chains = NULL;
++   size_t n_chains = 0, cap_chains = 0;
++   for (size_t i = 5; i < nwords;) {
++      const uint32_t op = code[i] & 0xffff, wc = code[i] >> 16;
++      if ((op == DD_OpCompositeExtract || op == DD_OpCompositeInsert))
++         composites++; /* checked against the block types below, cheaply: counted only */
++      if ((op == DD_OpAccessChain || op == DD_OpInBoundsAccessChain) && wc >= 4 &&
++          code[i + 2] < bound && code[i + 3] < bound) {
++         const uint32_t res = code[i + 2], base = code[i + 3];
++         val_type[res] = code[i + 1];
++         struct dd_chain c = { i, 0, 0, -1, -1, 0 };
++         const uint32_t bt = val_type[base];
++         uint32_t cur = (bt < bound && def[bt]) ? code[def[bt] + 3] : 0;
++         for (uint32_t k = 4; k < wc && cur && cur < bound && def[cur]; k++) {
++            const size_t d = def[cur];
++            const uint32_t top = code[d] & 0xffff;
++            if (top == DD_OpTypeArray || top == DD_OpTypeRuntimeArray) {
++               cur = code[d + 2];
++               continue;
++            }
++            if (top != DD_OpTypeStruct)
++               break;
++            const uint32_t idx = code[i + k];
++            if (idx >= bound || !def[idx] || (code[def[idx]] & 0xffff) != DD_OpConstant)
++               break;
++            const uint32_t m = code[def[idx] + 3];
++            const uint32_t nmem = (code[d] >> 16) - 2;
++            if (m >= nmem)
++               break;
++            const uint32_t bits = removed[cur];
++            if (bits & (1u << m)) {
++               unsigned q = 0;
++               while (q < n_pv && !(pv[q].st == cur && pv[q].m == m))
++                  q++;
++               if (q == n_pv) {
++                  if (n_pv == 32)
++                     goto none;
++                  pv[q].st = cur;
++                  pv[q].m = m;
++                  pv[q].type = code[d + 2 + m];
++                  DD_PRIV_PTR(pv[q].type, pv[q].ptr);
++                  pv[q].null_id = next++;
++                  pv[q].var = next++;
++                  n_pv++;
++               }
++               c.base = pv[q].var;
++               c.cut = (int)k + 1; /* indices after this one stay */
++               break;
++            }
++            if (bits & ((1u << m) - 1)) {
++               const uint32_t value = m - util_bitcount(bits & ((1u << m) - 1));
++               unsigned q = 0;
++               while (q < n_ncon && !(ncon[q].old_const == idx && ncon[q].value == value))
++                  q++;
++               if (q == n_ncon) {
++                  if (n_ncon == DD_MAX_NEW)
++                     goto none;
++                  ncon[q].old_const = idx;
++                  ncon[q].value = value;
++                  ncon[q].id = next++;
++                  n_ncon++;
++               }
++               c.idx_pos = (int)k;
++               c.idx_new = ncon[q].id;
++            }
++            cur = code[d + 2 + m];
++         }
++         if (c.base || is_priv[base]) {
++            is_priv[res] = 1;
++            const uint32_t rt = code[i + 1];
++            DD_PRIV_PTR(rt < bound && def[rt] ? code[def[rt] + 3] : 0, c.res_type);
++         }
++         if (c.base || c.res_type || c.idx_pos >= 0) {
++            if (n_chains == cap_chains) {
++               cap_chains = cap_chains ? cap_chains * 2 : 64;
++               struct dd_chain *nc = realloc(chains, cap_chains * sizeof(*chains));
++               if (!nc)
++                  goto none_chains;
++               chains = nc;
++            }
++            chains[n_chains++] = c;
++         }
++      }
++      i += wc;
++   }
++
++   /* write it out */
++   struct dd_words o = { 0 };
++   uint32_t header[5] = { code[0], code[1], code[2], next, code[4] };
++   if (!dd_push(&o, header, 5))
++      goto fail;
++   size_t ci = 0;
++   for (size_t i = 5; i < nwords;) {
++      const uint32_t op = code[i] & 0xffff, wc = code[i] >> 16;
++      const uint32_t *in = code + i;
++      const size_t at = i;
++      i += wc;
++      if (op == DD_OpCapability &&
++          (((in[1] == DD_CapabilityClipDistance) && (emu & VN_DD_EMU_CLIP_DISTANCE)) ||
++           ((in[1] == DD_CapabilityCullDistance) && (emu & VN_DD_EMU_CULL_DISTANCE))))
++         continue;
++      if ((op == DD_OpMemberDecorate || op == DD_OpMemberName) && wc >= 3 && in[1] < bound &&
++          removed[in[1]] && in[2] < 32) {
++         const uint32_t bits = removed[in[1]];
++         if (bits & (1u << in[2]))
++            continue;
++         if (!dd_push(&o, in, wc))
++            goto fail;
++         o.w[o.n - wc + 2] = in[2] - util_bitcount(bits & ((1u << in[2]) - 1));
++         continue;
++      }
++      if (op == DD_OpEntryPoint && version >= 0x00010400 && n_pv) {
++         /* from SPIR-V 1.4 the interface lists every global variable the entry point uses */
++         if (!dd_push(&o, in, wc))
++            goto fail;
++         for (unsigned q = 0; q < n_pv; q++)
++            if (!dd_push(&o, &pv[q].var, 1))
++               goto fail;
++         o.w[o.n - wc - n_pv] = ((wc + n_pv) << 16) | op;
++         continue;
++      }
++      if (op == DD_OpTypeStruct && wc >= 2 && in[1] < bound && removed[in[1]]) {
++         const uint32_t bits = removed[in[1]];
++         uint32_t buf[64];
++         if (wc > 64)
++            goto fail;
++         uint32_t n = 0;
++         buf[n++] = 0;
++         buf[n++] = in[1];
++         for (uint32_t m = 0; m + 2 < wc; m++)
++            if (!(bits & (1u << m)))
++               buf[n++] = in[2 + m];
++         buf[0] = (n << 16) | op;
++         if (!dd_push(&o, buf, n))
++            goto fail;
++         continue;
++      }
++      if (ci < n_chains && chains[ci].at == at) {
++         const struct dd_chain *c = &chains[ci++];
++         uint32_t buf[64];
++         if (wc > 64)
++            goto fail;
++         uint32_t n = 0;
++         buf[n++] = 0;
++         buf[n++] = c->res_type ? c->res_type : in[1];
++         buf[n++] = in[2];
++         buf[n++] = c->base ? c->base : in[3];
++         for (uint32_t k = c->base ? (uint32_t)c->cut : 4; k < wc; k++)
++            buf[n++] = ((int)k == c->idx_pos) ? c->idx_new : in[k];
++         buf[0] = (n << 16) | op;
++         if (!dd_push(&o, buf, n))
++            goto fail;
++         continue;
++      }
++      if (!dd_push(&o, in, wc))
++         goto fail;
++      /* new declarations right after what they refer to */
++      const uint32_t defined = (op == DD_OpConstant || op == DD_OpVariable) && wc >= 3 ? in[2]
++                               : (wc >= 2 && (op == DD_OpTypeInt || op == DD_OpTypeArray ||
++                                              op == DD_OpTypeRuntimeArray || op == DD_OpTypeStruct ||
++                                              op == DD_OpTypePointer || op == 22 /* OpTypeFloat */ ||
++                                              op == 23 /* OpTypeVector */))
++                                    ? in[1]
++                                    : 0;
++      if (!defined)
++         continue;
++      for (unsigned q = 0; q < n_nptr; q++) {
++         if (nptr[q].pointee == defined) {
++            const uint32_t t[4] = { (4u << 16) | DD_OpTypePointer, nptr[q].id, DD_StoragePrivate, defined };
++            if (!dd_push(&o, t, 4))
++               goto fail;
++            for (unsigned v = 0; v < n_pv; v++) {
++               if (pv[v].type == defined) {
++                  const uint32_t nl[3] = { (3u << 16) | DD_OpConstantNull, defined, pv[v].null_id };
++                  const uint32_t vr[5] = { (5u << 16) | DD_OpVariable, pv[v].ptr, pv[v].var, DD_StoragePrivate,
++                                           pv[v].null_id };
++                  if (!dd_push(&o, nl, 3) || !dd_push(&o, vr, 5))
++                     goto fail;
++               }
++            }
++         }
++      }
++      /* a member type whose Private pointer type existed already */
++      for (unsigned v = 0; v < n_pv; v++) {
++         if (pv[v].ptr < bound && pv[v].ptr == defined) {
++            const uint32_t nl[3] = { (3u << 16) | DD_OpConstantNull, pv[v].type, pv[v].null_id };
++            const uint32_t vr[5] = { (5u << 16) | DD_OpVariable, pv[v].ptr, pv[v].var, DD_StoragePrivate,
++                                     pv[v].null_id };
++            if (!dd_push(&o, nl, 3) || !dd_push(&o, vr, 5))
++               goto fail;
++         }
++      }
++      for (unsigned q = 0; q < n_ncon; q++) {
++         if (ncon[q].old_const == defined) {
++            const uint32_t k[4] = { (4u << 16) | DD_OpConstant, in[1], ncon[q].id, ncon[q].value };
++            if (!dd_push(&o, k, 4))
++               goto fail;
++         }
++      }
++   }
++   free(chains);
++   free(removed); free(def); free(val_type); free(priv_ptr); free(is_priv);
++   {
++      static unsigned notes;
++      if (++notes <= 3 || notes % 100 == 0)
++         vn_droiddeck_log("SPIR-V: clip/cull distances taken out of an I/O block in shader #%u "
++                          "(%u member(s)%s)", notes, n_pv,
++                          composites ? "; the module also has composite extracts/inserts" : "");
++   }
++   *out_size = o.n * 4;
++   return o.w;
++
++fail:
++   free(o.w);
++none_chains:
++   free(chains);
++none:
++   free(removed); free(def); free(val_type); free(priv_ptr); free(is_priv);
++   return NULL;
++#undef DD_PRIV_PTR
++}
++
++uint32_t *
++vn_dd_emu_rewrite_spirv(uint32_t emu, const uint32_t *code, size_t size, size_t *out_size)
++{
++   if (!(emu & (VN_DD_EMU_CLIP_DISTANCE | VN_DD_EMU_CULL_DISTANCE)))
++      return NULL;
++   size_t bsize = 0;
++   uint32_t *blocks = dd_rewrite_blocks(emu, code, size, &bsize);
++   uint32_t *out = dd_rewrite_standalone(emu, blocks ? blocks : code, blocks ? bsize : size, out_size);
++   if (!out && blocks) {
++      *out_size = bsize;
++      /* DROIDDECK_VN_DUMP_SPIRV=<dir>: the rewritten modules, for spirv-val */
++      static unsigned dumps;
++      const char *dir = getenv("DROIDDECK_VN_DUMP_SPIRV");
++      if (dir && *dir) {
++         char path[512];
++         snprintf(path, sizeof(path), "%s/blocks-%u.spv", dir, ++dumps);
++         FILE *f = fopen(path, "wb");
++         if (f) {
++            fwrite(blocks, 1, bsize, f);
++            fclose(f);
++         }
++      }
++      return blocks;
++   }
++   free(blocks);
++   return out;
++}
++
+ /* ---- pipelines ---- */
+ 
+ static void
 diff -ruN a/src/virtio/vulkan/vn_droiddeck_emu.h b/src/virtio/vulkan/vn_droiddeck_emu.h
 --- a/src/virtio/vulkan/vn_droiddeck_emu.h
 +++ b/src/virtio/vulkan/vn_droiddeck_emu.h

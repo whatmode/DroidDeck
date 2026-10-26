@@ -1,0 +1,200 @@
+diff -ru a/src/vulkan/wsi/wsi_common.c b/src/vulkan/wsi/wsi_common.c
+--- a/src/vulkan/wsi/wsi_common.c
++++ b/src/vulkan/wsi/wsi_common.c
+@@ -1556,7 +1556,7 @@
+ #endif
+       }
+ 
+-      if (wsi->sw)
++      if (wsi->sw || swapchain->dd_cpu_present)
+          wsi->WaitForFences(device, 1, &swapchain->fences[image_index], true, ~0ull);
+ 
+       const VkPresentRegionKHR *region = NULL;
+diff -ru a/src/vulkan/wsi/wsi_common_private.h b/src/vulkan/wsi/wsi_common_private.h
+--- a/src/vulkan/wsi/wsi_common_private.h
++++ b/src/vulkan/wsi/wsi_common_private.h
+@@ -183,6 +183,9 @@
+    VkAllocationCallbacks alloc;
+    VkFence* fences;
+    VkPresentModeKHR present_mode;
++   /* droiddeck: images copied to the X server by the CPU (no DRI3/Present there): wait for the
++    * GPU before presenting, as for software drivers */
++   bool dd_cpu_present;
+    VkSemaphore present_id_timeline;
+ 
+    int signal_dma_buf_from_semaphore;
+diff -ru a/src/vulkan/wsi/wsi_common_x11.c b/src/vulkan/wsi/wsi_common_x11.c
+--- a/src/vulkan/wsi/wsi_common_x11.c
++++ b/src/vulkan/wsi/wsi_common_x11.c
+@@ -87,6 +87,10 @@
+    bool is_proprietary_x11;
+    bool is_xwayland;
+    bool has_mit_shm;
++   /* droiddeck: no DRI3 or no Present on this X server (Xwayland without glamor): images go
++    * to it by the CPU (XPutImage), as for software drivers, instead of requests to the
++    * missing extensions, which close the connection (xcb). DROIDDECK_WSI_X11_CPU=0: off. */
++   bool dd_cpu;
+    bool has_xfixes;
+ };
+ 
+@@ -378,6 +382,18 @@
+    }
+ #endif
+ 
++   wsi_conn->dd_cpu = !wsi_dev->sw && (!wsi_conn->has_dri3 || !wsi_conn->has_present) &&
++                      debug_get_bool_option("DROIDDECK_WSI_X11_CPU", true);
++   if (wsi_conn->dd_cpu) {
++      static bool logged;
++      if (!logged) {
++         logged = true;
++         fprintf(stderr, "droiddeck wsi: X server without %s%s%s: Vulkan images go to it by the CPU\n",
++                 wsi_conn->has_dri3 ? "" : "DRI3", !wsi_conn->has_dri3 && !wsi_conn->has_present ? " and " : "",
++                 wsi_conn->has_present ? "" : "Present");
++      }
++   }
++
+    free(dri3_reply);
+    free(pres_reply);
+    free(randr_reply);
+@@ -599,7 +615,7 @@
+    if (!wsi_conn)
+       return false;
+ 
+-   if (!wsi_device->sw) {
++   if (!wsi_device->sw && !wsi_conn->dd_cpu) {
+       if (!wsi_x11_check_for_dri3(wsi_conn))
+          return false;
+    }
+@@ -674,7 +690,7 @@
+    if (!wsi_conn)
+       return VK_ERROR_OUT_OF_HOST_MEMORY;
+ 
+-   if (!wsi_device->sw) {
++   if (!wsi_device->sw && !wsi_conn->dd_cpu) {
+       if (!wsi_x11_check_for_dri3(wsi_conn)) {
+          *pSupported = false;
+          return VK_SUCCESS;
+@@ -1130,6 +1146,7 @@
+ 
+    bool                                         has_dri3_modifiers;
+    bool                                         has_mit_shm;
++   bool                                         dd_cpu;
+    bool                                         has_async_may_tear;
+ 
+    xcb_connection_t *                           conn;
+@@ -1728,7 +1745,7 @@
+    x11_capture_trace(chain);
+ 
+    VkResult result;
+-   if (chain->base.wsi->sw && !chain->has_mit_shm)
++   if ((chain->base.wsi->sw || chain->dd_cpu) && !chain->has_mit_shm)
+       result = x11_present_to_x11_sw(chain, image_index);
+    else
+ #ifdef HAVE_X11_DRM
+@@ -1938,7 +1955,8 @@
+                                    forward_progress_guaranteed_acquired_images;
+       }
+ 
+-      if (assume_forward_progress) {
++      /* droiddeck: no Present events without the extension (images go by the CPU) */
++      if (assume_forward_progress && chain->special_event) {
+          /* Only yield lock when blocking on X11 event. */
+          mtx_unlock(&chain->thread_state_lock);
+          xcb_generic_event_t *event =
+@@ -2116,7 +2134,7 @@
+       return result;
+ 
+    image->update_region = None;
+-   if (chain->base.wsi->sw && !chain->has_mit_shm)
++   if ((chain->base.wsi->sw || chain->dd_cpu) && !chain->has_mit_shm)
+       return VK_SUCCESS;
+ 
+ #ifdef HAVE_X11_DRM
+@@ -2269,7 +2287,7 @@
+                  struct x11_image *image)
+ {
+    xcb_void_cookie_t cookie;
+-   if (!chain->base.wsi->sw || chain->has_mit_shm) {
++   if (!(chain->base.wsi->sw || chain->dd_cpu) || chain->has_mit_shm) {
+ #ifdef HAVE_X11_DRM
+       cookie = xcb_sync_destroy_fence(chain->conn, image->sync_fence);
+       xcb_discard_reply(chain->conn, cookie.sequence);
+@@ -2465,12 +2483,14 @@
+    for (uint32_t i = 0; i < chain->base.image_count; i++)
+       x11_image_finish(chain, pAllocator, &chain->images[i]);
+ #ifdef HAVE_X11_DRM
++   if (chain->special_event) {
+    xcb_void_cookie_t cookie;
+    xcb_unregister_for_special_event(chain->conn, chain->special_event);
+    cookie = xcb_present_select_input_checked(chain->conn, chain->event_id,
+                                              chain->window,
+                                              XCB_PRESENT_EVENT_MASK_NO_EVENT);
+    xcb_discard_reply(chain->conn, cookie.sequence);
++   }
+ #endif
+    mtx_destroy(&chain->present_progress_mutex);
+    u_cnd_monotonic_destroy(&chain->present_progress_cond);
+@@ -2668,11 +2688,13 @@
+ #ifdef HAVE_X11_DRM
+    xcb_present_query_capabilities_cookie_t present_query_cookie;
+    xcb_present_query_capabilities_reply_t *present_query_reply;
+-   present_query_cookie = xcb_present_query_capabilities(conn, window);
+-   present_query_reply = xcb_present_query_capabilities_reply(conn, present_query_cookie, NULL);
+-   if (present_query_reply) {
+-      present_caps = present_query_reply->capabilities;
+-      free(present_query_reply);
++   if (wsi_conn->has_present) {
++      present_query_cookie = xcb_present_query_capabilities(conn, window);
++      present_query_reply = xcb_present_query_capabilities_reply(conn, present_query_cookie, NULL);
++      if (present_query_reply) {
++         present_caps = present_query_reply->capabilities;
++         free(present_query_reply);
++      }
+    }
+ #endif
+ 
+@@ -2683,7 +2705,7 @@
+    struct wsi_base_image_params *image_params = NULL;
+    struct wsi_cpu_image_params cpu_image_params;
+    uint64_t *modifiers[2] = {NULL, NULL};
+-   if (wsi_device->sw) {
++   if (wsi_device->sw || wsi_conn->dd_cpu) {
+       cpu_image_params = (struct wsi_cpu_image_params) {
+          .base.image_type = WSI_IMAGE_TYPE_CPU,
+          .alloc_shm = wsi_conn->has_mit_shm ? &alloc_shm : NULL,
+@@ -2748,6 +2770,8 @@
+    chain->status = VK_SUCCESS;
+    chain->has_dri3_modifiers = wsi_conn->has_dri3_modifiers;
+    chain->has_mit_shm = wsi_conn->has_mit_shm;
++   chain->dd_cpu = wsi_conn->dd_cpu;
++   chain->base.dd_cpu_present = wsi_conn->dd_cpu;
+    chain->has_async_may_tear = present_caps & XCB_PRESENT_CAPABILITY_ASYNC_MAY_TEAR;
+ 
+    /* When images in the swapchain don't fit the window, X can still present them, but it won't
+@@ -2785,6 +2809,8 @@
+     * - Idle: An image from our swapchain is not anymore accessed by the X
+     *         server and can be reused.
+     */
++   chain->special_event = NULL;
++   if (wsi_conn->has_present) {
+    chain->event_id = xcb_generate_id(chain->conn);
+    uint32_t event_mask = XCB_PRESENT_EVENT_MASK_CONFIGURE_NOTIFY |
+                          XCB_PRESENT_EVENT_MASK_COMPLETE_NOTIFY;
+@@ -2798,6 +2824,7 @@
+    chain->special_event =
+       xcb_register_for_special_xge(chain->conn, &xcb_present_id,
+                                    chain->event_id, NULL);
++   }
+ #endif
+    /* Create the graphics context. */
+    chain->gc = xcb_generate_id(chain->conn);
+@@ -2879,7 +2906,8 @@
+ 
+ fail_register:
+ #ifdef HAVE_X11_DRM
+-   xcb_unregister_for_special_event(chain->conn, chain->special_event);
++   if (chain->special_event)
++      xcb_unregister_for_special_event(chain->conn, chain->special_event);
+ #endif
+    wsi_swapchain_finish(&chain->base);
+ 

@@ -22,7 +22,7 @@ grep -q '^DisableSandbox' /etc/pacman.conf || sed -i 's/^\[options\]/[options]\n
 { for m in https://ca.us.mirror.archlinuxarm.org https://fl.us.mirror.archlinuxarm.org https://de3.mirror.archlinuxarm.org https://nl.mirror.archlinuxarm.org; do echo "Server = $m/\$arch/\$repo"; done; cat /etc/pacman.d/mirrorlist; } > /etc/pacman.d/mirrorlist.new
 mv /etc/pacman.d/mirrorlist.new /etc/pacman.d/mirrorlist
 pacman -Syu --noconfirm --needed gcc git meson ninja pkgconf libdrm libepoxy python-yaml vulkan-swrast vulkan-tools vulkan-headers vulkan-icd-loader \
-  glslang spirv-tools unzip mesa libglvnd libx11 xorg-server-xvfb >/tmp/pacman.log 2>&1 || { echo "pacman failed"; tail -15 /tmp/pacman.log; exit 1; }
+  glslang spirv-tools unzip mesa libglvnd libx11 xorg-server-xvfb xorg-xdpyinfo >/tmp/pacman.log 2>&1 || { echo "pacman failed"; tail -15 /tmp/pacman.log; exit 1; }
 OUT=/tmp/vn; mkdir -p $OUT
 zip=$(ls drv/Venus-Bridge-guest-*.zip | head -1)
 unzip -q -o "$zip" libvulkan_panvk.so virtio_icd.aarch64.json -d $OUT
@@ -82,18 +82,20 @@ if grep -q "Venus" $OUT/vi.txt; then echo "PASS the bridge lists lavapipe throug
 gcc -O2 -Wall -o $OUT/vkemu tools/tests/glx/vkemu/vkemu.c -lvulkan || exit 1
 spirv-as --target-env spv1.0 tools/tests/glx/vkemu/clip.spvasm -o $OUT/clip-spv10.spv || exit 1
 spirv-as --target-env spv1.5 tools/tests/glx/vkemu/clip.spvasm -o $OUT/clip-spv15.spv || exit 1
+spirv-as --target-env spv1.0 tools/tests/glx/vkemu/clipblock.spvasm -o $OUT/clipblock-spv10.spv || exit 1
+spirv-as --target-env spv1.5 tools/tests/glx/vkemu/clipblock.spvasm -o $OUT/clipblock-spv15.spv || exit 1
 glslangValidator -V tools/tests/glx/vkemu/green.frag -o $OUT/green.spv >/dev/null || exit 1
 echo "---- DXVK's features emulated (DROIDDECK_VN_EMULATE=mali)"
 rm -rf /tmp/dump; mkdir -p /tmp/dump
-DROIDDECK_VN_EMULATE=mali DROIDDECK_VN_DUMP_SPIRV=/tmp/dump timeout 120 $OUT/vkemu $OUT/clip-spv10.spv $OUT/clip-spv15.spv $OUT/green.spv > $OUT/emu.txt 2>&1; rc=$?
+DROIDDECK_VN_EMULATE=mali DROIDDECK_VN_DUMP_SPIRV=/tmp/dump timeout 120 $OUT/vkemu $OUT/clip-spv10.spv $OUT/clip-spv15.spv $OUT/clipblock-spv10.spv $OUT/clipblock-spv15.spv $OUT/green.spv > $OUT/emu.txt 2>&1; rc=$?
 grep "vkemu:" $OUT/emu.txt
-grep "emulated for DXVK\|SPIR-V" /tmp/steamroot/logs/droiddeck_vulkan.txt | tail -4 | cut -c1-200
+grep "emulated for DXVK\|SPIR-V" /tmp/steamroot/logs/droiddeck_vulkan.txt | tail -8 | cut -c1-200
 [ $rc = 0 ] && echo "PASS DXVK's features on a GPU without them" || { echo "FAIL DXVK's features on a GPU without them (rc $rc)"; tail -15 $OUT/emu.txt; }
 v=0; for f in /tmp/dump/*.spv; do
   [ -f "$f" ] || continue
   if spirv-val "$f" > $OUT/val.txt 2>&1; then v=$((v+1)); else echo "FAIL rewritten SPIR-V $f: $(head -3 $OUT/val.txt)"; spirv-dis "$f" | head -40; fi
 done
-[ $v -ge 2 ] && echo "PASS rewritten shaders valid ($v checked by spirv-val)" || echo "FAIL rewritten shaders checked: $v"
+[ $v -ge 4 ] && echo "PASS rewritten shaders valid ($v checked by spirv-val)" || echo "FAIL rewritten shaders checked: $v"
 spirv-dis $(ls /tmp/dump/*.spv | head -1) 2>/dev/null | grep -E "Capability|Variable|EntryPoint|Pointer" | head -14
 echo "---- BC textures emulated (DROIDDECK_VN_EMULATE=mali)"
 gcc -O2 -Wall -o $OUT/vkbc tools/tests/glx/vkemu/vkbc.c -lvulkan || exit 1
@@ -170,6 +172,28 @@ glmem_case mali-order VKR_NATIVE_MEMORY=1 -- DROIDDECK_ZINK_PREFER_UNMAPPABLE=0
 echo "---- an older app (no native type): GL still right"
 glmem_case mali-old VKR_NATIVE_MEMORY=0 --
 [ $GLRC = 0 ] && echo "PASS GL textures with an older app's server" || echo "FAIL GL textures with an older app's server (rc $GLRC)"
+kill $XVFB 2>/dev/null
+# A Vulkan program presenting to an X server without DRI3 and Present (as the games' Xwayland
+# -shm): the driver's X11 WSI must send its frames by the CPU instead of requests to the
+# missing extensions (which close the connection: Lake, 26 Oct).
+echo "---- Vulkan presenting to X without DRI3/Present (vkcube, 120 frames)"
+gcc -O2 -Wall -o $OUT/xshot tools/tests/glx/xshot.c -lX11 || exit 1
+Xvfb :10 -screen 0 640x480x24 -extension Present >/dev/null 2>&1 & XVFB=$!; sleep 2
+glmem_case_server() {  # the server with the phone's memory types, as above
+  kill $SERVER 2>/dev/null; wait $SERVER 2>/dev/null; rm -f /tmp/.virgl_test
+  env VK_DRIVER_FILES=$HOST_ICD LD_LIBRARY_PATH=$HOST_LIBS VKR_MEMORY_STATS_MS=200 \
+    VK_ADD_LAYER_PATH=$OUT/layers VK_INSTANCE_LAYERS=VK_LAYER_DROIDDECK_malimem:VK_LAYER_DROIDDECK_gputype \
+    $SERVER_BIN --venus --no-virgl --multi-clients > $OUT/server-cube.log 2>&1 &
+  SERVER=$!
+  for i in $(seq 1 50); do [ -S /tmp/.virgl_test ] && break; sleep 0.2; done
+}
+glmem_case_server
+DISPLAY=:10 xdpyinfo 2>/dev/null | grep -iE "DRI3|Present" | head -3
+( DISPLAY=:10 timeout 120 vkcube --wsi xcb --c 120 > $OUT/cube.txt 2>&1; echo "rc=$?" >> $OUT/cube.txt ) &
+CUBE=$!; sleep 6; DISPLAY=:10 $OUT/xshot | tee $OUT/shot.txt; wait $CUBE
+grep -E "droiddeck wsi|rc=|rror|DRI3|missing" $OUT/cube.txt | head -8
+if grep -q "rc=0" $OUT/cube.txt && grep -q "droiddeck wsi: X server without" $OUT/cube.txt && ! grep -q " 0 of " $OUT/shot.txt; then
+  echo "PASS Vulkan frames to X without DRI3/Present"; else echo "FAIL Vulkan frames to X without DRI3/Present"; tail -12 $OUT/cube.txt; fi
 kill $XVFB 2>/dev/null
 echo "---- the same with the alias off (VKR_NATIVE_MEMORY=0, as before)"
 start_server 0
