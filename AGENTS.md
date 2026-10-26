@@ -359,6 +359,15 @@ after editing one file it takes seconds, because the build dir is reused.
   `compile_commands.json` are the same `ninja -t commands` output). Every guest file compiles that
   way except `vn_renderer_virtgpu.c`, which needs `xf86drm.h` (libdrm) and fails before reaching
   any driver code — a missing system header, not a driver problem.
+  - Do not run `check-guest.sh` itself for this: with no `pkg-config` it dies in meson's
+    `regenerate` step with "Unhandled python OSError", after the mako check has already sent you
+    chasing a Python module. Go straight to the stub-`-I` + `compile_commands.json` route.
+  - The stubs that were enough: `xcb/xcb.h` (the `xcb_*_t` typedefs), `X11/Xlib.h`,
+    `X11/Xlib-xcb.h`, `X11/extensions/Xrandr.h`. The first run only reports the first missing
+    header, so add them one at a time and recompile; the errors converge in three passes.
+  - Watch the `-MD`/`-MQ`/`-MF`/`-MT` flags in the recorded command. Compiling with `-o /dev/null`
+    but leaving `-MD` in gives "to generate dependencies you must specify either -M or -MM", and
+    the real errors stay hidden behind it. Drop the whole dependency-tracking group.
 
 ## The 24 fps ceiling: the guest drains the GPU before every present (`tools/venus/guest-patches/0021`)
 
