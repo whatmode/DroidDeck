@@ -319,3 +319,28 @@ exactly two user-selectable things: its Proton build and its driver bundle.
 - A `droiddeck-compat/games.json` left on a device from an older build is inert: nothing reads it.
   Do not "restore" it as a diagnostic, and do not add a per-game env var path back for one game --
   that is what made the earlier A/B runs unreadable.
+
+## Compile-check the Venus guest ICD locally (`tools/venus/check-guest.sh`)
+
+A change to the guest ICD does not need a 30-60 minute CI round to find out whether it compiles.
+`tools/venus/check-guest.sh <mesa-src> [build-dir]` configures a Mesa build dir the same way
+`build-guest.sh` does and compiles every guest driver object (`src/virtio/vulkan/vn_*.c`, minus the
+Android-only `vn_android.c`) with the build's own flags. A clean tree compiles in about a minute;
+after editing one file it takes seconds, because the build dir is reused.
+
+- Take the flags from the build, not from a hand-written list. `ninja -t commands <obj>` is the
+  source of truth; a copied `-D` list drifts (it needs 111 defines here, including
+  `-DPACKAGE_VERSION` and the `HAVE_*` set) and produces errors that are the harness's, not the
+  driver's.
+- `vn_android.c` is Android-only: meson adds it under `with_platform_android` and it needs the NDK's
+  `vndk/hardware_buffer.h`. Skip it on the Linux side.
+- `build-guest.sh` also publishes `mesa-virtio-src.tar.gz` "enough to compile-check a driver change
+  outside this build". That is only true now that the tar list carries the headers the driver pulls
+  in but the virtio/GL dirs do not: `include/vk_video`, `src/c11`, `src/compiler/shader_enums.h`,
+  `src/compiler/spirv/spirv.h`, and `include/{c99_compat,no_extern_c,renderdoc_app}.h`. Drop one and
+  the published tree fails to compile before it reaches any driver code, which is the shape of the
+  header errors seen while generating headers by hand (a hand-rolled gen-script loop over the
+  tarballs cannot re-run at all without `vk.xml`).
+- The published `mesa-virtio-gen.tar.gz` holds generated headers but no `src/vulkan/registry/vk.xml`,
+  so the gen scripts cannot be re-run from the tarballs alone; the local harness sidesteps this by
+  compiling against a real checkout's build dir.
