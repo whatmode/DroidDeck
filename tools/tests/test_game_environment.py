@@ -53,6 +53,22 @@ class GameEnvironmentTest(unittest.TestCase):
         self.assertEqual(hide({"DROIDDECK_HIDE_EXTS": "VK_EXT_multi_draw", "DROIDDECK_HIDE_EXTS_ENABLE": "0"}),
                          {"DROIDDECK_HIDE_EXTS": "VK_EXT_multi_draw", "DROIDDECK_HIDE_EXTS_ENABLE": "0"})
 
+    def test_mali_workarounds_follow_the_driver(self):
+        mali = MODULE["with_mali_video"]
+        on_mali = lambda path: path == "/dev/mali0"
+        panvk = mali({}, exists=on_mali)
+        self.assertEqual(panvk["DISABLE_GAMESCOPE_WSI"], "1")
+        self.assertEqual(panvk["DROIDDECK_MALI_MEMORY"], "1")
+        # The Venus bridge: gamescope's WSI layer stays on, the PanVK memory layer stays off.
+        venus = mali({"BL_VENUS_SINGLE": "1"}, exists=on_mali)
+        self.assertNotIn("DISABLE_GAMESCOPE_WSI", venus)
+        self.assertNotIn("DROIDDECK_MALI_MEMORY", venus)
+        self.assertEqual(venus["ENABLE_GAMESCOPE_WSI"], "1")
+        # A choice the tester made stays.
+        self.assertEqual(mali({"BL_VENUS_SINGLE": "1", "ENABLE_GAMESCOPE_WSI": "0"}, exists=on_mali)["ENABLE_GAMESCOPE_WSI"], "0")
+        # Not Mali: nothing.
+        self.assertEqual(mali({}, exists=lambda path: False), {})
+
     def test_directaudio_capture_follows_the_session_microphone_setting(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)

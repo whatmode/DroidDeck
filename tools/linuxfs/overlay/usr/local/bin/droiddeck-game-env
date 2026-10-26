@@ -296,12 +296,25 @@ def with_ffmpeg(env):
 PROTON_DEFAULT_DEBUG = "+timestamp,+pid,+tid,+seh,+unwind,+threadname,+debugstr,+loaddll,+mscoree"
 
 
-def with_mali_video(env):
+def with_mali_video(env, exists=os.path.exists):
     """PanVK (Mali over kbase) draws D3D11 NV12 textures white, which blanks Unity's video player
     (Lake's menu). VK_LAYER_DROIDDECK_noycbcr reports YCbCr formats as unsupported, so games use
     their ordinary texture path for video. DROIDDECK_HIDE_YCBCR=0 keeps them."""
-    if os.path.exists("/dev/mali0") and not os.path.exists("/dev/kgsl-3d0"):
+    if exists("/dev/mali0") and not exists("/dev/kgsl-3d0"):
         env.setdefault("DROIDDECK_HIDE_YCBCR", "1")
+        if env.get("BL_VENUS_SINGLE") == "1" or env.get("BL_DRIVER_GL"):
+            # The Venus bridge (Android's own Mali driver does the GPU work): the PanVK
+            # workarounds below do not apply. Its games' Xwayland has neither DRI3 nor Present,
+            # so DXVK's frames must go through gamescope's WSI layer (as Steam's UI does); the
+            # bridge driver's X11 path would copy every frame by the CPU. The memory layer
+            # would take device-local memory away from games (the bridge server gives them
+            # native GPU memory instead).
+            env.setdefault("ENABLE_GAMESCOPE_WSI", "1")
+            print("droiddeck-game-env: Venus bridge: gamescope's WSI layer kept, PanVK's memory layer off",
+                  file=sys.stderr)
+            return env
+        print("droiddeck-game-env: Mali without the bridge: PanVK workarounds (WSI layer and memory layer)",
+              file=sys.stderr)
         # GPU atomics on PanVK's IO-coherent memory raise GPU_SHAREABILITY_FAULT and reset the
         # GPU; VK_LAYER_DROIDDECK_malimem keeps DXVK's GPU resources out of it.
         # DROIDDECK_MALI_MEMORY=0 turns it off.
