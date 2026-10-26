@@ -54,10 +54,6 @@ jobs:
   guest:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
-    env:
-      # A fixed work dir so the BC band check can reuse the checkout and build dir the guest
-      # build leaves behind (build-guest.sh honours VENUS_WORK).
-      VENUS_WORK: ${{ runner.temp }}/venus
     steps:
       - uses: actions/checkout@v4
       - name: Build dependencies
@@ -73,6 +69,10 @@ jobs:
       - name: Build the venus ICD for the Linux side
         run: |
           set -o pipefail
+          # A fixed work dir so the BC band check can reuse the checkout and build dir this step
+          # leaves behind (build-guest.sh honours VENUS_WORK).
+          export VENUS_WORK="$RUNNER_TEMP/venus"
+          echo "VENUS_WORK=$VENUS_WORK" >> "$GITHUB_ENV"
           bash tools/venus/build-guest.sh out 2>&1 | tee /tmp/guest.log
       - name: Report a failed build as annotations
         if: failure()
