@@ -761,11 +761,19 @@ On the Android side that is
 `/data/data/com.droiddeck.launcher/files/linuxfs/root/.local/share/Steam/logs/droiddeck_vulkan.txt`,
 or `root/.droiddeck-x64/.local/share/Steam/logs/` when the Steam client is x86_64.
 
-Two ways to get it: the in-session drawer's **Share logs** (`SessionLogShare` copies the live Steam
-logs into the zip as `<session>/steam/`, so `droiddeck_vulkan.txt` rides along), or `adb shell
-run-as com.droiddeck.launcher cat ...` on a debuggable build. `DROIDDECK_VK_LOG=<path>` in the env
-file sends it somewhere else entirely, which is the way to avoid adb: an absolute path under
-`/storage/emulated/0/` is reachable from the guest because the app binds external storage.
+Getting it needs neither root nor adb, and no file on the device. The session drawer's
+**Support > Session logs > Share logs** button zips the live Steam log directory into the shared
+zip as `<session>/steam/droiddeck_vulkan.txt` (`SessionLogShare.liveSteamLogs`, which copies the
+live directory only for the current session and only while the session has no `steam/` folder of
+its own). So: share logs while the session is still running, and the file is in the zip. A file
+manager cannot reach the same file by hand -- it lives under `/data/data/`, and on Android 11+ the
+`Android/data/` path is closed to other apps, so the drawer is the way in.
+
+Setting a variable for one game also needs no file: the game's card has an **Environment > Edit
+variables** field (NAME=value, space separated, `GameLaunchEnv`). Per-game values are applied by
+`droiddeck-game-env`'s `apply_config`, which assigns over the inherited environment, so a game
+card's `DROIDDECK_VN_SYNC_PRESENT=0` beats the session's `=1`. That is the A/B, in the app, with
+no root, no adb and no rebuild.
 
 **The trap: the log stops after 600 lines per process.** `vn_droiddeck_log` keeps a `static unsigned
 lines` and only writes while `++lines <= 600`, and the file is opened once per process, so a session
