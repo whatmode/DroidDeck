@@ -1157,3 +1157,43 @@ git clone --depth 1 --branch mesa-25.2.5 https://gitlab.freedesktop.org/mesa/mes
 cd /tmp/v && for p in <repo>/tools/venus/guest-patches/*.patch; do git apply --whitespace=nowarn "$p"; done
 ```
 
+
+## The GPU BC decode takes S3TC only, and it allocated per upload (2026-10-27-10 bundle)
+
+The `2026-10-27-10-steam` bundle was re-fetched to re-check the GPU decode. It confirms the path is
+live -- `BC textures: decoding on the GPU (DROIDDECK_VN_BC_GPU), alignment 64` appears once, for pid
+13490 -- and it shows why the path does not lift the frame rate by itself.
+
+**The path takes S3TC only.** `bc_gpu_kind()` maps DXT1/DXT3/DXT5 (BC1/BC2/BC3) and returns -1 for
+everything else, and the caller additionally requires the substitute format's block size to be 4
+bytes. So BC4 (R8), BC5 (R8G8), BC6H (RGBA16F) and BC7 (RGBA8, but with no `bc_gpu_kind` case) all
+fall to the CPU. The `android-vulkan.txt` probe in the same bundle shows BC1/BC3/BC5/BC7 are all
+unsupported by the Mali driver (`=0x0`), so every one of them is substituted and emulated. The stats
+line separates the two paths without a trace: the GPU path adds `decode_ns = 0`, the CPU path adds
+its wall time, so any nonzero `ms decoding` means the CPU ran. In the run with the GPU path on,
+`22:49:28` reads `1046 uploads (1046 regions) decoded, ... 3675.2 ms decoding`, so the CPU decoded
+most of them, and the frame rate over those windows falls 51.7 -> 24.5 -> 20.6 -> 4.0 fps.
+
+**It allocated a fresh chunk per upload.** `bc_gpu_copy()` called `bc_chunk_gpu_new()`
+unconditionally, which creates three buffers, allocates three memories and allocates a descriptor
+set, and `vn_dd_bc_cmd_reset()` then destroyed all of it. `0022` had already given the CPU path a
+pool; the GPU path had not. The host log shows the cost: `vkAllocateMemory` up to `2953x/1076 ms` in
+a single 10 s window, and `2345x/840 ms` and `2137x/691 ms` in two more. Three allocations per
+upload at ~1000-2600 uploads per window is the same order as those counts, and after `0022` the GPU
+path is the only remaining per-upload allocator. (One window shows `vkCreateComputePipelines
+111x/10051 ms`, max 165.9 ms each; that is a one-off shader-compile warmup, not the steady-state
+cost, and it is not the BC pipeline.)
+
+`0024` now pools and packs the GPU chunks the way `0022` pools the CPU ones: the chunk carries
+capacity cursors for all three buffers, `bc_chunk_gpu_current()` packs another copy into the last
+chunk when it has room (it almost always does -- the minimums are 8 MiB dst/src and 512 KiB params,
+against a per-copy cap of 8 MiB in `bc_gpu_copy`), `bc_chunk_take_pooled()` matches on all three
+sizes, and a reset returns a GPU chunk to the pool instead of destroying it. `vn_dd_bc_device_fini()`
+destroys pooled GPU chunks in full (descriptor set, params, src, dst) before `bc_gpu_dev_fini()`
+tears down the descriptor pool. The stats line gained `N on the GPU` so a log says what share of the
+uploads left the CPU.
+
+Still open, and why this is not yet the 60 fps fix: the path is S3TC-only, so BC4/BC5/BC6H/BC7 --
+the formats the probe says this driver must emulate -- still decode on the CPU. Widening the shader
+to those formats is the next step and needs a new `.comp`, a new reference decoder in `genref.py`
+and a new embedded SPIR-V array; it is not a config change.

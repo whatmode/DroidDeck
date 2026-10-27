@@ -9,14 +9,67 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck
  
  #include <inttypes.h>
  #include <stdlib.h>
-@@ -303,6 +304,17 @@
+@@ -92,6 +93,9 @@
+ static simple_mtx_t bc_stats_lock = SIMPLE_MTX_INITIALIZER;
+ static struct {
+    uint64_t images, copies, regions, bytes_in, bytes_out, decode_ns, dropped, missing_src;
++   /* gpu_copies is the subset of copies the GPU path recorded, so a log says what share of the
++    * uploads left the CPU without needing a per-copy trace. */
++   uint64_t gpu_copies;
+    int64_t since;
+    unsigned reports;
+ } bc_stats;
+@@ -104,7 +108,8 @@
+ 
+ static void
+ bc_stats_add(uint64_t images, uint64_t copies, uint64_t regions, uint64_t bytes_in,
+-             uint64_t bytes_out, uint64_t decode_ns, uint64_t dropped, uint64_t missing_src)
++             uint64_t bytes_out, uint64_t decode_ns, uint64_t dropped, uint64_t missing_src,
++             uint64_t gpu_copies)
+ {
+    simple_mtx_lock(&bc_stats_lock);
+    bc_stats.images += images;
+@@ -115,6 +120,7 @@
+    bc_stats.decode_ns += decode_ns;
+    bc_stats.dropped += dropped;
+    bc_stats.missing_src += missing_src;
++   bc_stats.gpu_copies += gpu_copies;
+    const int64_t now = os_time_get_nano();
+    if (!bc_stats.since)
+       bc_stats.since = now;
+@@ -123,12 +129,13 @@
+       if (bc_stats.reports++ < 200)
+          vn_droiddeck_log("BC textures emulated over %.1f s: %" PRIu64 " images made, %" PRIu64
+                           " uploads (%" PRIu64 " regions) decoded, %.1f MiB compressed -> %.1f MiB, "
+-                          "%.1f ms decoding; %" PRIu64 " copies left out, %" PRIu64
++                          "%.1f ms decoding; %" PRIu64 " on the GPU, %" PRIu64
++                          " copies left out, %" PRIu64
+                           " uploads from memory the driver cannot read",
+                           (now - bc_stats.since) / 1e9, bc_stats.images, bc_stats.copies,
+                           bc_stats.regions, bc_stats.bytes_in / 1048576.0,
+                           bc_stats.bytes_out / 1048576.0, bc_stats.decode_ns / 1e6,
+-                          bc_stats.dropped, bc_stats.missing_src);
++                          bc_stats.gpu_copies, bc_stats.dropped, bc_stats.missing_src);
+       memset(&bc_stats, 0, sizeof(bc_stats));
+       bc_stats.since = now;
+       bc_stats.reports = 1;
+@@ -278,7 +285,7 @@
+    if (!img || !orig)
+       return;
+    img->dd_bc_format = orig;
+-   bc_stats_add(1, 0, 0, 0, 0, 0, 0, 0);
++   bc_stats_add(1, 0, 0, 0, 0, 0, 0, 0, 0);
+ }
+ 
+ VkFormat
+@@ -303,6 +310,21 @@
     VkDeviceMemory memory;
     uint8_t *ptr;
     VkDeviceSize size, used;
 +   /* GPU decode (DROIDDECK_VN_BC_GPU): `buffer` is the device-local destination the shader writes
 +    * and the program's copy reads, `src` the device-local copy of the compressed data it reads, and
-+    * `params` the host-visible block of job parameters. `gpu` keeps these chunks out of the CPU
-+    * pool: their buffers carry usage and memory the CPU chunks do not. */
++    * `params` the host-visible block of job parameters. `gpu` keeps these chunks in their own pool
++    * entries: their buffers carry usage and memory the CPU chunks do not. */
 +   bool gpu;
 +   VkBuffer src;
 +   VkDeviceMemory src_mem;
@@ -24,26 +77,50 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck
 +   VkDeviceMemory params_mem;
 +   uint8_t *params_ptr;
 +   VkDescriptorSet set;
++   /* GPU chunks carry three buffers, so they pack by capacity the way the CPU chunk packs by
++    * `size`: several copies share one chunk, and each advances the cursor it uses. */
++   VkDeviceSize src_size, src_used;
++   VkDeviceSize params_size, params_used;
  };
  
  struct vn_dd_bc_job {
-@@ -358,12 +370,13 @@
+@@ -358,12 +380,20 @@
  } bc_chunk_pool = { .lock = SIMPLE_MTX_INITIALIZER };
  
  static bool
 -bc_chunk_take_pooled(VkDevice device, VkDeviceSize size, struct vn_dd_bc_chunk *out)
-+bc_chunk_take_pooled(VkDevice device, VkDeviceSize size, bool gpu, struct vn_dd_bc_chunk *out)
++bc_chunk_take_pooled(VkDevice device,
++                     VkDeviceSize size,
++                     VkDeviceSize src_size,
++                     VkDeviceSize params_size,
++                     bool gpu,
++                     struct vn_dd_bc_chunk *out)
  {
     bool found = false;
     simple_mtx_lock(&bc_chunk_pool.lock);
     for (unsigned i = 0; i < bc_chunk_pool.count; i++) {
 -      if (bc_chunk_pool.entries[i].device != device || bc_chunk_pool.entries[i].chunk.size < size)
 +      if (bc_chunk_pool.entries[i].device != device || bc_chunk_pool.entries[i].chunk.size < size ||
++          bc_chunk_pool.entries[i].chunk.src_size < src_size ||
++          bc_chunk_pool.entries[i].chunk.params_size < params_size ||
 +          bc_chunk_pool.entries[i].chunk.gpu != gpu)
           continue;
        *out = bc_chunk_pool.entries[i].chunk;
        bc_chunk_pool.entries[i] = bc_chunk_pool.entries[--bc_chunk_pool.count];
-@@ -391,38 +404,52 @@
+@@ -371,8 +401,11 @@
+       break;
+    }
+    simple_mtx_unlock(&bc_chunk_pool.lock);
+-   if (found)
++   if (found) {
+       out->used = 0;
++      out->src_used = 0;
++      out->params_used = 0;
++   }
+    return found;
+ }
+ 
+@@ -391,38 +424,52 @@
     return pooled;
  }
  
@@ -112,7 +189,7 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck
     }
     if (type == UINT32_MAX)
        goto fail_buffer;
-@@ -431,14 +458,34 @@
+@@ -431,14 +478,34 @@
        .allocationSize = req.memoryRequirements.size,
        .memoryTypeIndex = type,
     };
@@ -139,7 +216,7 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck
 +{
 +   VkDevice device = vn_device_to_handle(dev);
 +   struct vn_dd_bc_chunk pooled;
-+   if (bc_chunk_take_pooled(device, size, false, &pooled)) {
++   if (bc_chunk_take_pooled(device, size, 0, 0, false, &pooled)) {
 +      util_dynarray_append(&state->chunks, struct vn_dd_bc_chunk, pooled);
 +      return util_dynarray_top_ptr(&state->chunks, struct vn_dd_bc_chunk);
 +   }
@@ -150,7 +227,7 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck
     const VkMemoryMapInfo map = {
        .sType = VK_STRUCTURE_TYPE_MEMORY_MAP_INFO,
        .memory = chunk.memory,
-@@ -453,11 +500,508 @@
+@@ -453,11 +520,551 @@
  
  fail_memory:
     vn_FreeMemory(device, chunk.memory, NULL);
@@ -426,8 +503,14 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck
 +   return true;
 +}
 +
-+/* GPU chunks are not pooled: they carry three buffers and a descriptor set, and the pool is sized
-+ * for the simple CPU chunks.  A reset tears them down. */
++/* GPU chunks are pooled like the CPU ones.  A chunk's three buffers are rounded up to these
++ * minimums, so a chunk built for one upload still has room for the next and the pool can hand it
++ * back instead of the driver allocating and freeing three buffers per upload.  That churn is the
++ * same shape guest-patches/0022 removed from the CPU path.  The destination and source minimums
++ * match the per-copy cap in bc_gpu_copy, so a pooled chunk always fits any single copy. */
++#define BC_GPU_CHUNK_MIN (8u << 20)
++#define BC_GPU_PARAMS_MIN (512u << 10)
++
 +static void
 +bc_chunk_gpu_destroy(VkDevice device, const struct vn_dd_bc_chunk *chunk)
 +{
@@ -454,19 +537,29 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck
 +                 VkDeviceSize params_size)
 +{
 +   VkDevice device = vn_device_to_handle(dev);
++   struct vn_dd_bc_chunk pooled;
++   if (bc_chunk_take_pooled(device, dst_size, src_size, params_size, true, &pooled)) {
++      util_dynarray_append(&state->chunks, struct vn_dd_bc_chunk, pooled);
++      return util_dynarray_top_ptr(&state->chunks, struct vn_dd_bc_chunk);
++   }
++   const VkDeviceSize dst_alloc = bc_gpu_align_up(MAX2(dst_size, BC_GPU_CHUNK_MIN), 64);
++   const VkDeviceSize src_alloc = bc_gpu_align_up(MAX2(src_size, BC_GPU_CHUNK_MIN), 64);
++   const VkDeviceSize params_alloc = bc_gpu_align_up(MAX2(params_size, BC_GPU_PARAMS_MIN), 64);
 +   struct vn_dd_bc_chunk chunk = {
 +      .gpu = true,
-+      .size = dst_size,
++      .size = dst_alloc,
++      .src_size = src_alloc,
++      .params_size = params_alloc,
 +   };
-+   if (!bc_buffer_new(dev, dst_size,
++   if (!bc_buffer_new(dev, dst_alloc,
 +                      VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false,
 +                      &chunk.buffer, &chunk.memory))
 +      return NULL;
-+   if (!bc_buffer_new(dev, src_size,
++   if (!bc_buffer_new(dev, src_alloc,
 +                      VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false,
 +                      &chunk.src, &chunk.src_mem))
 +      goto fail_dst;
-+   if (!bc_buffer_new(dev, params_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, &chunk.params,
++   if (!bc_buffer_new(dev, params_alloc, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, &chunk.params,
 +                      &chunk.params_mem))
 +      goto fail_src;
 +   const VkMemoryMapInfo map = {
@@ -493,6 +586,26 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck
 +   vn_DestroyBuffer(device, chunk.buffer, NULL);
 +   vn_FreeMemory(device, chunk.memory, NULL);
 +   return NULL;
++}
++
++/* The chunk to pack this copy into: the last one if it is a GPU chunk with room in all three
++ * buffers, otherwise a new (or pooled) one.  Packing several copies per chunk is why a chunk's
++ * buffers carry capacity cursors at all -- one upload is far smaller than the minimum. */
++static struct vn_dd_bc_chunk *
++bc_chunk_gpu_current(struct vn_device *dev,
++                     struct vn_dd_bc_cmd *state,
++                     VkDeviceSize dst_size,
++                     VkDeviceSize src_size,
++                     VkDeviceSize params_size)
++{
++   struct vn_dd_bc_chunk *chunk = util_dynarray_num_elements(&state->chunks, struct vn_dd_bc_chunk)
++                                     ? util_dynarray_top_ptr(&state->chunks, struct vn_dd_bc_chunk)
++                                     : NULL;
++   if (chunk && chunk->gpu && chunk->size - chunk->used >= dst_size + bc_gpu_dev.align &&
++       chunk->src_size - chunk->src_used >= src_size + bc_gpu_dev.align &&
++       chunk->params_size - chunk->params_used >= params_size + bc_gpu_dev.align)
++      return chunk;
++   return bc_chunk_gpu_new(dev, state, dst_size, src_size, params_size);
 +}
 +
 +/* Record the GPU decode for one vkCmdCopyBufferToImage.  `copy->regions` has room for `count`
@@ -542,15 +655,16 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck
 +      return false;
 +
 +   struct vn_dd_bc_chunk *chunk =
-+      bc_chunk_gpu_new(dev, cmd->dd_bc, dst_total, src_total,
-+                       bc_gpu_align_up((VkDeviceSize)params_count * bc_gpu_dev.param_stride,
-+                                       bc_gpu_dev.align));
++      bc_chunk_gpu_current(dev, cmd->dd_bc, dst_total, src_total,
++                           bc_gpu_align_up((VkDeviceSize)params_count * bc_gpu_dev.param_stride,
++                                           bc_gpu_dev.align));
 +   if (!chunk)
 +      return false;
 +
-+   uint8_t *params = chunk->params_ptr;
++   const VkDeviceSize params_base = chunk->params_used;
++   uint8_t *params = chunk->params_ptr + params_base;
 +   uint64_t bytes_in = 0, bytes_out = 0;
-+   VkDeviceSize src_cursor = 0, dst_cursor = 0;
++   VkDeviceSize src_cursor = chunk->src_used, dst_cursor = chunk->used;
 +   uint32_t pidx = 0;
 +
 +   /* Pass one: place the compressed source copy and the parameters of every slice. */
@@ -642,7 +756,7 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck
 +      copy->regions[i] = out;
 +
 +      for (uint32_t s = 0; s < slices; s++, pidx++) {
-+         const uint32_t dyn = pidx * bc_gpu_dev.param_stride;
++         const uint32_t dyn = (uint32_t)(params_base + pidx * bc_gpu_dev.param_stride);
 +         vn_CmdBindDescriptorSets(cmd_handle, VK_PIPELINE_BIND_POINT_COMPUTE, bc_gpu_dev.layout, 0,
 +                                  1, &chunk->set, 1, &dyn);
 +         vn_CmdDispatch(cmd_handle, groups, 1, 1);
@@ -651,27 +765,50 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck
 +
 +   bc_gpu_barrier(cmd_handle);
 +
++   chunk->used += bc_gpu_align_up(dst_cursor - chunk->used, bc_gpu_dev.align);
++   chunk->src_used += bc_gpu_align_up(src_cursor - chunk->src_used, bc_gpu_dev.align);
++   chunk->params_used = params_base +
++                        bc_gpu_align_up((VkDeviceSize)pidx * bc_gpu_dev.param_stride,
++                                        bc_gpu_dev.align);
++
 +   copy->staging = chunk->buffer;
 +   copy->count = count;
-+   bc_stats_add(0, 1, count, bytes_in, bytes_out, 0, 0, 0);
++   bc_stats_add(0, 1, count, bytes_in, bytes_out, 0, 0, 0, count);
 +   return true;
 +}
 +
  void
  vn_dd_bc_cmd_reset(struct vn_command_buffer *cmd)
  {
-@@ -468,6 +1012,10 @@
+@@ -468,6 +1075,11 @@
     VkDevice device = vn_device_to_handle(dev);
     util_dynarray_foreach(&state->chunks, struct vn_dd_bc_chunk, chunk) {
        /* The command buffer is being reset, so the copy that read this chunk has completed. */
 +      if (chunk->gpu) {
-+         bc_chunk_gpu_destroy(device, chunk);
++         if (!bc_chunk_put_pooled(device, chunk))
++            bc_chunk_gpu_destroy(device, chunk);
 +         continue;
 +      }
        if (!bc_chunk_put_pooled(device, chunk)) {
           vn_DestroyBuffer(device, chunk->buffer, NULL);
           vn_FreeMemory(device, chunk->memory, NULL);
-@@ -496,6 +1044,7 @@
+@@ -488,14 +1100,21 @@
+    unsigned kept = 0;
+    for (unsigned i = 0; i < bc_chunk_pool.count; i++) {
+       if (bc_chunk_pool.entries[i].device == device) {
+-         vn_DestroyBuffer(device, bc_chunk_pool.entries[i].chunk.buffer, NULL);
+-         vn_FreeMemory(device, bc_chunk_pool.entries[i].chunk.memory, NULL);
++         /* a GPU chunk holds three buffers, host-visible memory and a descriptor set; the set has
++          * to go back to the pool before bc_gpu_dev_fini destroys that pool below */
++         if (bc_chunk_pool.entries[i].chunk.gpu)
++            bc_chunk_gpu_destroy(device, &bc_chunk_pool.entries[i].chunk);
++         else {
++            vn_DestroyBuffer(device, bc_chunk_pool.entries[i].chunk.buffer, NULL);
++            vn_FreeMemory(device, bc_chunk_pool.entries[i].chunk.memory, NULL);
++         }
+          continue;
+       }
+       bc_chunk_pool.entries[kept++] = bc_chunk_pool.entries[i];
     }
     bc_chunk_pool.count = kept;
     simple_mtx_unlock(&bc_chunk_pool.lock);
@@ -679,7 +816,7 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck
  }
  
  bool
-@@ -523,6 +1072,13 @@
+@@ -523,6 +1142,13 @@
     copy->regions = malloc(count * sizeof(*copy->regions));
     if (!copy->regions)
        return false;
@@ -693,7 +830,7 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck
     VkDeviceSize total = 0;
     for (uint32_t i = 0; i < count; i++) {
        const VkExtent3D e = regions ? regions[i].imageExtent : regions2[i].imageExtent;
-@@ -540,9 +1096,12 @@
+@@ -540,9 +1166,12 @@
        util_dynarray_init(&cmd->dd_bc->jobs, NULL);
     }
     struct vn_dd_bc_cmd *state = cmd->dd_bc;
@@ -706,6 +843,42 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck
     if (!chunk || chunk->size - chunk->used < total)
        chunk = bc_chunk_new(dev, state, MAX2(total, 8ull << 20));
     if (!chunk)
+@@ -593,7 +1222,7 @@
+    }
+    copy->staging = chunk->buffer;
+    copy->count = count;
+-   bc_stats_add(0, 1, count, bytes_in, bytes_out, 0, 0, 0);
++   bc_stats_add(0, 1, count, bytes_in, bytes_out, 0, 0, 0, 0);
+    return true;
+ 
+ fail:
+@@ -624,7 +1253,7 @@
+       return false;
+    static int logged;
+    bc_log_once(&logged, "a copy between a BC image and an uncompressed one is left out");
+-   bc_stats_add(0, 0, 0, 0, 0, 0, 1, 0);
++   bc_stats_add(0, 0, 0, 0, 0, 0, 1, 0, 0);
+    return true;
+ }
+ 
+@@ -636,7 +1265,7 @@
+       return false;
+    static int logged;
+    bc_log_once(&logged, "a BC image read back to a buffer is left out");
+-   bc_stats_add(0, 0, 0, 0, 0, 0, 1, 0);
++   bc_stats_add(0, 0, 0, 0, 0, 0, 1, 0, 0);
+    return true;
+ }
+ 
+@@ -960,7 +1589,7 @@
+       static int logged;
+       bc_log_once(&logged, "a BC upload from memory the driver has not mapped: that texture stays empty");
+    }
+-   bc_stats_add(0, 0, 0, 0, 0, os_time_get_nano() - start, 0, missing);
++   bc_stats_add(0, 0, 0, 0, 0, os_time_get_nano() - start, 0, missing, 0);
+ }
+ 
+ void
 diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.h b/src/virtio/vulkan/vn_droiddeck_bc.h
 --- a/src/virtio/vulkan/vn_droiddeck_bc.h
 +++ b/src/virtio/vulkan/vn_droiddeck_bc.h
