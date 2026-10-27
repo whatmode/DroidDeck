@@ -715,6 +715,16 @@ submit thread it tracks the frame rate exactly, on all eight Lake runs in the bu
 The peak window is `6550 ms of 10 s` = **65% of the submit thread**, and the frame at that point is
 213 ms. Two thirds of it is the guest CPU writing decoded texels, one uncached byte at a time.
 
+Across all 63 (decode-share, frame-rate) pairs in the bundle the relationship is monotonic, which is
+what makes this the answer rather than a coincidence:
+
+    decode share   0-10%   10-20%  20-30%  30-40%  40-50%  50-60%  60-70%
+    mean fps        28.2     11.4     6.3      4.4      3.8      4.9      5.1
+    n                22        6       2       13        5        3       12
+
+`share <20% -> 24.6 fps (n=28)` against `share >=50% -> 5.1 fps (n=15)`. Nothing else in the bundle
+splits the runs this cleanly, and the two earlier suspects do not split them at all.
+
 - The rate is the problem, not the algorithm. The window decodes **1452 MiB of output in 10 s**, and
   the write side costs **4.5 ms/MiB** on the phone (measured, not assumed). At 60 fps a frame is
   16.7 ms; a 5% budget for BC is 0.83 ms, which is **2.4 MiB decoded per frame**. That is **10.9 ms
