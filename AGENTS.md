@@ -751,8 +751,8 @@ Order of work, cheapest first:
   2. **`DMA_BUF_IOCTL_SYNC` in `vtest_bo_flush`/`vtest_bo_invalidate`**, then default the heap to a
      cached one. This is the actual fix: it keeps the semaphores correct (the sync makes the cache
      coherent at the points the guest already calls) and makes the texel writes ~cache speed.
-  3. **Only then** revisit the present path. It is not what costs the frames: the two runs with the
-     drain ON and the six with it off have the same 52->3 fps curve.
+  3. **Only then** revisit the present path. It is not what costs the frames: the three runs with the
+     drain ON and the five with it off have the same 52->3 fps curve.
 
 ### The no-rebuild test that confirms it, and what 60 fps would take
 
