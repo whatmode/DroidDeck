@@ -803,7 +803,7 @@ bug -- but it is not the frame rate.
 What the 23:42 run *does* separate cleanly is decode share. Minute 23:43 is 0.2% decode share at
 ~50 fps; minute 23:44 is 33-63% at 3-6 fps. Same process, same pool behaviour, same present path.
 
-## The CPU decode is write-bound, not compute-bound (and what that means for a GPU decoder)
+## The CPU decode: write-bound or compute-bound is NOT settled by these logs
 
 Regressing `decode_ns` on the two byte counts over the 57 windows with real work:
 
@@ -811,11 +811,21 @@ Regressing `decode_ns` on the two byte counts over the 57 windows with real work
     decode_ms = 26.65 ms/MiB * input_MiB   R2 = 0.82
 
 Both fits look equally good *only because input and output are collinear* here (the expansion ratio
-is a steady 6.2x, so the two regressors are near-duplicates and the R2 gap is not evidence). What
-does discriminate is the coefficient: **4.28 ms/MiB of output is the measured uncached-write cost**
-(4.3-4.5 ms/MiB, measured independently on the phone). A compute-bound decoder would cost per input
-block, and the output coefficient would not land on the write cost. So the CPU decode is dominated by
-**writing the decoded texels into uncached memory**, not by the BC math.
+is a steady ~6.2x once the world is loaded, so the two regressors are near-duplicates and the R2 gap
+is not evidence). The coefficient does **not** settle it either, and an earlier version of this
+section claimed it did: `4.28 ms/MiB` was called "the measured uncached-write cost", but the
+4.3-4.5 ms/MiB it was compared against came from the same `decode_ns` data -- the same measurement
+read twice, not a second opinion. The test that *would* discriminate is the expansion ratio, which
+is not quite constant (3.95 in the first window, ~4.8-5.1 mid, ~6.2-6.6 once steady):
+
+    write-bound    predicts corr(ratio, ms/MiB-in ) = +1   observed +0.20
+    compute-bound  predicts corr(ratio, ms/MiB-out) = -1   observed -0.32
+
+Both are weak and the ratio is near-constant in most windows, so **the logs do not settle write-bound
+vs compute-bound.** If anything the compute-bound signal is the stronger of the two. What does argue
+for the write side needs no timings: the inner loop stores each pixel as four separate byte writes
+(`row[i*4+0..3]`) into host-visible memory, i.e. the uncached heap, so a 4x4 block is up to 64 byte
+stores against 8-16 bytes read.
 
 This matters for the plan, because it means a compute-shader decode and a cached heap are not two
 different amounts of the same win:
@@ -823,13 +833,16 @@ different amounts of the same win:
 - **Cached heap (option 1)** removes the dominant term: 4.28 ms/MiB -> roughly cache speed, i.e.
   about 10x on the write side. Sustaining the worst observed 178 MiB/s would then cost ~9% of a core
   instead of ~76%. Small, bounded change, already-plumbed hooks.
-- **Compute decode (option 3)** also removes the term, but it is a much larger change, and it has a
-  hard dependency the plan has to respect: a compute decode needs **descriptor sets** to bind the
-  source buffer and the destination image -- the exact resource the host is refusing 4878 times. So
-  option 3 does not stand alone; it needs the pool fixed first, or it will fail the same way.
+- **Compute decode (option 3)** removes both terms at once, and is the only option that does: the
+  guest CPU stops writing texels at all, and the GPU writes them into device-local memory where the
+  uncached penalty does not exist. That robustness to the ambiguity above is its main argument. It is
+  a much larger change. One thing it does *not* need is the descriptor fix: `VK_ERROR_OUT_OF_POOL_MEMORY`
+  is per-pool, and those 4878 refusals are the application's own pools (DXVK's), so a decode pipeline
+  with its own pool is unaffected. An earlier version of this section claimed option 3 was blocked on
+  the pool bug; that was wrong.
 
-So option 3 is the right *end state* if the decode must leave the CPU entirely, but it is not the
-cheap way to get the write cost down, and it is not independent of the descriptor bug.
+So option 3 is the right *end state* if the decode must leave the CPU entirely, and it is the
+option to pick when the write/compute question above matters more than the size of the change.
 
 ## The descriptor pool: the host refuses too, so `0023` is not the fix
 
