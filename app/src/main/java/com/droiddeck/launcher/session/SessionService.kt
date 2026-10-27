@@ -571,6 +571,13 @@ class SessionService : Service() {
             Log.i(TAG, "venus bridge: server " + if (up) "up" else "NOT running")
             guest.add("VN_DEBUG=vtest,init,result")
             guest.add("BL_VENUS=" + if (up) "1" else "0")
+            // Guest patch 0021 skips the queue drain that used to run before every present. That
+            // is where the 24->60 gain came from, but it also lets the server read a swapchain
+            // image the GPU is still writing, which reads to the player as a white or garbled
+            // frame. Put the drain back to test whether it is the cause. The user's own
+            // environment file is added later and wins, so this can be set back to 0 to A/B it
+            // without another APK.
+            guest.add("DROIDDECK_VN_SYNC_PRESENT=1")
         }
         tuDebug(linuxDriverId)?.let { guest.add("TU_DEBUG=$it") }
         com.droiddeck.launcher.gpu.TpUbwcHint.forThisDevice()?.let { guest.add("${com.droiddeck.launcher.gpu.TpUbwcHint.ENV}=$it") }
