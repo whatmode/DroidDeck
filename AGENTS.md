@@ -781,3 +781,35 @@ gets its first 600 log lines and nothing after. A diagnostic line that fires lat
 never appears, and "the line is not in the file" is not evidence that the code did not run. Reproduce
 within the first 600 lines of a fresh launch, or raise the cap, before reading anything into absence.
 The frame-rate line (0021) and the pool-fallback line (0023) are both subject to this.
+
+## The Lake logs (2026-10-27) say the frame rate is not the present drain
+
+The `2026-10-27-09-steam` share (fex.net/uk/s/atrykfb) is the first evidence with the guest's own
+numbers in it. It overturns the earlier read that the 24->60 fps work was about the present path.
+
+Every Lake.exe run in that file looks the same, on all three builds in it:
+
+    frames: 52.8 fps  ->  18.7 fps  ->  5.1 fps  ->  2.6 fps   (over ~40 s)
+
+and the `present GPU wait` stays small (4.04 -> 4.07 -> 13.33 -> 37.85 ms). So the drain is **not**
+what costs the frames: even with the drain skipped the game collapses from 52 fps to 3 fps. The old
+"the drain is 89% of the frame, skip it" note in patch 0021 was measured on a build whose log we no
+longer have; this log does not support it as the explanation for the 24 fps target.
+
+What does track the collapse, in the same window:
+
+  * `vkAllocateDescriptorSets: VK_ERROR_OUT_OF_POOL_MEMORY` in the guest, 494 times in a 90 s run,
+    and the host server logs the same failure 4878 times. The guest's `descriptor pools: ... deferring
+    to the real pool` line fires once per run, so patch 0023's fallback *is* being taken -- and the
+    allocations still fail afterwards. The fallback is therefore not the fix; the pool really is out.
+  * The host ring goes from ~115 ms busy per 10 s to ~2000 ms, and the per-call counts explode:
+    `vkAllocateDescriptorSets` 4302 -> 98765, `vkUpdateDescriptorSets` 4062 -> 75430,
+    `vkResetDescriptorPool` 106 -> 350 per 10 s. DXVK is retrying the failed allocation in a loop,
+    which is what eats the frame.
+  * `vkCreateComputePipelines 114x 9969 ms of 10 s` in one window -- a compute-pipeline rebuild
+    storm, and the only place the host is ~100% busy.
+
+So the descriptor pool is the thing to fix, not the present path. The three runs before this log
+already had `DROIDDECK_VN_SYNC_PRESENT` handling in the guest and behave identically to the newest
+one, so sync-present neither caused nor cures this. Read the `frames:` and `present GPU wait` lines
+together before believing any theory about the present path again.
