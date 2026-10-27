@@ -1035,17 +1035,20 @@ line, over the 57 windows of `2026-10-27-09-steam`, is a step, not a slope:
     mean fps       48.8    14.3     8.0      6.5     4.5      (corr -0.737)
 
 A 5-20% share is 5-20% of the submit thread. It cannot cost 70% of the frame rate if the decode's
-cost were only its own CPU time, and it does not behave like it is: subtracting `decode_ms` from
-`frame_ms` leaves a remainder that *grows* with the decode (corr +0.30 over the same windows), so
-the decode is not just adding its own time, it is slowing the rest of the frame down too.
+cost were only its own CPU time, and it does not behave like it is. Expressed per frame (decode ms
+per frame = `decode_ms / (fps * window)`), the decode is **0.1%** of the frame in the fast windows
+and **41.7%** in the slow ones (>100 ms/frame): large at the cliff, but not dominant -- more than
+half the frame is something else. And the frame time left after subtracting the decode still *grows*
+with it (corr **+0.44**, against **-0.645** for decode vs fps), so the decode is not only adding its
+own time, it is slowing the rest of the frame down too.
 
 The per-window rate says the same thing more directly. `decode_ms / output_MiB` is not a constant --
 it runs from **2.6 to 10.6 ms/MiB** across the windows (median 4.57), with the same code and the same
-uncached heap throughout. A fixed per-byte write cost cannot vary like that. What varies is how much
-else is running: the decode is competing with the game's own traffic for memory bandwidth, and in
-the bad windows the decode's 4-5 ms/MiB *is* the frame's 4-5 ms/MiB. That is why the earlier
-arithmetic -- "remove the write cost and the frame reaches the high 20s" -- overstates a decode
-optimisation: a cheaper decode leaves the rest of the frame where it is.
+uncached heap throughout. A fixed per-byte write cost cannot vary by 4x. What varies is how much else
+is running: the decode is competing with the game's own traffic for memory bandwidth, and the windows
+where it is slowest are the windows where the frame is slowest. That is why "remove the write cost
+and the frame reaches the high 20s" overstates a decode optimisation: even in the worst windows the
+decode is under half the frame, so removing it outright cannot do much better than double the rate.
 
 So the number to get before building anything else is the BC-off one, and it is already a
 no-rebuild knob: **`DROIDDECK_VN_EMULATE_BC=0`** (patch 0019, read in the guest via
