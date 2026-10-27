@@ -741,10 +741,13 @@ maintenance path**. The plumbing is closer than the earlier note claimed -- it i
     host side is a real but bounded change, not a new protocol.
 
 Order of work, cheapest first:
-  1. **`DROIDDECK_VENUS_HEAP` A/B.** `VenusBridge.kt` reads it (`VKR_DMA_HEAP=<path>`), so a cached
-     heap is one env var and no rebuild. Expect it to fix the writes and to break the semaphore
-     feedback (that is what the uncached heap is for) -- but it isolates the write cost from
-     everything else, which is the measurement worth having.
+  1. **`DROIDDECK_VENUS_HEAP` is NOT a user-reachable A/B, despite the name.** `VenusBridge.kt`
+     reads it with `System.getenv`, i.e. from the *app* process's environment, and the server is
+     started with a fixed `env` array of its own. A line in `droiddeck-env` or the per-game
+     Environment card reaches the *guest*, not the app, so it cannot set this. Testing a cached
+     heap needs either `adb shell setprop`/`am start` with the var (no adb here) or a one-line
+     change to the default in `VenusBridge.kt` plus an APK. Do not write it up as a no-rebuild
+     knob again.
   2. **`DMA_BUF_IOCTL_SYNC` in `vtest_bo_flush`/`vtest_bo_invalidate`**, then default the heap to a
      cached one. This is the actual fix: it keeps the semaphores correct (the sync makes the cache
      coherent at the points the guest already calls) and makes the texel writes ~cache speed.
