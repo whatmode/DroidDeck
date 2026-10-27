@@ -754,6 +754,23 @@ Order of work, cheapest first:
   3. **Only then** revisit the present path. It is not what costs the frames: the two runs with the
      drain ON and the six with it off have the same 52->3 fps curve.
 
+### The no-rebuild test that confirms it, and what 60 fps would take
+
+`DROIDDECK_VN_EMULATE_BC=0` (patch 0019, read in the guest) turns BC emulation off. The textures
+that needed decoding then stay empty, so the picture is wrong on purpose -- but the `frames:` line
+is the measurement: if it jumps back to ~50 fps, the BC path is the whole collapse, and the run at
+23:42 already shows the shape of that (BC share ~1.5% over a 62 s window, ten consecutive samples
+at ~50 fps, then 63% -> 3 fps). Set it in the per-game Environment card or `droiddeck-env`; no APK.
+
+The arithmetic, so the target is not mistaken again. At 60 fps a frame is 16.7 ms. The bundle's peak
+window decodes **1452 MiB in 10 s**, which is **2.4 MiB per frame at 60 fps**, and the write side
+alone costs **4.5 ms/MiB** -- **10.9 ms**, two thirds of the frame, before the decode reads a byte.
+Making the writes cache-speed removes that 10.9 ms, which is the difference between 4.7 fps and
+roughly the high 20s; it does not by itself make 16.7 ms. The remaining decode+read work still has
+to fit, so treat "cached heap" as the step that makes the frame rate usable, not as the step that
+reaches 60. Reaching 60 on this title means not decoding on the CPU at all (a compute-shader decode,
+or not re-uploading the textures), which is a much larger change than the heap.
+
 ## The descriptor pool: the host refuses too, so `0023` is not the fix
 
 The `2026-10-27-09-steam` host log settles the open question in the section above. The server logs
