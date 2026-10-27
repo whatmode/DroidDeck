@@ -781,6 +781,56 @@ to fit, so treat "cached heap" as the step that makes the frame rate usable, not
 reaches 60. Reaching 60 on this title means not decoding on the CPU at all (a compute-shader decode,
 or not re-uploading the textures), which is a much larger change than the heap.
 
+## The descriptor pool is NOT what collapses the frame rate (the 23:42 run proves it)
+
+The run that starts at 23:42 is a natural experiment, and it kills the descriptor-pool theory --
+including the version of it written in this file. In minute 23:43 that run accumulated **116
+descriptor-pool failures** and held **49-51 fps for six consecutive samples**:
+
+    23:43:14  51.0 fps      (23:43 minute total: 116 pool failures)
+    23:43:24  50.6 fps
+    23:43:34  49.3 fps
+    23:43:44  49.4 fps
+    23:43:54  50.4 fps
+
+Then minute 23:44 arrives with 307 failures and 3-6 fps. So the failures are present *during* the
+50 fps minute, in the same minute, at 116 of them. They are therefore neither necessary nor
+sufficient for the collapse, and the earlier "the host refuses too, so the pool is the frame cost"
+conclusion in this file was wrong: it correlated two things that rise together (uploads and pool
+failures) and read the wrong one as the cause. The pool still needs a fix -- 4878 real refusals is a
+bug -- but it is not the frame rate.
+
+What the 23:42 run *does* separate cleanly is decode share. Minute 23:43 is 0.2% decode share at
+~50 fps; minute 23:44 is 33-63% at 3-6 fps. Same process, same pool behaviour, same present path.
+
+## The CPU decode is write-bound, not compute-bound (and what that means for a GPU decoder)
+
+Regressing `decode_ns` on the two byte counts over the 57 windows with real work:
+
+    decode_ms = 4.28 ms/MiB * output_MiB   R2 = 0.79
+    decode_ms = 26.65 ms/MiB * input_MiB   R2 = 0.82
+
+Both fits look equally good *only because input and output are collinear* here (the expansion ratio
+is a steady 6.2x, so the two regressors are near-duplicates and the R2 gap is not evidence). What
+does discriminate is the coefficient: **4.28 ms/MiB of output is the measured uncached-write cost**
+(4.3-4.5 ms/MiB, measured independently on the phone). A compute-bound decoder would cost per input
+block, and the output coefficient would not land on the write cost. So the CPU decode is dominated by
+**writing the decoded texels into uncached memory**, not by the BC math.
+
+This matters for the plan, because it means a compute-shader decode and a cached heap are not two
+different amounts of the same win:
+
+- **Cached heap (option 1)** removes the dominant term: 4.28 ms/MiB -> roughly cache speed, i.e.
+  about 10x on the write side. Sustaining the worst observed 178 MiB/s would then cost ~9% of a core
+  instead of ~76%. Small, bounded change, already-plumbed hooks.
+- **Compute decode (option 3)** also removes the term, but it is a much larger change, and it has a
+  hard dependency the plan has to respect: a compute decode needs **descriptor sets** to bind the
+  source buffer and the destination image -- the exact resource the host is refusing 4878 times. So
+  option 3 does not stand alone; it needs the pool fixed first, or it will fail the same way.
+
+So option 3 is the right *end state* if the decode must leave the CPU entirely, but it is not the
+cheap way to get the write cost down, and it is not independent of the descriptor bug.
+
 ## The descriptor pool: the host refuses too, so `0023` is not the fix
 
 The `2026-10-27-09-steam` host log settles the open question in the section above. The server logs
