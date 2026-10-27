@@ -700,6 +700,93 @@ runs are untouched and always build, so the signed release path is unchanged. `c
 it skips, so a required "Build APK" check still goes green, and its step summary lists the files it
 saw and says which way it decided.
 
+## The frame collapse is the BC decode writing uncached, and the drain is not it (2026-10-27 logs)
+
+The `2026-10-27-09-steam` bundle settles what costs the frames, and it is neither the present drain
+nor the descriptor pool. It is patch 0019's BC decode writing into `/dev/dma_heap/system-uncached`.
+
+`bc_stats`'s `decode_ns` is **submit-thread wall time** (`bc_decode_cmd` times the whole decode
+including the `util_queue_finish` barrier, and it runs from `vn_QueueSubmit`). As a fraction of the
+submit thread it tracks the frame rate exactly, on all eight Lake runs in the bundle:
+
+    BC decode share   0.1%  ->  19%  ->  37%  ->  64%  ->  66%
+    frames:          52 fps -> 18 fps -> 5 fps -> 2.6 fps -> 5 fps
+
+The peak window is `6550 ms of 10 s` = **65% of the submit thread**, and the frame at that point is
+213 ms. Two thirds of it is the guest CPU writing decoded texels, one uncached byte at a time.
+
+- The rate is the problem, not the algorithm. The window decodes **1452 MiB of output in 10 s**, and
+  the write side costs **4.5 ms/MiB** on the phone (measured, not assumed). At 60 fps a frame is
+  16.7 ms; a 5% budget for BC is 0.83 ms, which is **2.4 MiB decoded per frame**. That is **10.9 ms
+  of uncached writes at today's cost** -- so the writes have to get about **13x cheaper** before the
+  BC path can sit inside a 60 fps frame. No guest-only tweak closes 13x: `0019`'s decoder is already
+  byte-exact and already parallel, and `0022` already removed the alloc/free churn. The remaining
+  cost is the memory the writes land in.
+- **It is steady state, and that is the point.** It does not recover because it is not a pool filling
+  up or a cache warming: once the world is loaded, every frame uploads BC textures and every one of
+  those uploads writes uncached. This is why the earlier "it decays" reading was wrong.
+- The host server agrees from the other side: `vkAllocateMemory` peaks at **95.7 ms a call** and the
+  ring shows `vkCmdCopyBufferToImage` / `vkAllocateMemory` as the top entries in the same windows.
+  The 6.4 s of "decoding" is guest CPU, so the host sees it as the guest being slow to submit.
+
+The fix is the one AGENTS.md already named and then deferred: **give the staging memory a cache
+maintenance path**. The plumbing is closer than the earlier note claimed -- it is not missing:
+
+  * `vn_renderer_bo_ops.flush` / `.invalidate` already exist, and `vn_FlushMappedMemoryRanges` /
+    `vn_InvalidateMappedMemoryRanges` (`vn_device_memory.c`) already call them on the mapped range.
+  * `vtest_bo_flush` / `vtest_bo_invalidate` are the literal `/* nop */` bodies, so a cached heap
+    would go stale -- which is why `system-uncached` was chosen. That reasoning is sound.
+  * But `struct vtest_bo` already carries `res_fd` (the dma-buf fd), and `vn_renderer_bo_map` already
+    mmaps it. So the fd needed for `DMA_BUF_IOCTL_SYNC` is reachable at the point of the nop; the
+    host side is a real but bounded change, not a new protocol.
+
+Order of work, cheapest first:
+  1. **`DROIDDECK_VENUS_HEAP` A/B.** `VenusBridge.kt` reads it (`VKR_DMA_HEAP=<path>`), so a cached
+     heap is one env var and no rebuild. Expect it to fix the writes and to break the semaphore
+     feedback (that is what the uncached heap is for) -- but it isolates the write cost from
+     everything else, which is the measurement worth having.
+  2. **`DMA_BUF_IOCTL_SYNC` in `vtest_bo_flush`/`vtest_bo_invalidate`**, then default the heap to a
+     cached one. This is the actual fix: it keeps the semaphores correct (the sync makes the cache
+     coherent at the points the guest already calls) and makes the texel writes ~cache speed.
+  3. **Only then** revisit the present path. It is not what costs the frames: the two runs with the
+     drain ON and the six with it off have the same 52->3 fps curve.
+
+## The descriptor pool: the host refuses too, so `0023` is not the fix
+
+The `2026-10-27-09-steam` host log settles the open question in the section above. The server logs
+`vkr: Warning: vkAllocateDescriptorSets failed(3294898296)` **4878 times**, and 3294898296 is
+`-1000069000` as a signed int32, i.e. `VK_ERROR_OUT_OF_POOL_MEMORY` exactly. So the failure is **not
+only** the guest's shadow accounting: the real pool refuses as well, which means `guest-patches/0023`
+(hand the decision to the real driver) cannot be the fix on its own -- it is taken once per run and
+the allocations still fail afterwards. The pool is genuinely out.
+
+What that costs is real but secondary: the per-10s host counts go `vkAllocateDescriptorSets` 4302 ->
+98765, `vkUpdateDescriptorSets` 4062 -> 75430, `vkResetDescriptorPool` 106 -> 350, and the ring goes
+from 115 ms busy to ~2000 ms busy. That is DXVK retrying, and it is worth its own fix -- but it is
+**not** the 52->3 fps curve, because the curve is identical in runs where the decode share is low and
+the descriptor failures are equally present.
+
+`VN_PERF=no_async_set_alloc` remains the no-rebuild A/B for the guest half. It will not remove the
+host-side refusals, because those come from the real pool.
+
+## The "white van upside down" is one object, not the frame
+
+"The white van is still upside down" after the drain went back on is the useful detail: a single
+object drawn wrong, with the rest of the frame correct, is not a whole-frame present-ordering fault
+(that is white/garbled *frames*). It points at one draw reading a wrong descriptor or a wrong
+viewport. Two candidates, both already switchable without a rebuild:
+
+- **`VN_DD_EMU_MULTI_VIEWPORT`** (patch 0013). The Mali has `multiViewport=no`, so
+  `vn_CmdSetViewport`/`vn_CmdSetScissor*` clamp to viewport 0. A draw that legitimately uses viewport
+  1 then gets viewport 0's rectangle -- which is a plausible way for one object to land in the wrong
+  place or orientation. `DROIDDECK_VN_EMULATE=0` turns every emulation off; that is the control.
+- **A descriptor set left unbound** by an allocation that failed and was not retried, which draws one
+  object white. The 4878 host refusals above make this the stronger candidate for the *white* half;
+  the *upside down* half is more likely the viewport clamp.
+
+Set either in the per-game Environment card (FrontEndSetup.kt, `game_env_*`; values are plain
+`NAME=value`) or in the session-wide `droiddeck-env` file, then relaunch. Neither needs an APK.
+
 ## The white/garbled frames are the present drain, and it is off by default (`DROIDDECK_VN_SYNC_PRESENT`)
 
 If a title shows white or garbled frames on the `venus-bridge` build, set this first:
