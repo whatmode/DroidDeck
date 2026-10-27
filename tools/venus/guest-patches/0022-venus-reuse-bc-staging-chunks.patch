@@ -1,0 +1,143 @@
+diff -ruN a/src/virtio/vulkan/vn_device.c b/src/virtio/vulkan/vn_device.c
+--- a/src/virtio/vulkan/vn_device.c
++++ b/src/virtio/vulkan/vn_device.c
+@@ -13,6 +13,7 @@
+ #include <string.h>
+ 
+ #include "vk_enum_to_str.h"
++#include "vn_droiddeck_bc.h"
+ #include "vn_droiddeck_emu.h"
+ 
+ #include "util/disk_cache.h"
+@@ -682,6 +683,8 @@
+ 
+    vn_device_feedback_pool_fini(dev);
+ 
++   vn_dd_bc_device_fini(device);
++
+    vn_device_queue_family_fini(dev);
+ 
+    vn_async_vkDestroyDevice(dev->primary_ring, device, NULL);
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck_bc.c
+--- a/src/virtio/vulkan/vn_droiddeck_bc.c
++++ b/src/virtio/vulkan/vn_droiddeck_bc.c
+@@ -340,10 +340,66 @@
+    struct util_dynarray jobs;   /* struct vn_dd_bc_job */
+ };
+ 
++/* Staging chunks are handed back here on command buffer reset instead of being destroyed, so a
++ * program that uploads BC textures every frame does not allocate and free an 8 MiB dma-heap
++ * buffer per command buffer.  The server's own accounting showed that churn: vkAllocateMemory
++ * peaks at 80 ms a call and over a second per 10 s window while the staging chunks are recycled.
++ * A chunk is only pooled after its command buffer is reset, at which point the copy that read it
++ * has completed, so a pooled chunk is never reused while a copy still reads it.  Entries carry
++ * the device that owns them: a VkBuffer is not valid on another device. */
++#define BC_CHUNK_POOL_MAX 4
++static struct {
++   simple_mtx_t lock;
++   struct {
++      VkDevice device;
++      struct vn_dd_bc_chunk chunk;
++   } entries[BC_CHUNK_POOL_MAX];
++   unsigned count;
++} bc_chunk_pool = { .lock = SIMPLE_MTX_INITIALIZER };
++
++static bool
++bc_chunk_take_pooled(VkDevice device, VkDeviceSize size, struct vn_dd_bc_chunk *out)
++{
++   bool found = false;
++   simple_mtx_lock(&bc_chunk_pool.lock);
++   for (unsigned i = 0; i < bc_chunk_pool.count; i++) {
++      if (bc_chunk_pool.entries[i].device != device || bc_chunk_pool.entries[i].chunk.size < size)
++         continue;
++      *out = bc_chunk_pool.entries[i].chunk;
++      bc_chunk_pool.entries[i] = bc_chunk_pool.entries[--bc_chunk_pool.count];
++      found = true;
++      break;
++   }
++   simple_mtx_unlock(&bc_chunk_pool.lock);
++   if (found)
++      out->used = 0;
++   return found;
++}
++
++static bool
++bc_chunk_put_pooled(VkDevice device, const struct vn_dd_bc_chunk *chunk)
++{
++   bool pooled = false;
++   simple_mtx_lock(&bc_chunk_pool.lock);
++   if (bc_chunk_pool.count < BC_CHUNK_POOL_MAX) {
++      bc_chunk_pool.entries[bc_chunk_pool.count].device = device;
++      bc_chunk_pool.entries[bc_chunk_pool.count].chunk = *chunk;
++      bc_chunk_pool.count++;
++      pooled = true;
++   }
++   simple_mtx_unlock(&bc_chunk_pool.lock);
++   return pooled;
++}
++
+ static struct vn_dd_bc_chunk *
+ bc_chunk_new(struct vn_device *dev, struct vn_dd_bc_cmd *state, VkDeviceSize size)
+ {
+    VkDevice device = vn_device_to_handle(dev);
++   struct vn_dd_bc_chunk pooled;
++   if (bc_chunk_take_pooled(device, size, &pooled)) {
++      util_dynarray_append(&state->chunks, struct vn_dd_bc_chunk, pooled);
++      return util_dynarray_top_ptr(&state->chunks, struct vn_dd_bc_chunk);
++   }
+    struct vn_dd_bc_chunk chunk = { .size = size };
+    const VkBufferCreateInfo bci = {
+       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+@@ -411,8 +467,11 @@
+    struct vn_device *dev = vn_device_from_vk(cmd->base.vk.pool->base.device);
+    VkDevice device = vn_device_to_handle(dev);
+    util_dynarray_foreach(&state->chunks, struct vn_dd_bc_chunk, chunk) {
+-      vn_DestroyBuffer(device, chunk->buffer, NULL);
+-      vn_FreeMemory(device, chunk->memory, NULL);
++      /* The command buffer is being reset, so the copy that read this chunk has completed. */
++      if (!bc_chunk_put_pooled(device, chunk)) {
++         vn_DestroyBuffer(device, chunk->buffer, NULL);
++         vn_FreeMemory(device, chunk->memory, NULL);
++      }
+    }
+    util_dynarray_fini(&state->chunks);
+    util_dynarray_fini(&state->jobs);
+@@ -420,6 +479,25 @@
+    cmd->dd_bc = NULL;
+ }
+ 
++/* Free the pooled chunks a device owns.  Called before the device goes away, so the pool never
++ * holds a buffer of a destroyed device. */
++void
++vn_dd_bc_device_fini(VkDevice device)
++{
++   simple_mtx_lock(&bc_chunk_pool.lock);
++   unsigned kept = 0;
++   for (unsigned i = 0; i < bc_chunk_pool.count; i++) {
++      if (bc_chunk_pool.entries[i].device == device) {
++         vn_DestroyBuffer(device, bc_chunk_pool.entries[i].chunk.buffer, NULL);
++         vn_FreeMemory(device, bc_chunk_pool.entries[i].chunk.memory, NULL);
++         continue;
++      }
++      bc_chunk_pool.entries[kept++] = bc_chunk_pool.entries[i];
++   }
++   bc_chunk_pool.count = kept;
++   simple_mtx_unlock(&bc_chunk_pool.lock);
++}
++
+ bool
+ vn_dd_bc_copy_begin(VkCommandBuffer cmd_handle,
+                     VkBuffer src,
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.h b/src/virtio/vulkan/vn_droiddeck_bc.h
+--- a/src/virtio/vulkan/vn_droiddeck_bc.h
++++ b/src/virtio/vulkan/vn_droiddeck_bc.h
+@@ -84,6 +84,9 @@
+ /* a command buffer's staging memory and pending decodes */
+ void
+ vn_dd_bc_cmd_reset(struct vn_command_buffer *cmd);
++/* free the pooled staging chunks the device owns, before it is destroyed */
++void
++vn_dd_bc_device_fini(VkDevice device);
+ /* at vkQueueSubmit(2): decode what the command buffers upload */
+ void
+ vn_dd_bc_submit(uint32_t batch_count,

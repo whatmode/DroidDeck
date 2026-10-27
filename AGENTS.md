@@ -515,3 +515,54 @@ formats DXVK actually ships.
   it rounds up with `w4 = align(imageExtent.width, 4)` and sizes the destination as `w4 * h4`, so
   a whole-block write is always in range. That is why a 6x6 BC texture works (it decodes an 8x8
   region). Do not call these with unaligned dimensions; fall through to the generic path instead.
+
+## The BC decode cost is the memory it writes into, not the decode (`guest-patches/0022`)
+
+The decode is ~7-10x slower on the phone than the same code is on a desktop, and the reason is
+the destination memory, not the decoder. Measured, not inferred:
+
+- The decoder itself is already at the limit. `genbcband.py` extracts the driver's real
+  `bc_decode_s3tc`; compiled `-O2` on the sandbox it runs BC1 at **0.43 ms/MiB** and BC3 at
+  **0.60 ms/MiB** of output. A rewrite that stores one 32-bit word per texel instead of four bytes
+  is **not** faster (0.94-0.99x) and byte-identical, so there is no CPU win left in this loop.
+  Do not "optimize" it again without re-measuring: the byte-store loop is already the fast one.
+- On the phone the same decode reports **2.1 ms for a 0.49 MiB upload (~4.3 ms/MiB)**, i.e. the
+  write side costs several times the whole decode. Every host-visible allocation is backed by
+  `/dev/dma_heap/system-uncached` (`VenusBridge.kt`'s `VKR_DMA_HEAP` default, patch 0001), so the
+  guest CPU writes decoded texels straight into uncached pages. `bc_stats`'s `decode_ns` is that
+  wall time.
+- **`decode_ns` is submit-thread wall time, and that is why it looks fatal.** `bc_decode_cmd`
+  times the whole decode *including* `util_queue_finish` (a barrier), and it runs from
+  `vn_QueueSubmit`. So "4331-6888 ms decoding" in a 10 s window means 43-69% of the submit
+  thread's time, which is exactly the observed collapse to 3-6 fps. It is a per-submit stall, not
+  a throughput number.
+
+Why the uncached heap cannot simply be flipped back to `system` (or `system-heap`): the render
+server does **no** dma-buf cache maintenance. `vtest_bo_invalidate`/`vtest_bo_flush`
+(`vn_renderer_vtest.c`) are `nop`, and venus reads host-written memory with no invalidate at all
+(the ring, `vn_ring_get_seqno_status`). That is *why* the uncached heap was chosen: with a cached
+heap the GPU-written semaphore feedback went stale and gamescope waited forever. So a cached
+staging buffer needs `DMA_BUF_IOCTL_SYNC` around the CPU write, and `vn_dd_bc_submit` has no fd
+for the chunk (the bo's `res_fd` is not exposed to the driver) -- it is a host-side change, not a
+one-line guest edit. Recorded here so the next attempt does not just flip the default and break
+semaphores again.
+
+What `0022` does instead is remove the part that is safely removable guest-side: the 8 MiB
+dma-heap staging chunk was created and destroyed on **every command-buffer reset**, so a title
+uploading BC textures each frame paid a dma-heap alloc/free per frame. The server's accounting
+shows that churn directly -- `vkAllocateMemory` max **80.3 ms** per call, 227 calls and >1 s in
+one 10 s window. `0022` keeps up to four chunks per device in a pool, hands one back from
+`bc_chunk_new`, returns it in `vn_dd_bc_cmd_reset`, and frees the pool in `vn_dd_bc_device_fini`
+(called from `vn_DestroyDevice`). A chunk is only pooled after its command buffer is reset, at
+which point the copy that read it has completed, so a pooled chunk is never reused under a live
+copy. The pool is keyed by device because a `VkBuffer` is not valid on another device.
+
+- This is a real but partial fix. It removes the allocation churn (and the `vkAllocateMemory`
+  spikes); it does **not** remove the uncached-write cost, which is the larger of the two. Expect
+  the `frames:` line to move some, not to reach 60.
+- The remaining order of work, if the uncached cost has to go: cache maintenance over the vtest
+  socket (host + protocol change), then flip `VKR_DMA_HEAP` to a cached heap. Anything that
+  touches only the guest will not move it.
+- Secondary, still open, and unrelated to the above: **~1409 `VK_ERROR_OUT_OF_POOL_MEMORY`** from
+  DXVK's descriptor pools, and the compositor's 100 ms vsync guard + fallback timer in
+  `DroidDeckWayland`'s `schedule_render()`. Neither is the BC path.
