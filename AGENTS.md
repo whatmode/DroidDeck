@@ -750,3 +750,26 @@ venus-bridge`), which the `changes` gate lets through unconditionally and which 
 PR-only merge step. Forks get the testkey-signed APK in the `droiddeck-apk` artifact; the `sign`
 job needs upstream's private key and is skipped, so a testkey build replaces a release-signed
 install only after an uninstall.
+
+## Reading `droiddeck_vulkan.txt`: where it is, and the 600-line cap
+
+The guest's own log is written by patch 0011's `vn_droiddeck_log`, to
+`<Steam root>/logs/droiddeck_vulkan.txt` inside the guest. Patch 0011 picks that directory as
+`$STEAM_COMPAT_CLIENT_INSTALL_PATH/logs`, else `$HOME/.local/share/Steam/logs`, else the literal
+`/root/.local/share/Steam/logs`, and gives up (no file at all) unless the directory already exists.
+On the Android side that is
+`/data/data/com.droiddeck.launcher/files/linuxfs/root/.local/share/Steam/logs/droiddeck_vulkan.txt`,
+or `root/.droiddeck-x64/.local/share/Steam/logs/` when the Steam client is x86_64.
+
+Two ways to get it: the in-session drawer's **Share logs** (`SessionLogShare` copies the live Steam
+logs into the zip as `<session>/steam/`, so `droiddeck_vulkan.txt` rides along), or `adb shell
+run-as com.droiddeck.launcher cat ...` on a debuggable build. `DROIDDECK_VK_LOG=<path>` in the env
+file sends it somewhere else entirely, which is the way to avoid adb: an absolute path under
+`/storage/emulated/0/` is reachable from the guest because the app binds external storage.
+
+**The trap: the log stops after 600 lines per process.** `vn_droiddeck_log` keeps a `static unsigned
+lines` and only writes while `++lines <= 600`, and the file is opened once per process, so a session
+gets its first 600 log lines and nothing after. A diagnostic line that fires late in a long session
+never appears, and "the line is not in the file" is not evidence that the code did not run. Reproduce
+within the first 600 lines of a fresh launch, or raise the cap, before reading anything into absence.
+The frame-rate line (0021) and the pool-fallback line (0023) are both subject to this.
