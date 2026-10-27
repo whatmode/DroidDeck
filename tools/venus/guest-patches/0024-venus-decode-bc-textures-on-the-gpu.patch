@@ -150,7 +150,7 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck
     const VkMemoryMapInfo map = {
        .sType = VK_STRUCTURE_TYPE_MEMORY_MAP_INFO,
        .memory = chunk.memory,
-@@ -453,11 +500,506 @@
+@@ -453,11 +500,508 @@
  
  fail_memory:
     vn_FreeMemory(device, chunk.memory, NULL);
@@ -161,16 +161,18 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck
  
 +/* ---- GPU decode (DROIDDECK_VN_BC_GPU) ----
 + *
-+ * Off by default. With it on, a BC1/BC2/BC3 upload is decoded by bc_s3tc.comp on the GPU instead of
-+ * by bc_decode_s3tc() on the guest CPU, and the texels are written straight into device-local
++ * On by default. A BC1/BC2/BC3 upload is decoded by bc_s3tc.comp on the GPU instead of by
++ * bc_decode_s3tc() on the guest CPU, and the texels are written straight into device-local
 + * memory. The CPU path writes them into a host-visible dma-heap chunk instead, which is the cost
 + * the frame-time analysis points at; this path removes the guest CPU work and the uncached writes
-+ * together.
++ * together. DROIDDECK_VN_BC_GPU=0 puts the decode back on the CPU without a rebuild.
 + *
-+ * It is off by default because it is unverified on hardware: there is no Vulkan implementation in
-+ * the build environment, so it compiles but has never run. The shader is not the unknown --
++ * It was off by default while it was unverified on hardware: there is no Vulkan implementation in
++ * the build environment, so it compiles but had never run there. The shader is not the unknown --
 + * tools/venus/bc-gpu-test/run.sh runs the SPIR-V that ships against the driver's own decoder. What
-+ * is untested is the plumbing around it: the pipeline, the descriptor set, and the barriers.
++ * the build environment cannot test is the plumbing around it: the pipeline, the descriptor set,
++ * and the barriers. Each of those fails into the CPU fallback below, so a device that cannot run
++ * the dispatch gets the path that already shipped rather than a wrong picture.
 + *
 + * Everything is recorded into the program's command buffer at the copy site, so no queue or submit
 + * change is needed:
@@ -198,7 +200,7 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck
 +{
 +   static int on = -1;
 +   if (on < 0)
-+      on = debug_get_bool_option("DROIDDECK_VN_BC_GPU", false) ? 1 : 0;
++      on = debug_get_bool_option("DROIDDECK_VN_BC_GPU", true) ? 1 : 0;
 +   return on;
 +}
 +
@@ -658,7 +660,7 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck
  void
  vn_dd_bc_cmd_reset(struct vn_command_buffer *cmd)
  {
-@@ -468,6 +1010,10 @@
+@@ -468,6 +1012,10 @@
     VkDevice device = vn_device_to_handle(dev);
     util_dynarray_foreach(&state->chunks, struct vn_dd_bc_chunk, chunk) {
        /* The command buffer is being reset, so the copy that read this chunk has completed. */
@@ -669,7 +671,7 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck
        if (!bc_chunk_put_pooled(device, chunk)) {
           vn_DestroyBuffer(device, chunk->buffer, NULL);
           vn_FreeMemory(device, chunk->memory, NULL);
-@@ -496,6 +1042,7 @@
+@@ -496,6 +1044,7 @@
     }
     bc_chunk_pool.count = kept;
     simple_mtx_unlock(&bc_chunk_pool.lock);
@@ -677,7 +679,7 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck
  }
  
  bool
-@@ -523,6 +1070,13 @@
+@@ -523,6 +1072,13 @@
     copy->regions = malloc(count * sizeof(*copy->regions));
     if (!copy->regions)
        return false;
@@ -691,7 +693,7 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck
     VkDeviceSize total = 0;
     for (uint32_t i = 0; i < count; i++) {
        const VkExtent3D e = regions ? regions[i].imageExtent : regions2[i].imageExtent;
-@@ -540,9 +1094,12 @@
+@@ -540,9 +1096,12 @@
        util_dynarray_init(&cmd->dd_bc->jobs, NULL);
     }
     struct vn_dd_bc_cmd *state = cmd->dd_bc;
@@ -711,11 +713,11 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.h b/src/virtio/vulkan/vn_droiddeck
  void
  vn_dd_bc_buffer_bound(const VkBindBufferMemoryInfo *bind);
  
-+/* DROIDDECK_VN_BC_GPU=1 decodes BC uploads with a compute shader instead of the CPU. The GPU
-+ * writes the texels into device-local memory, so neither the guest CPU nor the uncached heap is
-+ * involved. It is off by default: it needs a real GPU to test, and the CPU path is the one that
-+ * has been measured. See the comment on vn_dd_bc_gpu_enabled() in the .c for what it does not do
-+ * yet. */
++/* DROIDDECK_VN_BC_GPU=0 decodes BC uploads on the CPU instead of the GPU. By default the GPU
++ * decodes them with a compute shader and writes the texels into device-local memory, so neither the
++ * guest CPU nor the uncached heap is involved. DROIDDECK_VN_BC_GPU=0 is the A/B: it puts the decode
++ * back on the CPU without a rebuild. See the comment on vn_dd_bc_gpu_enabled() in the .c for what
++ * the GPU path falls back on. */
 +bool
 +vn_dd_bc_gpu_enabled(void);
 +

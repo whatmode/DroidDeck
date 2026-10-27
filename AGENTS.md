@@ -1082,12 +1082,12 @@ the picture is wrong on purpose -- but the `frames:` line answers the question:
 It has not been run in any log bundle so far, and it costs one setting change, so it comes before
 the GPU integration, not after.
 
-## The GPU BC decode ships as `guest-patches/0024`, off by default
+## The GPU BC decode ships as `guest-patches/0024`, on by default
 
-The GPU decode (`DROIDDECK_VN_BC_GPU=1`) was developed in a working tree and, until now, existed
-nowhere else: patches `0001`-`0023` reproduce the CPU-only driver, so a `build-guest.sh` run from
-the repo built a guest ICD **without** the GPU path no matter what the working tree held. `0024`
-carries it into the repo. It touches three files:
+The GPU decode (`DROIDDECK_VN_BC_GPU`, on by default) was developed in a working tree and existed
+nowhere else until now: patches `0001`-`0023` reproduce the CPU-only driver, so a `build-guest.sh`
+run from the repo built a guest ICD **without** the GPU path no matter what the working tree held.
+`0024` carries it into the repo. It touches three files:
 
 - `vn_droiddeck_bc.c` / `vn_droiddeck_bc.h`: the decode path itself.
 - `vn_droiddeck_bc_spirv.h`: the embedded SPIR-V, a generated file. `bc-gpu-test/gen-spirv-header.py`
@@ -1108,10 +1108,40 @@ of this file, and it is invisible to a shader-only test because the shader test 
 real set.
 
 Two things the patch does **not** do, both recorded in the source: only the first Vulkan device
-decodes on the GPU (a second device logs a warning), and the path is off by default because it needs
-a real GPU to exercise and the CPU path is the one that has been measured. Turning it on is a
-device-side experiment, not a completed fix -- see the BC-off measurement above for what still has
-to be true for the GPU path to be worth it.
+decodes on the GPU (a second device logs a warning), and the GPU path has never run on hardware.
+There is no Vulkan implementation in the build environment, so it compiles and the shader is
+differentially tested, but the pipeline, descriptor set and barriers around it are not. It is on by
+default anyway, and `DROIDDECK_VN_BC_GPU=0` puts the decode back on the CPU without a rebuild, so
+the A/B is one line in `droiddeck-env`. The fallback is the reason a default-on untested path is
+defensible: every failure (no compute queue, no device-local memory, no descriptor set, a dispatch
+too large, a copy inside a render pass) returns false before anything is recorded, and the caller
+then records the CPU path into the same command buffer. A device that cannot run the dispatch gets
+the code that already shipped, not a wrong picture.
+
+**The value must be a value Mesa parses.** `debug_get_bool_option` accepts `1`/`0`, `true`/`false`,
+`yes`/`no`, `y`/`n`, `t`/`f` (case-insensitive) and falls back to the **default** for anything else.
+So `DROIDDECK_VN_BC_GPU=on` is not a true value -- it silently reads as the default, which before
+this change meant "off". Write `=1` or `=true`.
+
+### Turning it on or off on the device
+
+The session builds `/usr/bin/env -i` and appends the switch file last, and `env` keeps the last
+duplicate, so the file wins over anything the session set itself:
+
+```
+Android/data/com.droiddeck.launcher/files/droiddeck-env
+```
+
+Add `DROIDDECK_VN_BC_GPU=0` (CPU) or `DROIDDECK_VN_BC_GPU=1` (GPU, the default) there and restart
+the session. This is the same file the `DROIDDECK_VN_SYNC_PRESENT` A/B uses. Whether the GPU path
+is actually running is in `droiddeck_vulkan.txt` (see the log section above), which prints either
+
+```
+BC textures: decoding on the GPU (DROIDDECK_VN_BC_GPU), alignment N
+```
+
+or one of the two fallback lines (`... staying on the CPU`, `a second Vulkan device ...`). Absence
+of all three means the copy never reached the BC path at all.
 
 ### Generating the patch
 
