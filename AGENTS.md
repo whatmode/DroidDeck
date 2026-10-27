@@ -699,3 +699,35 @@ makes that unusable), which is the granularity the request was about. Pushes to 
 runs are untouched and always build, so the signed release path is unchanged. `changes` passes when
 it skips, so a required "Build APK" check still goes green, and its step summary lists the files it
 saw and says which way it decided.
+
+## The white/garbled frames are the present drain, and it is off by default (`DROIDDECK_VN_SYNC_PRESENT`)
+
+If a title shows white or garbled frames on the `venus-bridge` build, set this first:
+
+```
+DROIDDECK_VN_SYNC_PRESENT=1
+```
+
+in `/storage/emulated/0/Android/data/com.droiddeck.launcher/files/droiddeck-env`, then relaunch.
+It needs no rebuild, no APK and no driver change: the file is read by `extraEnv()` in
+`SessionService.kt` and passed through `/usr/bin/env -i`.
+
+Why this is the first thing to try. Guest patch 0021 deliberately removed the queue drain that used
+to run before every present. Upstream `vn_queue_wsi_present` calls `vn_QueueWaitIdle` when the
+renderer reports no implicit fencing, which is this guest. That drain was 89% of the frame on Lake
+(17.6 ms of 19.8 ms), so 0021 skips it by default and the guest no longer waits for the frame's GPU
+work to finish before handing the buffer to the server. When that ordering is wrong for a title,
+the server can read the swapchain image while the GPU is still writing it, and the player sees a
+white or garbled frame. `DROIDDECK_VN_SYNC_PRESENT=1` puts the drain back.
+
+This is the honest reading of the evidence: the drain's removal was a deliberate speed choice whose
+comment says the ordering it relies on "is the design intent, not something this change proves",
+and its own escape hatch is for "a title that tears or flickers". White/garbled frames are that
+symptom. The two are worth A/B-ing against each other rather than assuming the drain is innocent.
+
+What this means for the other candidates. The descriptor-pool fix (`guest-patches/0023`) is still
+correct and still worth having, but it cannot be what produces a white frame: the pristine
+`vn_AllocateDescriptorSets` returned `VK_ERROR_OUT_OF_POOL_MEMORY` only when the guest's shadow
+accounting refused, and that refusal aborted the whole call with `pDescriptorSets` zeroed, so DXVK
+saw a failed allocation and retried -- it never bound a half-written set. A garbled frame is more
+plausibly a read of an image the GPU has not finished writing, which is the drain.
