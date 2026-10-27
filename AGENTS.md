@@ -341,6 +341,18 @@ after editing one file it takes seconds, because the build dir is reused.
   The failures are misleading without them: a missing `packaging` module surfaces as "mako
   module >= 0.8.0 required", and a missing `pkg-config` as a libdrm lookup failure. CI's guest
   job already installs all of it.
+- **`pkg-config` alone is not enough on this image, and it is not a libdrm lookup failure.**
+  `wayland-scanner` is needed too: without it meson's regenerate step dies at
+  `meson.build:1989: ERROR: Could not get pkg-config variable and no default provided for
+  <PkgConfigDependency wayland-scanner>`, which reads like a wayland problem but is the same
+  missing-tool class as the rest. The package is `libwayland-bin` on trixie; `wayland-scanner`
+  itself is not a package name. `bison`/`flex` are also reported missing (non-fatal warnings) and
+  worth installing so the log is not noisy.
+- Once `pkg-config`, `libwayland-bin`, `bison`, `flex` and the X11/xcb dev headers are in, the real
+  `check-guest.sh` runs to completion and reports **all 26 guest files passed** -- no stubs and no
+  hand-rolled compile loop needed. Prefer that over the stub route below; the stub route is only for
+  an image where the packages genuinely cannot be installed.
+
 - `vn_android.c` is Android-only: meson adds it under `with_platform_android` and it needs the NDK's
   `vndk/hardware_buffer.h`. Skip it on the Linux side.
 - `build-guest.sh` also publishes `mesa-virtio-src.tar.gz` "enough to compile-check a driver change
@@ -359,9 +371,10 @@ after editing one file it takes seconds, because the build dir is reused.
   `compile_commands.json` are the same `ninja -t commands` output). Every guest file compiles that
   way except `vn_renderer_virtgpu.c`, which needs `xf86drm.h` (libdrm) and fails before reaching
   any driver code — a missing system header, not a driver problem.
-  - Do not run `check-guest.sh` itself for this: with no `pkg-config` it dies in meson's
-    `regenerate` step with "Unhandled python OSError", after the mako check has already sent you
-    chasing a Python module. Go straight to the stub-`-I` + `compile_commands.json` route.
+  - Do not run `check-guest.sh` itself for this: without `pkg-config` it dies in meson's
+    `regenerate` step before compiling anything, and the reported error names whatever tool meson
+    reached next (`wayland-scanner` was the one seen here), not the tool that is missing. Go
+    straight to the stub-`-I` + `compile_commands.json` route.
   - The stubs that were enough: `xcb/xcb.h` (the `xcb_*_t` typedefs), `X11/Xlib.h`,
     `X11/Xlib-xcb.h`, `X11/extensions/Xrandr.h`. The first run only reports the first missing
     header, so add them one at a time and recompile; the errors converge in three passes.
@@ -1011,14 +1024,21 @@ fifth on -- a plausible-looking wrong alpha, not a crash.
 to C++ with SPIRV-Cross, runs it on the host, and diffs whole 16x16 images against the reference
 decoder `genref.py` extracts from the driver. It is the same anti-drift rule as
 `bc-band-test/run.sh`: the artifact tested is the one that ships. **1.28M pixels, 0 mismatches** as
-of this writing, and the check is worth having because it fails when it should -- putting the
-16-bit low word back to 32 bits in `bits3()` yields **188154 mismatches, all BC3**, exit 1.
+of this writing, and the check is worth having because it fails when it should -- deleting the
+16-bit low word's straddle in `bits3()` (so the field is read as 32 bits) yields **14821
+mismatches, all BC3**, exit 1.
 
 - SPIRV-Cross's C++ backend names the push-constant member `pc` and then emits
   `register_push_constant(pc__)`, which does not exist, while its own `#define pc __res->pc.get()`
-  shadows the member. `run.sh` renames the member to `pc_` with three `sed` edits. A regenerated
-  translation that is not patched will not compile, so a change in the generator's naming shows up
-  as a build failure here rather than as a wrong decode.
+  shadows the member. **This no longer applies**: the parameters became a storage buffer (binding 2)
+  when the push constant turned out to be shared state with the program's own command buffer, so
+  the generated code has no `pc` member to rename, and `run.sh` no longer does the three `sed` edits.
+- The test pads the source block rows on every third pass, which is what `bufferRowLength > width`
+  does. The shader indexed source blocks by linear block index before, so a padded upload decoded
+  garbage rows **and the check still passed**: both sides were wrong in the same way, because the
+  reference decoder was handed the packed pitch. The shader now takes a `src_pitch` and the harness
+  passes the padded row to the reference too. That is the failure shape to keep in mind here -- a
+  differential test only catches a bug the two implementations disagree about.
 - The shader runtime is header-only (`include/spirv_cross/`), so `libspirv-cross.a` is not needed;
   only the CLI is. `source.env` pins `SPIRV_CROSS_REF` and `GLM_REF`, and CI builds the CLI and
   clones glm before running the check. The distro `spirv-cross` package ships neither the runtime
@@ -1061,3 +1081,49 @@ the picture is wrong on purpose -- but the `frames:` line answers the question:
 
 It has not been run in any log bundle so far, and it costs one setting change, so it comes before
 the GPU integration, not after.
+
+## The GPU BC decode ships as `guest-patches/0024`, off by default
+
+The GPU decode (`DROIDDECK_VN_BC_GPU=1`) was developed in a working tree and, until now, existed
+nowhere else: patches `0001`-`0023` reproduce the CPU-only driver, so a `build-guest.sh` run from
+the repo built a guest ICD **without** the GPU path no matter what the working tree held. `0024`
+carries it into the repo. It touches three files:
+
+- `vn_droiddeck_bc.c` / `vn_droiddeck_bc.h`: the decode path itself.
+- `vn_droiddeck_bc_spirv.h`: the embedded SPIR-V, a generated file. `bc-gpu-test/gen-spirv-header.py`
+  regenerates it from `bc_s3tc.comp` and `run.sh` recompiles the `.comp` and fails if the array in
+  the patch is not the same words, so the shipped shader cannot drift from the tested one. That
+  check is the reason the header is committed rather than generated at build time: the guest ICD has
+  no shader loader, so the array *is* the shader the GPU runs.
+
+The parameters travel in a storage buffer, not a push constant. The dispatch is recorded into the
+program's own command buffer, and push constants are state shared between the graphics and compute
+bind points, so writing them would corrupt whatever the program pushed and has not re-pushed before
+its next draw. Descriptor bindings are per bind point, which is why the params are binding 2.
+
+The descriptor pool declares **two** pool sizes: the two plain storage buffers (`src`, `dst`) and
+the one dynamic buffer (`params`). Declaring only the dynamic type makes `vkAllocateDescriptorSets`
+fail once the pool is exercised -- the same "the picture is wrong, not the call" shape as the rest
+of this file, and it is invisible to a shader-only test because the shader test never allocates a
+real set.
+
+Two things the patch does **not** do, both recorded in the source: only the first Vulkan device
+decodes on the GPU (a second device logs a warning), and the path is off by default because it needs
+a real GPU to exercise and the CPU path is the one that has been measured. Turning it on is a
+device-side experiment, not a completed fix -- see the BC-off measurement above for what still has
+to be true for the GPU path to be worth it.
+
+### Generating the patch
+
+`guest-patches/*.patch` are `diff -ruN a/... b/...` output with `--- /dev/null` for new files (no
+`index` line), which is what `git apply --whitespace=nowarn` in `build-guest.sh` consumes. To
+regenerate one, diff a checkout with `0001`-`0023` applied against the working tree; diffing against
+a checkout that already has the new file applied produces an empty patch, which is the failure mode
+to watch for (the working tree had the GPU code in *untracked* files, so `git diff` never showed
+it). After adding or changing a patch, confirm the whole series still applies to pristine Mesa:
+
+```
+git clone --depth 1 --branch mesa-25.2.5 https://gitlab.freedesktop.org/mesa/mesa.git /tmp/v
+cd /tmp/v && for p in <repo>/tools/venus/guest-patches/*.patch; do git apply --whitespace=nowarn "$p"; done
+```
+

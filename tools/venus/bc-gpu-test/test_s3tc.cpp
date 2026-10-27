@@ -35,7 +35,7 @@ rnd(void)
 static const unsigned W = 16, H = 16;
 
 static void
-shader_decode(uint32_t kind, const uint8_t *src, uint32_t *dst)
+shader_decode(uint32_t kind, const uint8_t *src, uint32_t src_row_bytes, uint32_t *dst)
 {
    static spirv_cross_shader_t *shader;
    static bool inited = false;
@@ -47,20 +47,24 @@ shader_decode(uint32_t kind, const uint8_t *src, uint32_t *dst)
    }
 
    unsigned bw = W / 4, bh = H / 4;
-   Impl::Shader::Resources::PC p;
+   Impl::Shader::Resources::Params p;
    p.kind = kind;
    p.bw = bw;
    p.dst_pitch = W;
    p.dst_off = 0;
    p.src_off = 0;
+   p.src_pitch = src_row_bytes / 4;
    p.first = 0;
    p.count = bw * bh;
 
    void *src_ptr = (void *)src;
    void *dst_ptr = dst;
+   /* The parameters are a storage buffer, not a push constant: the dispatch is recorded into the
+    * program's own command buffer, and push constants there are shared state the program owns. */
+   void *pc_ptr = (void *)&p;
    spirv_cross_set_resource(shader, 0, 0, &src_ptr, sizeof(src_ptr));
    spirv_cross_set_resource(shader, 0, 1, &dst_ptr, sizeof(dst_ptr));
-   spirv_cross_set_push_constant(shader, &p, sizeof(p));
+   spirv_cross_set_resource(shader, 0, 2, &pc_ptr, sizeof(pc_ptr));
 
    uvec3 num_wg(1, 1, 1), wg_id(0, 0, 0);
    spirv_cross_set_builtin(shader, SPIRV_CROSS_BUILTIN_NUM_WORK_GROUPS, &num_wg, sizeof(num_wg));
@@ -79,7 +83,12 @@ main()
    for (int iter = 0; iter < 5000; iter++) {
       unsigned kind = iter % 4;
       unsigned block = kind <= 1 ? 8 : 16;
-      unsigned comp_size = (size_t)bw * bh * block;
+      /* Every third pass pads the source block rows, which is what bufferRowLength > width does.
+       * The shader indexed source blocks by linear block index before, so this case decoded
+       * garbage rows and the check passed anyway. */
+      unsigned pad_blocks = ((iter / 4) % 3 == 2) ? 2 : 0;
+      unsigned src_row_bytes = (bw + pad_blocks) * block;
+      unsigned comp_size = src_row_bytes * bh;
 
       std::vector<uint8_t> src(comp_size);
       for (unsigned i = 0; i < comp_size; i++)
@@ -88,17 +97,20 @@ main()
       /* Force BC1's three-colour mode in some blocks, so that branch is not left to chance: BC1
        * uses three colours when color0 <= color1. */
       if (kind <= 1 && (iter / 4) % 3 == 0) {
-         for (unsigned b = 0; b < bw * bh; b++) {
-            uint16_t c0 = (uint16_t)(rnd() & 0xffff), c1 = (uint16_t)(rnd() & 0xffff);
-            if (c0 > c1) {
-               uint16_t t = c0;
-               c0 = c1;
-               c1 = t;
+         for (unsigned y = 0; y < bh; y++) {
+            for (unsigned b = 0; b < bw; b++) {
+               unsigned off = y * src_row_bytes + b * 8;
+               uint16_t c0 = (uint16_t)(rnd() & 0xffff), c1 = (uint16_t)(rnd() & 0xffff);
+               if (c0 > c1) {
+                  uint16_t t = c0;
+                  c0 = c1;
+                  c1 = t;
+               }
+               src[off + 0] = c0 & 0xff;
+               src[off + 1] = c0 >> 8;
+               src[off + 2] = c1 & 0xff;
+               src[off + 3] = c1 >> 8;
             }
-            src[b * 8 + 0] = c0 & 0xff;
-            src[b * 8 + 1] = c0 >> 8;
-            src[b * 8 + 2] = c1 & 0xff;
-            src[b * 8 + 3] = c1 >> 8;
          }
       }
 
@@ -107,13 +119,13 @@ main()
                              : kind == 2 ? PIPE_FORMAT_DXT3_RGBA
                                          : PIPE_FORMAT_DXT5_RGBA;
 
-      /* Reference: the real decoder, whole image, packed rows. */
+      /* Reference: the real decoder, whole image, the same padded rows the shader gets. */
       std::vector<uint8_t> ref((size_t)W * H * 4, 0xcd);
-      bc_decode_s3tc(fmt, ref.data(), W * 4, src.data(), bw * block, W, H);
+      bc_decode_s3tc(fmt, ref.data(), W * 4, src.data(), src_row_bytes, W, H);
 
       /* Shader: the same image. */
       std::vector<uint32_t> dst((size_t)W * H, 0xcdcdcdcdu);
-      shader_decode(kind, src.data(), dst.data());
+      shader_decode(kind, src.data(), src_row_bytes, dst.data());
 
       std::vector<uint8_t> got((size_t)W * H * 4);
       memcpy(got.data(), dst.data(), got.size());

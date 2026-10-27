@@ -20,12 +20,18 @@ layout(local_size_x = 64) in;
 layout(set = 0, binding = 0, std430) readonly buffer Src { uint src[]; };
 layout(set = 0, binding = 1, std430) buffer Dst { uint dst[]; };
 
-layout(push_constant) uniform PC {
+/* The job's parameters. A push constant would be simpler, but push constants are state shared
+ * between the graphics and compute bind points, and this dispatch is recorded into the program's
+ * own command buffer: writing them would corrupt whatever the program pushed and has not re-pushed
+ * before its next draw. Descriptor bindings are per bind point, so binding this set for compute
+ * cannot disturb the program's graphics bindings. */
+layout(set = 0, binding = 2, std430) readonly buffer Params {
    uint kind;      /* 0 BC1_RGB, 1 BC1_RGBA, 2 BC2, 3 BC3 */
    uint bw;        /* blocks across */
    uint dst_pitch; /* uint stride between destination rows */
    uint dst_off;   /* first destination word of this job */
    uint src_off;   /* first source word of this job */
+   uint src_pitch; /* uint stride between source block rows */
    uint first;     /* first block index in this job */
    uint count;     /* number of blocks in this job */
 } pc;
@@ -84,7 +90,10 @@ main()
    uint by = blk / pc.bw;
 
    bool is_bc1 = pc.kind <= 1u;
-   uint s = pc.src_off + (is_bc1 ? 2u : 4u) * blk;
+   uint words = is_bc1 ? 2u : 4u;
+   /* Source block rows can be padded: the driver's src_row is derived from bufferRowLength when
+    * the program gave one, so the row a block sits in is not always bw blocks wide. */
+   uint s = pc.src_off + by * pc.src_pitch + bx * words;
    uint w0 = src[s];
    uint w1 = src[s + 1u];
 

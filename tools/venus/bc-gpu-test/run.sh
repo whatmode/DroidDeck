@@ -47,17 +47,13 @@ GLM=${GLM_DIR:-/usr/include}
 "$SC_BIN" "$OUT/bc_s3tc.spv" --cpp > "$OUT/bc_s3tc_shader.cpp" 2> "$OUT/spirv-cross.log" \
   || { echo "spirv-cross failed"; cat "$OUT/spirv-cross.log"; exit 1; }
 
-# SPIRV-Cross names the push-constant member `pc` and then emits `register_push_constant(pc__)`,
-# which does not exist. Its own `#define pc` also shadows the member, so the member has to be
-# renamed. Three edits, all required, and the compile below fails loudly if the generator's
-# naming changes.
-sed -i \
-  -e 's/internal::PushConstant<PC> pc;/internal::PushConstant<PC> pc_;/' \
-  -e 's/#define pc __res->pc\.get()/#define pc __res->pc_.get()/' \
-  -e 's/s\.register_push_constant(pc__);/s.register_push_constant(pc_);/' \
-  "$OUT/bc_s3tc_shader.cpp"
-
 python3 "$HERE/genref.py" "$MESA/src/virtio/vulkan/vn_droiddeck_bc.c" "$OUT/ref_s3tc.c"
+
+# The guest ICD cannot load a shader at runtime, so the SPIR-V is embedded in the driver as a C
+# array by gen-spirv-header.py. That array is what the GPU runs; if it drifts from bc_s3tc.comp,
+# the tested shader is no longer the shipped one. Compare the words.
+python3 "$HERE/check-embedded-spirv.py" "$OUT/bc_s3tc.spv" \
+  "$MESA/src/virtio/vulkan/vn_droiddeck_bc_spirv.h"
 
 cp "$HERE/ref_s3tc.h" "$HERE/test_s3tc.cpp" "$OUT/"
 g++ -O1 -g -std=c++14 -I"$OUT" -I"$SC_INC" -I"$GLM" \
