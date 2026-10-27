@@ -731,3 +731,22 @@ correct and still worth having, but it cannot be what produces a white frame: th
 accounting refused, and that refusal aborted the whole call with `pDescriptorSets` zeroed, so DXVK
 saw a failed allocation and retried -- it never bound a half-written set. A garbled frame is more
 plausibly a read of an image the GPU has not finished writing, which is the drain.
+
+## The venus session now sets `DROIDDECK_VN_SYNC_PRESENT=1` itself
+
+`SessionService.addClientEnvironment` adds `DROIDDECK_VN_SYNC_PRESENT=1` on the same branch that
+adds `BL_VENUS` and `VN_DEBUG`, so a venus session gets the present drain back without any file on
+the device. `extraEnv()` runs after that branch, so a line in the user's `droiddeck-env` file still
+wins: `DROIDDECK_VN_SYNC_PRESENT=0` returns to the fast path without another APK, and no line at all
+now means "drain on" rather than "drain off".
+
+This flips the default that guest patch 0021 chose. 0021 turned the drain off to win the frame time
+and left `DROIDDECK_VN_SYNC_PRESENT` as the way back; the white/garbled frames are the symptom that
+switch exists for, so the build the user is testing has it on. The env var is still the only thing
+that decides it, so the A/B is unchanged -- only the default moved.
+
+The APK is built by `workflow_dispatch` on the branch (`gh workflow run build.yml --ref
+venus-bridge`), which the `changes` gate lets through unconditionally and which skips the
+PR-only merge step. Forks get the testkey-signed APK in the `droiddeck-apk` artifact; the `sign`
+job needs upstream's private key and is skipped, so a testkey build replaces a release-signed
+install only after an uninstall.
