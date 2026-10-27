@@ -1,0 +1,136 @@
+#version 450
+/* DroidDeck: S3TC (BC1/BC2/BC3) block decode on the GPU.
+ *
+ * This must match bc_decode_s3tc() in vn_droiddeck_bc.c exactly: the CPU path and this shader are
+ * two implementations of one contract, and bc-band-test/run.sh records what happens when a copy
+ * drifts from the driver. bc-gpu-test/run.sh translates the SPIR-V that actually ships into C++
+ * with SPIRV-Cross and runs it against the real decoder, so the two cannot disagree unnoticed.
+ *
+ * One invocation per 4x4 block. The destination is the RGBA8 image the BC format was substituted
+ * with, so a pixel is exactly one uint: R in the low byte, A in the high byte.
+ *
+ * Block layout, in words (little-endian), matching the byte offsets the CPU decoder uses:
+ *   BC1 (8 bytes):  w0 = c0 | c1<<16,  w1 = colour indices
+ *   BC2/BC3 (16):   w0 = alpha bytes 0..3, w1 = alpha bytes 4..7,
+ *                   w2 = c0 | c1<<16,      w3 = colour indices
+ */
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Src { uint src[]; };
+layout(set = 0, binding = 1, std430) buffer Dst { uint dst[]; };
+
+layout(push_constant) uniform PC {
+   uint kind;      /* 0 BC1_RGB, 1 BC1_RGBA, 2 BC2, 3 BC3 */
+   uint bw;        /* blocks across */
+   uint dst_pitch; /* uint stride between destination rows */
+   uint dst_off;   /* first destination word of this job */
+   uint src_off;   /* first source word of this job */
+   uint first;     /* first block index in this job */
+   uint count;     /* number of blocks in this job */
+} pc;
+
+/* bc_expand565(), one channel per component. */
+uvec3
+expand565(uint c)
+{
+   uint r5 = (c >> 11) & 0x1fu, g6 = (c >> 5) & 0x3fu, b5 = c & 0x1fu;
+   return uvec3((r5 << 3) | (r5 >> 2), (g6 << 2) | (g6 >> 4), (b5 << 3) | (b5 >> 2));
+}
+
+/* bc_alpha_palette() for the 8-bit a0/a1 of BC3 (and BC4/BC5). */
+uint
+alpha_pal(uint a0, uint a1, uint c)
+{
+   if (c == 0u)
+      return a0;
+   if (c == 1u)
+      return a1;
+   if (a0 > a1)
+      return (a0 * (8u - c) + a1 * (c - 1u)) / 7u;
+   if (c < 6u)
+      return (a0 * (6u - c) + a1 * (c - 1u)) / 5u;
+   return c == 6u ? 0u : 255u;
+}
+
+/* Three bits at index t of the 48-bit field the alpha indices live in, held as a 16-bit low
+ * word and a 32-bit high one. Spelled out rather than using a 64-bit integer so the shader needs
+ * nothing beyond plain uint, which every Mali has.
+ *
+ * The low word is only 16 bits, so the boundary is at 16 and not at 32: index 5 (bits 15..17) is
+ * the first to straddle. Treating lo as a full word makes every index from 5 up read zero, which
+ * is a plausible-looking wrong alpha rather than a crash, so it is worth the explicit cases. */
+uint
+bits3(uint lo, uint hi, uint t)
+{
+   uint b = 3u * t;
+   if (b >= 16u)
+      return (hi >> (b - 16u)) & 7u;
+   uint v = lo >> b;
+   if (b > 13u)
+      v |= hi << (16u - b);
+   return v & 7u;
+}
+
+void
+main()
+{
+   uint gid = gl_GlobalInvocationID.x;
+   if (gid >= pc.count)
+      return;
+
+   uint blk = pc.first + gid;
+   uint bx = blk % pc.bw;
+   uint by = blk / pc.bw;
+
+   bool is_bc1 = pc.kind <= 1u;
+   uint s = pc.src_off + (is_bc1 ? 2u : 4u) * blk;
+   uint w0 = src[s];
+   uint w1 = src[s + 1u];
+
+   /* The colour half is the whole block for BC1, and the upper half for BC2/BC3. */
+   uint cw = is_bc1 ? w0 : src[s + 2u];
+   uint cbits = is_bc1 ? w1 : src[s + 3u];
+
+   uint c0 = cw & 0xffffu;
+   uint c1 = cw >> 16;
+
+   /* BC2/BC3 always use four colours; BC1 uses three when color0 <= color1. */
+   bool four = !is_bc1 || c0 > c1;
+
+   uvec3 p0 = expand565(c0);
+   uvec3 p1 = expand565(c1);
+   uvec3 p2 = four ? (p0 * 2u + p1) / 3u : (p0 + p1) / 2u;
+   uvec3 p3 = four ? (p0 + p1 * 2u) / 3u : uvec3(0u);
+
+   /* BC1_RGBA in three-colour mode is transparent; BC1_RGB has no alpha. */
+   uint c3_alpha = (pc.kind == 1u && !four) ? 0u : 255u;
+
+   /* BC3's alpha palette is the low two bytes of the block; its 48-bit index field is the
+    * remaining six, i.e. the top half of w0 followed by w1. */
+   uint a0 = w0 & 0xffu;
+   uint a1 = (w0 >> 8) & 0xffu;
+   uint alo = (w0 >> 16) & 0xffffu; /* index bits 0..15 */
+   uint ahi = w1;                  /* index bits 16..47 */
+
+   for (uint j = 0u; j < 4u; j++) {
+      for (uint i = 0u; i < 4u; i++) {
+         uint t = j * 4u + i;
+         uint code = (cbits >> (2u * t)) & 3u;
+         uvec3 c = code == 0u ? p0 : code == 1u ? p1 : code == 2u ? p2 : p3;
+
+         uint a;
+         if (pc.kind <= 1u)
+            a = code == 3u ? c3_alpha : 255u;
+         else if (pc.kind == 2u)
+            /* BC2: four alpha bits a pixel, in bytes 0..7 (so words 0 and 1). */
+            a = (((t < 8u ? w0 : w1) >> (((t & 7u) >> 1) * 8u + (t & 1u) * 4u)) & 0xfu) * 17u;
+         else
+            a = alpha_pal(a0, a1, bits3(alo, ahi, t));
+
+         uint px = c.x | (c.y << 8) | (c.z << 16) | (a << 24);
+         uint row = (by * 4u + j) * pc.dst_pitch + (bx * 4u + i);
+         dst[pc.dst_off + row] = px;
+      }
+   }
+}

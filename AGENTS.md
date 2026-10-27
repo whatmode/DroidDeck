@@ -997,3 +997,64 @@ So the descriptor pool is the thing to fix, not the present path. The three runs
 already had `DROIDDECK_VN_SYNC_PRESENT` handling in the guest and behave identically to the newest
 one, so sync-present neither caused nor cures this. Read the `frames:` and `present GPU wait` lines
 together before believing any theory about the present path again.
+
+## The GPU BC decode check (`tools/venus/bc-gpu-test/run.sh`)
+
+The compute shader that decodes BC1/BC2/BC3 on the GPU and `bc_decode_s3tc()` in
+`vn_droiddeck_bc.c` are two implementations of one contract: a block of compressed bytes must
+produce the same RGBA8 texels either way. Reading the shader is not enough to know that, because
+the failure mode is quiet. BC3's alpha indices live in a 48-bit field held as a 16-bit low word and
+a 32-bit high one, and treating the low word as a full 32 bits reads zeros for every index from the
+fifth on -- a plausible-looking wrong alpha, not a crash.
+
+`run.sh <mesa-src>` compiles `bc_s3tc.comp` to SPIR-V with glslangValidator, translates that SPIR-V
+to C++ with SPIRV-Cross, runs it on the host, and diffs whole 16x16 images against the reference
+decoder `genref.py` extracts from the driver. It is the same anti-drift rule as
+`bc-band-test/run.sh`: the artifact tested is the one that ships. **1.28M pixels, 0 mismatches** as
+of this writing, and the check is worth having because it fails when it should -- putting the
+16-bit low word back to 32 bits in `bits3()` yields **188154 mismatches, all BC3**, exit 1.
+
+- SPIRV-Cross's C++ backend names the push-constant member `pc` and then emits
+  `register_push_constant(pc__)`, which does not exist, while its own `#define pc __res->pc.get()`
+  shadows the member. `run.sh` renames the member to `pc_` with three `sed` edits. A regenerated
+  translation that is not patched will not compile, so a change in the generator's naming shows up
+  as a build failure here rather than as a wrong decode.
+- The shader runtime is header-only (`include/spirv_cross/`), so `libspirv-cross.a` is not needed;
+  only the CLI is. `source.env` pins `SPIRV_CROSS_REF` and `GLM_REF`, and CI builds the CLI and
+  clones glm before running the check. The distro `spirv-cross` package ships neither the runtime
+  headers nor the CLI this needs.
+- The check needs `SPIRV_CROSS_DIR` (a checkout: the CLI plus `include/spirv_cross/`) and `GLM_DIR`.
+  It finds the CLI under `<dir>`, `<dir>/build` or `<dir>/bin`.
+
+## The frame collapse is memory bandwidth, and `DROIDDECK_VN_EMULATE_BC=0` is the test that decides
+
+The decode share (from the `BC textures emulated over ... ms decoding` line) against the `frames:`
+line, over the 57 windows of `2026-10-27-09-steam`, is a step, not a slope:
+
+    decode share   0-5%    5-20%   20-40%   40-60%   60%+
+    mean fps       48.8    14.3     8.0      6.5     4.5      (corr -0.737)
+
+A 5-20% share is 5-20% of the submit thread. It cannot cost 70% of the frame rate if the decode's
+cost were only its own CPU time, and it does not behave like it is: subtracting `decode_ms` from
+`frame_ms` leaves a remainder that *grows* with the decode (corr +0.30 over the same windows), so
+the decode is not just adding its own time, it is slowing the rest of the frame down too.
+
+The per-window rate says the same thing more directly. `decode_ms / output_MiB` is not a constant --
+it runs from **2.6 to 10.6 ms/MiB** across the windows (median 4.57), with the same code and the same
+uncached heap throughout. A fixed per-byte write cost cannot vary like that. What varies is how much
+else is running: the decode is competing with the game's own traffic for memory bandwidth, and in
+the bad windows the decode's 4-5 ms/MiB *is* the frame's 4-5 ms/MiB. That is why the earlier
+arithmetic -- "remove the write cost and the frame reaches the high 20s" -- overstates a decode
+optimisation: a cheaper decode leaves the rest of the frame where it is.
+
+So the number to get before building anything else is the BC-off one, and it is already a
+no-rebuild knob: **`DROIDDECK_VN_EMULATE_BC=0`** (patch 0019, read in the guest via
+`debug_get_bool_option`) turns BC emulation off. The textures that needed decoding stay empty, so
+the picture is wrong on purpose -- but the `frames:` line answers the question:
+
+- back to ~50 fps: the BC path is the whole collapse, and moving the decode off the CPU (or off the
+  uncached heap) is the fix;
+- still 3-7 fps: the collapse is the frame's own memory traffic, and no decode change reaches 60.
+
+It has not been run in any log bundle so far, and it costs one setting change, so it comes before
+the GPU integration, not after.

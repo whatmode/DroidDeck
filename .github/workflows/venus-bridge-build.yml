@@ -96,6 +96,30 @@ jobs:
         # bc_decode_task, and a mismatch there is the "map is cut in half" bug.
         run: |
           bash tools/venus/bc-band-test/run.sh "$VENUS_WORK/mesa" "$VENUS_WORK/build-mesa"
+      - name: Build SPIRV-Cross for the GPU BC decode check
+        # The shader that ships is SPIR-V; the check runs it on the host by translating it to C++
+        # with SPIRV-Cross, whose shader runtime is header-only. Only the CLI is built, at the
+        # revision source.env pins.
+        run: |
+          set -euo pipefail
+          . tools/venus/source.env
+          git clone -q "$SPIRV_CROSS_REPO" "$RUNNER_TEMP/spirv-cross"
+          git -C "$RUNNER_TEMP/spirv-cross" checkout -q "$SPIRV_CROSS_REF"
+          cmake -S "$RUNNER_TEMP/spirv-cross" -B "$RUNNER_TEMP/spirv-cross/build" \
+            -DCMAKE_BUILD_TYPE=Release -DSPIRV_CROSS_ENABLE_TESTS=OFF > /tmp/spirv-cross-cmake.log 2>&1 \
+            || { tail -30 /tmp/spirv-cross-cmake.log; exit 1; }
+          cmake --build "$RUNNER_TEMP/spirv-cross/build" --target spirv-cross -j"$(nproc)" \
+            > /tmp/spirv-cross-build.log 2>&1 || { tail -40 /tmp/spirv-cross-build.log; exit 1; }
+          git clone -q --branch "$GLM_REF" "$GLM_REPO" "$RUNNER_TEMP/glm"
+          echo "GLM_DIR=$RUNNER_TEMP/glm" >> "$GITHUB_ENV"
+          echo "SPIRV_CROSS_DIR=$RUNNER_TEMP/spirv-cross" >> "$GITHUB_ENV"
+      - name: Check the GPU BC decode shader against the driver's own decode code
+        # The shader and bc_decode_s3tc() are two implementations of one contract; a BC3 alpha
+        # index past the fifth reads zeros if the 48-bit field's 16-bit low word is mishandled,
+        # which is a plausible-looking wrong alpha rather than a crash. The check runs the SPIR-V
+        # that ships, translated by SPIRV-Cross, against the decoder extracted from the driver.
+        run: |
+          bash tools/venus/bc-gpu-test/run.sh "$VENUS_WORK/mesa"
       - uses: actions/upload-artifact@v4
         with:
           name: venus-guest
