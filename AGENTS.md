@@ -796,13 +796,17 @@ object drawn wrong, with the rest of the frame correct, is not a whole-frame pre
 (that is white/garbled *frames*). It points at one draw reading a wrong descriptor or a wrong
 viewport. Two candidates, both already switchable without a rebuild:
 
-- **`VN_DD_EMU_MULTI_VIEWPORT`** (patch 0013). The Mali has `multiViewport=no`, so
-  `vn_CmdSetViewport`/`vn_CmdSetScissor*` clamp to viewport 0. A draw that legitimately uses viewport
-  1 then gets viewport 0's rectangle -- which is a plausible way for one object to land in the wrong
-  place or orientation. `DROIDDECK_VN_EMULATE=0` turns every emulation off; that is the control.
-- **A descriptor set left unbound** by an allocation that failed and was not retried, which draws one
-  object white. The 4878 host refusals above make this the stronger candidate for the *white* half;
-  the *upside down* half is more likely the viewport clamp.
+- **A descriptor set left unbound** by an allocation that failed and was not retried. This is the
+  stronger candidate, because **one unbound set explains both symptoms at once**: a constant buffer
+  the vertex shader reads for its transform is garbage, so the object lands in the wrong orientation
+  ("upside down"), and the albedo it reads is garbage, so it draws white. One mechanism, not two.
+  The 4878 host-side refusals above are what make it plausible, and it is why the van is worth
+  re-checking *after* the descriptor-pool fix rather than before it.
+- **`VN_DD_EMU_MULTI_VIEWPORT`** (patch 0013) is the alternative for the *orientation* half alone:
+  the Mali has `multiViewport=no`, so `vn_CmdSetViewport`/`vn_CmdSetScissor*` clamp to viewport 0 and
+  a draw that legitimately uses viewport 1 gets viewport 0's rectangle. It does not explain the
+  white, so it is the weaker of the two -- but `DROIDDECK_VN_EMULATE=0` is the one-flag control for
+  it, and it is free to try.
 
 Set either in the per-game Environment card (FrontEndSetup.kt, `game_env_*`; values are plain
 `NAME=value`) or in the session-wide `droiddeck-env` file, then relaunch. Neither needs an APK.
