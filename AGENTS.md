@@ -638,3 +638,64 @@ ignored with a warning. `BL_FPS` must stay `0`, because it is tested *before* th
 The documented caveat stands: at 120 Hz the software X connection for Steam's UI can overrun
 ("Fatal IO error 11"), which is why the cap exists — expect UI stalls, and treat `BL_MALI_REFRESH=0`
 (panel rate) and `=120` as the same experiment.
+
+## The descriptor-pool errors are fixed at the source now (`guest-patches/0023`)
+
+The section above describes `VN_PERF(no_async_set_alloc)` as the knob, and it is still the way to
+turn the shadow accounting off for an A/B. `guest-patches/0023` makes the accounting non-fatal
+instead, which is the fix and not a knob: when
+`vn_descriptor_pool_alloc_descriptors()` says a pool is full, the guest no longer answers
+`VK_ERROR_OUT_OF_POOL_MEMORY` on its own authority. It drops the pool to `VN_ASYNC_SET_ALLOC_NONE`
+and lets the next `vn_call_vkAllocateDescriptorSets` ask the real driver, which is the only thing
+that knows the pool's actual room. The state transition is the same one the pool already makes when
+a set is freed, and `vn_descriptor_pool_free_descriptors` is guarded by the same
+`!= VN_ASYNC_SET_ALLOC_NONE` test everywhere, so no accounting is added or skipped.
+
+Why the shadow can be wrong: it is per-pool guest-side bookkeeping that does not see a host-side
+reset and does not see another ring allocating from the same pool. DXVK retries a real
+`VK_ERROR_OUT_OF_POOL_MEMORY`, so a false one is a reset/recreate storm, which is what the ~112k
+errors were; a real one now comes back from the driver and is returned unchanged. The first
+fallback writes one line to `droiddeck_vulkan.txt`:
+
+```
+descriptor pools: the guest's accounting said a pool was full; deferring to the real pool
+```
+
+If that line appears, the accounting was wrong and the fix is doing its job.
+
+## The frame rate falls off a cliff in the first minute, and BC decode is why
+
+In the 2026-10-27-05 Lake run the frame rate was 58 fps in the first window and 3-7 fps forty
+seconds later, and the fall tracks the BC decode's CPU time, not the refresh cap:
+
+| window | fps after | uploads decoded | decode ms | share of the window |
+|---|---|---|---|---|
+| 07:55:44 | 58.0 | 0 | 0.0 | 0% |
+| 07:56:12 | 16.1 | 55 | 1062 | 10% |
+| 07:56:24 | 3.2 | 915 | 4429 | 43% |
+| 07:56:34 | 6.8 | 1454 | 6444 | 64% |
+| 07:56:55 | 5.2 | 1651 | 3953 | 40% |
+
+So the level loads its textures over the first ~30 s, each decode competes with the game's own
+threads for the same CPU, and the steady state is the decode cost, not the driver's draw path. This
+is the number to move for 24->60, ahead of the present-sync and refresh work: the refresh cap
+cannot be the ceiling while the frame time is 200-300 ms. `DROIDDECK_VN_BC_THREADS` sets the decode
+thread count (1 keeps the old single-threaded path, the default is one per CPU, clamped to 16), and
+the Pixel 9 Pro XL has 8 cores with the game free to use all of them, so a lower count is worth an
+A/B: the decode and the game are not the only two things on the CPU.
+
+## The APK is no longer built for driver-only changes
+
+`.github/workflows/build.yml` gained a `changes` job that runs before `build`. It diffs the pull
+request and, if every changed path is driver-side (`tools/venus/`, `tools/panvk/`, `tools/comet/`,
+`tools/ea/`, `mali-gl/patches/`, `docs/`, `.github/`, any `*.md`), sets `apk=false`; `build` then skips, and so
+do `sign`, `announce` and `catalog`. The gate is an allowlist of paths the APK does *not* read, so
+a new or unknown directory builds the APK rather than silently skipping it.
+
+`paths-ignore` could not do this. On a `pull_request` event it evaluates the whole PR diff, so a PR
+that has ever touched `app/` rebuilds the APK on every later push no matter how small. The `changes`
+job diffs the push (`github.event.before..HEAD`, falling back to the target's tip when a force-push
+makes that unusable), which is the granularity the request was about. Pushes to `main` and manual
+runs are untouched and always build, so the signed release path is unchanged. `changes` passes when
+it skips, so a required "Build APK" check still goes green, and its step summary lists the files it
+saw and says which way it decided.

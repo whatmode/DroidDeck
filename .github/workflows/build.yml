@@ -31,9 +31,76 @@ env:
   PRELOAD_CACHE_VERSION: v6
 
 jobs:
+  # The APK is built from app/ and the tools/ app/build.gradle reads, so a branch that only
+  # touches driver-side tools (tools/venus, tools/panvk, mali-gl/patches, ...) has nothing for it
+  # to compile. paths-ignore cannot express that on a pull_request: it evaluates the whole PR
+  # diff, so once a PR has touched app/ every later push rebuilds the APK however small it is.
+  # This job answers the question the event cannot, and build/sign/announce are skipped when the
+  # answer is "no APK work here". It is the only check that runs in that case, and it passes, so
+  # a required "Build APK" check still goes green.
+  changes:
+    name: Which files changed
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    outputs:
+      apk: ${{ steps.which.outputs.apk }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decide whether the APK has anything to build
+        id: which
+        run: |
+          set -euo pipefail
+          # main and manual runs always build: a push to main publishes a signed release, and a
+          # manual run is an explicit request for the APK. The gate is for pull requests, where a
+          # driver-only change has nothing for the APK to compile.
+          if [ "${{ github.event_name }}" != pull_request ]; then
+            echo "apk=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The base is the target's tip at event time, with a three-dot diff so only this
+          # branch's own commits count. The branch tip this push replaced is preferred when it is
+          # a real ancestor of HEAD, so a driver-only push inside a PR that also touches app/
+          # does not rebuild the APK; a rebase or force-push leaves it unusable and the whole-PR
+          # diff is used instead.
+          base="${{ github.event.pull_request.base.sha }}"
+          range="$base...HEAD"
+          before="${{ github.event.before }}"
+          case "$before" in
+            ''|0000000000000000000000000000000000000000) ;;
+            *)
+              if git merge-base --is-ancestor "$before" HEAD 2>/dev/null; then
+                base="$before"
+                range="$before..HEAD"
+              fi
+              ;;
+          esac
+          changed=$(git diff --name-only "$range")
+          echo "Changed since $base:" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "$changed" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # This is an allowlist of paths the APK does not read, and everything else builds. An
+          # unknown or newly added directory therefore builds the APK rather than quietly skipping
+          # it, which is the safe way round. Each entry is a driver-side input: tools/venus and
+          # mali-gl/patches feed the driver builds, tools/panvk and tools/comet build the Mali
+          # drivers, tools/ea is the EA launcher shim, docs and .github are documentation and CI.
+          # mali-gl/release.env is deliberately not here - the APK downloads that runtime.
+          if grep -qvE '^(tools/(venus|panvk|comet|ea)/|mali-gl/patches/|docs/|\.github/|.*\.md$)' <<<"$changed"; then
+            echo "apk=true" >> "$GITHUB_OUTPUT"
+            echo "Files the APK is built from changed; building it." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "apk=false" >> "$GITHUB_OUTPUT"
+            echo "Only driver-side files changed; the APK has nothing to build." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   build:
     name: Build APK
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    needs: changes
+    if: ${{ needs.changes.outputs.apk == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     outputs:
