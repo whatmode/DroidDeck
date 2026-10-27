@@ -566,3 +566,75 @@ copy. The pool is keyed by device because a `VkBuffer` is not valid on another d
 - Secondary, still open, and unrelated to the above: **~1409 `VK_ERROR_OUT_OF_POOL_MEMORY`** from
   DXVK's descriptor pools, and the compositor's 100 ms vsync guard + fallback timer in
   `DroidDeckWayland`'s `schedule_render()`. Neither is the BC path.
+
+## The descriptor-pool errors are the guest's own accounting, and are a no-rebuild knob
+
+`VK_ERROR_OUT_OF_POOL_MEMORY` is not the real driver refusing: it is **Mesa's guest-side shadow
+accounting** refusing. `vn_CreateDescriptorPool` (`vn_descriptor_set.c`) picks
+
+```c
+pool->initial_state = pool->current_state =
+   VN_PERF(NO_ASYNC_SET_ALLOC) ? VN_ASYNC_SET_ALLOC_NONE
+   : pCreateInfo->flags & VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT
+      ? VN_ASYNC_SET_ALLOC_SAME_ALLOC : VN_ASYNC_SET_ALLOC_ALWAYS;
+```
+
+and `vn_AllocateDescriptorSets` then returns `VK_ERROR_OUT_OF_POOL_MEMORY` from
+`vn_descriptor_pool_alloc_descriptors` (the guest's `pool->used`/`pool->max` counters) **before
+the real `vkAllocateDescriptorSets` is ever sent** — that path is async
+(`vn_async_vkAllocateDescriptorSets`), so the real pool may well have room. DXVK reads the failure
+as "this pool is full", resets or recreates it, and retries, which is why the same window shows
+`vkAllocateDescriptorSets 66447x 186.5 ms` alongside the failures: a failure/retry storm.
+
+- The rate is not new and not caused by 0019/0021/0022. The per-launch counts in one bundle span
+  **12 to 23,715** (`steam-1118240.log`), and the `~1409` in this note was one window of a
+  different title. Treat it as a long-standing guest-side policy, not a regression.
+- **It is switchable without a rebuild.** `VN_PERF=no_async_set_alloc` (`vn_perf_options` in
+  `vn_common.c`, read with `os_get_option` i.e. `getenv`) sets `VN_ASYNC_SET_ALLOC_NONE`, which
+  skips `vn_descriptor_pool_alloc_descriptors` entirely and sends the real
+  `vkAllocateDescriptorSets` synchronously. The 112k failures go away; the cost is a round trip
+  per allocation, so A/B it — it may win on correctness and lose on frame time, or the reverse.
+- A `VK_ERROR_OUT_OF_POOL_MEMORY` that DXVK does not retry leaves a descriptor set unbound, which
+  reads to the player as one object drawing white/black/garbage. That is the leading candidate for
+  "a white wagon" (Lake's van), ahead of the BC path: the BC decode is byte-exact (below).
+
+## What was ruled out for the "upside down" glitch
+
+- **The BC decode is exact.** `tools/venus/bc-band-test/run.sh` (build the archives by hand if
+  `ninja` is missing; `libmesa_util*.a` are already in `build-check`) reports
+  `PASS: 60/60 cases exact (fast path + band split, real driver code)`. No row/column flip exists
+  anywhere in `vn_droiddeck_bc.c` — the decoder only ever writes `by*4` rows down from the band's
+  `y0`, so it cannot invert an image.
+- **No BC uploads are dropped.** The stats line reports `0 copies left out` and `0 uploads from
+  memory the driver cannot read` for all 33 windows, so no texture is left empty by the BC path.
+- **`VK_ERROR_FORMAT_NOT_SUPPORTED` is a format-query probe**, not a draw failure: every
+  occurrence is `vn_get_image_format_properties2_impl` / `vn_GetPhysicalDeviceImageFormatProperties2`,
+  i.e. DXVK asking "can I make this image?" and being told no. It is the BC substitute's own
+  restriction (`vn_dd_bc_format_info_begin` + the `bc_usage` gate in
+  `vn_GetPhysicalDeviceImageFormatProperties2`: BC is offered for
+  SAMPLED|TRANSFER_SRC|TRANSFER_DST + OPTIMAL only). The steady ~498-510 per launch is DXVK's
+  capability probe, not a per-frame error.
+- **`VN_DD_EMU_MULTI_VIEWPORT` is a real correctness risk, and is worth an A/B.** The Mali has
+  `multiViewport=no` (`android-vulkan.txt`), so `vn_CmdSetViewport`/`vn_CmdSetViewportWithCount`
+  clamp to viewport 0 and `vn_CmdSetScissor*` likewise. That is harmless while DXVK keeps viewport
+  0 at the full target, but a draw that legitimately uses viewport 1 gets viewport 0's rectangle.
+  `DROIDDECK_VN_EMULATE=0` turns every emulation off and is the control.
+
+## Uncap the nested refresh without a rebuild
+
+`droiddeck-session` already passes `-r "$BL_MALI_REFRESH"` (Mali branch), so the 60 Hz cap is
+**one environment variable**, no script edit and no APK:
+
+```
+BL_MALI_REFRESH=120
+```
+
+Put it in the app's env-switch file — `envSwitchFile()` is
+`/storage/emulated/0/Android/data/com.droiddeck.launcher/files/droiddeck-env` (one `NAME=value`
+per line, `#` comments). `extraEnv()` appends it **after** the driver's GL environment and both go
+through `/usr/bin/env -i`, so it wins. `Download/droiddeck-env` is the dead legacy path and is
+ignored with a warning. `BL_FPS` must stay `0`, because it is tested *before* the Mali branch
+(`if [ "${BL_FPS:-0}" -gt 0 ]`), so a non-zero session FPS limit silently overrides this.
+The documented caveat stands: at 120 Hz the software X connection for Steam's UI can overrun
+("Fatal IO error 11"), which is why the cap exists — expect UI stalls, and treat `BL_MALI_REFRESH=0`
+(panel rate) and `=120` as the same experiment.
