@@ -27,8 +27,10 @@ class PerfHud(context: Context) {
     private val handler = Handler(Looper.getMainLooper())
 
     private val enabled: Boolean
-        get() = SessionPrefs.hudEnabled(context)
+        get() = overlayLevel() > SessionPrefs.OVERLAY_OFF
             && !File(Environment.getExternalStorageDirectory(), "Download/droiddeck-no-hud").exists()
+
+    private fun overlayLevel(): Int = SessionPrefs.overlayLevel(context)
 
     var onPresentingWindowChanged: (() -> Unit)? = null
     private var lastWindow: String? = null
@@ -75,7 +77,7 @@ class PerfHud(context: Context) {
 
     private fun line(base: Float): String {
         val mode = FrameGen.mode(context)
-        if (mode.engine == FrameGen.ENGINE_OFF) return fps(base)
+        if (mode.engine == FrameGen.ENGINE_OFF) return fps(base) + detail()
         val lsfg = mode.engine == FrameGen.ENGINE_LSFG
         val name = if (lsfg) "LSFG" else "Win-FG"
         val label = FrameGen.label(context, mode)
@@ -85,9 +87,32 @@ class PerfHud(context: Context) {
         return when {
             problem == 1 -> context.getString(R.string.hud_fg_unsupported, name)
             problem == 2 -> context.getString(R.string.hud_fg_failed, name)
-            stats != null && stats[3] > 1f -> String.format(Locale.US, "%s  %.0f → %.0f fps", label, base, stats[3])
-            else -> context.getString(R.string.hud_fg_starting, label, fps(base))
+            stats != null && stats[3] > 1f -> String.format(Locale.US, "%s  %.0f → %.0f fps", label, base, stats[3]) + detail()
+            else -> context.getString(R.string.hud_fg_starting, label, fps(base)) + detail()
         }
+    }
+
+    /**
+     * The driver-side numbers the higher overlay levels add. Every call is wrapped: the natives
+     * are only valid once the compositor has a surface, and a level that reads them must not be
+     * able to take the HUD down before the first frame.
+     */
+    private fun detail(): String {
+        val level = overlayLevel()
+        if (level < SessionPrefs.OVERLAY_LEVEL_2) return ""
+        val zeroCopy = try {
+            val n = WaylandCompositor.nativeZeroCopyFrames()
+            val age = WaylandCompositor.nativeZeroCopyLastFrameAgeMs()
+            if (n > 0) "  zero-copy $n (${age}ms ago)" else "  zero-copy none"
+        } catch (t: Throwable) { "" }
+        if (level < SessionPrefs.OVERLAY_LEVEL_3) return zeroCopy
+        val hdr = try {
+            val age = WaylandCompositor.nativeHdrLastFrameAgeMs()
+            if (WaylandCompositor.nativeHdrOnScreen() && age >= 0) "  hdr ${age}ms ago" else ""
+        } catch (t: Throwable) { "" }
+        val stats = try { WaylandCompositor.nativeFrameGenStats() } catch (t: Throwable) { null }
+        val fg = if (stats != null && stats.size >= 4 && stats[3] > 1f) String.format(Locale.US, "  fg %.0f", stats[3]) else ""
+        return zeroCopy + hdr + fg
     }
 
     private fun fps(value: Float) = String.format(Locale.US, "%.0f fps", value)

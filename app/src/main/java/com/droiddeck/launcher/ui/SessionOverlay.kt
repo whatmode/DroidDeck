@@ -189,7 +189,14 @@ class DrawerActions(
     val title: String? = null,
     val isHomeApp: Boolean,
     val androidApps: List<HomeApp.LaunchableApp>,
-    val hudOn: Boolean,
+    val overlayLevel: Int = SessionPrefs.OVERLAY_LEVEL_1,
+    val onOverlayLevel: (Int) -> Unit = {},
+    val refreshLimit: Int = 0,
+    val onRefreshLimit: (Int) -> Unit = {},
+    val fpsLimit: Int = 0,
+    val onFpsLimit: (Int) -> Unit = {},
+    val sustainedPerformance: Boolean = false,
+    val onSustainedPerformance: (Boolean) -> Unit = {},
     val frameGen: FrameGen.Mode,
     val lossless: Lossless.State,
     val oscMode: String,
@@ -216,7 +223,6 @@ class DrawerActions(
     val secondScreenMode: SecondScreenMode,
     val secondScreenDisplays: List<SecondScreenDisplay>,
     val selectedSecondScreenDisplay: Int,
-    val onHud: (Boolean) -> Unit,
     val onFrameGenPick: (FrameGen.Mode) -> Unit,
     val onImportLossless: () -> Unit,
     val onKeyboard: () -> Unit,
@@ -409,8 +415,12 @@ internal fun SessionDrawer(open: Boolean, requestedPage: SessionDrawerPage, cont
                     when (page) {
                         SessionDrawerPage.DISPLAY -> {
                             SettingsGroup(stringResource(R.string.drawer_page_display)) {
-                                ToggleRow(host, "hud", stringResource(R.string.drawer_hud), null, a.hudOn,
-                                    chipModifier = focus.track(page, "hud"), onChange = a.onHud)
+                                ChoiceRow(
+                                    host, "overlay", stringResource(R.string.drawer_overlay),
+                                    stringResource(R.string.drawer_overlay_hint),
+                                    SessionPrefs.overlayLevelChoices(LocalContext.current), a.overlayLevel,
+                                    chipModifier = focus.track(page, "overlay"), onPick = a.onOverlayLevel,
+                                )
                                 val fgOpen = host.open == "fg"
                                 val fgLabel = FrameGen.label(LocalContext.current, a.frameGen)
                                 SettingsRow(stringResource(R.string.frame_gen_title), null, highlighted = fgOpen) {
@@ -419,6 +429,27 @@ internal fun SessionDrawer(open: Boolean, requestedPage: SessionDrawerPage, cont
                                         FrameGenMenu(host, a.frameGen, a.lossless, a.onFrameGenPick, a.onImportLossless)
                                     }
                                 }
+                            }
+                            SettingsGroup(stringResource(R.string.display_frame_rate)) {
+                                ChoiceRow(
+                                    host, "fps", stringResource(R.string.mode_fps), stringResource(R.string.mode_fps_note),
+                                    SessionPrefs.fpsLimitChoices(LocalContext.current), a.fpsLimit,
+                                    chipModifier = focus.track(page, "fps"), onPick = a.onFpsLimit,
+                                )
+                                ChoiceRow(
+                                    host, "refresh", stringResource(R.string.mode_refresh),
+                                    stringResource(R.string.mode_refresh_hint),
+                                    SessionPrefs.refreshLimitChoices(LocalContext.current), a.refreshLimit,
+                                    chipModifier = focus.track(page, "refresh"), onPick = a.onRefreshLimit,
+                                )
+                            }
+                            SettingsGroup(stringResource(R.string.drawer_page_power)) {
+                                ToggleRow(
+                                    host, "sustained", stringResource(R.string.mode_sustained),
+                                    stringResource(R.string.mode_sustained_hint),
+                                    a.sustainedPerformance, chipModifier = focus.track(page, "sustained"),
+                                    onChange = a.onSustainedPerformance,
+                                )
                             }
                             SettingsGroup(stringResource(R.string.display_image_scaling)) {
                                 ChoiceRow(host, "upscaler", stringResource(R.string.display_filter), null,

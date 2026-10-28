@@ -207,6 +207,11 @@
     <string name="mode_ratio_auto">Auto uses at least 16:9.</string>
     <string name="mode_fps">Frame limit</string>
     <string name="mode_fps_note">Caps the whole session. The display switches to a refresh rate the cap divides evenly.</string>
+    <string name="mode_refresh">Refresh rate</string>
+    <string name="mode_refresh_hint">The highest rate the session may use. Lower it to save power or steady the frame time.</string>
+    <string name="mode_sustained">Sustained performance</string>
+    <string name="mode_sustained_hint">Asks Android to hold the clocks it can sustain for the whole session instead of boosting past them.</string>
+    <string name="refresh_panel">Panel default</string>
     <string name="mode_hdr">HDR</string>
     <string name="mode_hdr10">HDR10 output</string>
     <string name="mode_hdr_unavailable">Not available: %1$s.</string>
@@ -467,6 +472,9 @@
     <string name="perf_gpu">GPU</string>
     <string name="perf_gpuclock">Hold the GPU at its top clock</string>
     <string name="perf_gpuclock_hint">Adreno only. Fewer hitches, more battery use and heat.</string>
+    <string name="perf_power">Power</string>
+    <string name="perf_threadhints">Boost the game\'s busy threads</string>
+    <string name="perf_threadhints_hint">Names the busiest threads to the power HAL so Android lifts its clocks for them.</string>
     <string name="perf_fixes">Session fixes</string>
     <string name="perf_sysmem">Turnip: sysmem rendering</string>
     <string name="perf_sysmem_hint">Faster for Steam and most games. Required on Adreno 710/720/722.</string>
@@ -510,7 +518,13 @@
     <string name="drawer_open_qam">Open Quick Access Menu</string>
     <string name="drawer_prev_page">Previous page</string>
     <string name="drawer_next_page">Next page</string>
-    <string name="drawer_hud">Performance HUD</string>
+    <string name="drawer_overlay">Performance overlay</string>
+    <string name="drawer_overlay_hint">What the performance HUD shows. Higher levels add the driver\'s frame numbers.</string>
+    <string name="drawer_page_power">Power</string>
+    <string name="overlay_off">Off</string>
+    <string name="overlay_level_1">Frame rate</string>
+    <string name="overlay_level_2">Frame rate + zero-copy</string>
+    <string name="overlay_level_3">Everything</string>
     <string name="drawer_scaling">Scaling mode</string>
     <string name="drawer_scaling_sharpness">Scaling sharpness</string>
     <string name="drawer_effects">Screen effects</string>

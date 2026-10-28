@@ -188,6 +188,9 @@ object DeviceReport {
             k("Panel refresh modes", refreshModesSummary(display.supportedModes.map { it.refreshRate }))
         }
         k("peak_refresh_rate", runCatching { Settings.System.getString(context.contentResolver, "peak_refresh_rate") }.getOrNull() ?: "not set")
+        k("Session refresh cap", SessionPrefs.refreshLimit(context, SessionPrefs.prefMode(mode)).let { if (it == 0) "panel default" else "$it Hz" })
+        k("Sustained performance", SessionPrefs.sustainedPerformance(context))
+        k("Performance overlay", SessionPrefs.overlayLevel(context))
         k("refresh_rate_mode", runCatching { Settings.Secure.getString(context.contentResolver, "refresh_rate_mode") }.getOrNull() ?: "not set")
         val panelSize = com.droiddeck.launcher.session.SessionDisplay.panelSize(context)
         for ((label, mode) in listOf("Resolution (Steam)" to SessionService.MODE_STEAM, "Resolution (Desktop)" to SessionService.MODE_DESKTOP)) {

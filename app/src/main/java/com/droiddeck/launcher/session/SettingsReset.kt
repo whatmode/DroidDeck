@@ -20,12 +20,14 @@ object SettingsReset {
         "noXalia", "fastSync", "fsyncFirst", "syncFallback", "prootNoSeccomp", "prootFastPath",
         "guestHostname", "fexPreset", "forceSsbs", "logs", "storageDiagnostics",
         "upscaler", "upscaleSharpness", "screenEffects", "textureAnisotropy", "textureLodBias",
+        "overlayLevel", "sustainedPerformance", "gameThreadHints",
         "steamDownloadsInBackground", "steam_offline", "bootMovie", "bootMovieSound",
         "questDefaultsV1",
     )
 
     internal val SESSION_PREFIXES = listOf(
         "resolutionCap.", "displayResolution.", "customRes.", "hdr.", "fpsLimit.", "suspendPolicy.",
+        "refreshLimit.",
     )
 
     private val STEAM_TOUCH_KEYS = listOf("feedback", "autoFade", "gyro", "shake")

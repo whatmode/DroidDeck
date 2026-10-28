@@ -258,7 +258,10 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
     private var pcKeyboardOpen by mutableStateOf(false)
     private var achievementsInFront by mutableStateOf<AchievementsInFront?>(null)
     private var achievementsOpen by mutableStateOf(false)
-    private var hudOn by mutableStateOf(true)
+    private var overlayLevel by mutableStateOf(SessionPrefs.OVERLAY_LEVEL_1)
+    private var fpsLimit by mutableStateOf(0)
+    private var refreshLimit by mutableStateOf(0)
+    private var sustainedPerformance by mutableStateOf(false)
     private var upscaler by mutableStateOf(0)
     private var upscaleSharpness by mutableStateOf(75)
     private var effects by mutableStateOf(ScreenEffects.OFF)
@@ -619,7 +622,6 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
                         com.droiddeck.launcher.frontend.Library.nameForProgram(SessionState.program) ?: getString(R.string.session_title_game) else null,
                     isHomeApp = isHomeApp,
                     androidApps = androidApps,
-                    hudOn = hudOn,
                     upscaler = upscaler, upscaleSharpness = upscaleSharpness,
                     effects = effects,
                     cardboard = cardboard,
@@ -643,7 +645,31 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
                     secondScreenMode = secondScreenMode,
                     secondScreenDisplays = secondScreenDisplays,
                     selectedSecondScreenDisplay = selectedSecondScreenDisplay,
-                    onHud = { on -> SessionPrefs.setHudEnabled(this@SessionActivity, on); hudOn = on; hud.refresh() },
+                    overlayLevel = overlayLevel,
+                    onOverlayLevel = { level ->
+                        SessionPrefs.setOverlayLevel(this@SessionActivity, level)
+                        overlayLevel = level
+                        hud.refresh()
+                    },
+                    fpsLimit = fpsLimit,
+                    onFpsLimit = { fps ->
+                        SessionPrefs.setFpsLimit(this@SessionActivity, prefMode(), fps)
+                        SessionState.fpsLimit = fps
+                        fpsLimit = fps
+                        applyOutputPacing()
+                    },
+                    refreshLimit = refreshLimit,
+                    onRefreshLimit = { hz ->
+                        SessionPrefs.setRefreshLimit(this@SessionActivity, prefMode(), hz)
+                        refreshLimit = hz
+                        applyOutputPacing()
+                    },
+                    sustainedPerformance = sustainedPerformance,
+                    onSustainedPerformance = { on ->
+                        SessionPrefs.setSustainedPerformance(this@SessionActivity, on)
+                        sustainedPerformance = on
+                        applySustainedPerformance()
+                    },
                     onUpscaler = { m ->
                         SessionPrefs.setUpscaler(this@SessionActivity, m); upscaler = m
                         WaylandCompositor.nativeSetUpscaler(m)
@@ -977,7 +1003,10 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
         pipAutoEnter = SessionPrefs.pipAutoEnter(this)
         unfoldedControls = SessionPrefs.unfoldedControls(this)
         picturePosition = SessionPrefs.picturePosition(this)
-        hudOn = SessionPrefs.hudEnabled(this)
+        overlayLevel = SessionPrefs.overlayLevel(this)
+        fpsLimit = SessionState.fpsLimit
+        refreshLimit = SessionPrefs.refreshLimit(this, prefMode())
+        sustainedPerformance = SessionPrefs.sustainedPerformance(this)
         upscaler = SessionPrefs.upscaler(this)
         upscaleSharpness = SessionPrefs.upscaleSharpness(this)
         effects = SessionPrefs.screenEffects(this)
@@ -1305,18 +1334,51 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
         val wanted = window.attributes.preferredDisplayModeId
         val hz = display?.supportedModes?.firstOrNull { wanted != 0 && it.modeId == wanted }?.refreshRate
             ?: display?.refreshRate ?: 60f
-        val mirrorCap = mirrorRefreshLimit().takeIf { it > 0 }?.toFloat() ?: Float.POSITIVE_INFINITY
-        val capped = minOf(hz, PerfMode.peakRefreshCap(this), mirrorCap)
+        val cap = refreshCap()
+        val capped = minOf(hz, PerfMode.peakRefreshCap(this), cap.takeIf { it > 0 }?.toFloat() ?: Float.POSITIVE_INFINITY)
         return if (capped > 1f) capped else 60f
     }
+
+    /**
+     * The mode whose per-mode preferences this session reads and writes. A game launched from the
+     * library runs in MODE_RUN but shares Steam's settings, so every per-mode key must go through
+     * prefMode or a game's change would land on a key the next session never reads back.
+     */
+    private fun prefMode(): String =
+        SessionPrefs.prefMode(intent.getStringExtra(SessionService.EXTRA_MODE) ?: SessionService.MODE_STEAM)
+
+    /**
+     * The ceiling the session picks its display mode under: the user's refresh choice, tightened by
+     * the glasses' output rate when a mirror is driving the picture. 0 means neither one has an
+     * opinion, so PerfMode falls back to the panel's own rate.
+     */
+    private fun refreshCap(): Int = SessionPrefs.tightestRefreshLimit(
+        SessionPrefs.refreshLimit(this, prefMode()),
+        mirrorRefreshLimit(),
+    )
 
     private fun mirrorRefreshLimit(): Int =
         GlassesRendering.mirrorRefreshLimit(glassesSettings, glasses, glassesScreen != null)
 
+    /**
+     * Android's sustained performance mode is a window flag, so it takes effect on the next
+     * window (and is dropped when the activity's window is replaced), which is why it is
+     * reapplied on resume rather than only when the switch is flipped.
+     */
+    private fun applySustainedPerformance() {
+        val on = SessionPrefs.sustainedPerformance(this)
+        try {
+            window.setSustainedPerformanceMode(on)
+            Log.i(TAG, "perf: sustained performance mode ${if (on) "on" else "off"}")
+        } catch (t: Throwable) {
+            Log.w(TAG, "sustained performance mode", t)
+        }
+    }
+
     private fun outputFpsLimit(): Int = GlassesRendering.fpsLimit(SessionState.fpsLimit, mirrorRefreshLimit())
 
     private fun applyOutputPacing() {
-        Log.i(TAG, "perf: " + PerfMode.apply(this, outputFpsLimit(), mirrorRefreshLimit()))
+        Log.i(TAG, "perf: " + PerfMode.apply(this, outputFpsLimit(), refreshCap()))
         if (CompositorHost.isStarted) {
             val hz = refreshHz()
             val changed = kotlin.math.abs(SessionState.refreshHz - hz) > 0.1f
@@ -2385,6 +2447,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
         if (!pipUi) sessionClipboard.start()
         updatePadMotion()
         readPrefs()
+        applySustainedPerformance()
         refreshControls()
         if (::pip.isInitialized) pip.resumed()
         if (CompositorHost.isStarted) applyFrameGen()

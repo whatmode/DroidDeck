@@ -149,6 +149,8 @@ class MainActivity : ComponentActivity() {
     private var fsyncFirst by mutableStateOf(false)
     private var gamescopeRealtime by mutableStateOf(false)
     private var gpuClockPin by mutableStateOf(false)
+    private var threadHints by mutableStateOf(true)
+    private var sustainedPerformance by mutableStateOf(false)
     private var prootNoSeccomp by mutableStateOf(false)
     private var prootFastPath by mutableStateOf(true)
     private var guestHostname by mutableStateOf(SessionPrefs.DEFAULT_GUEST_HOSTNAME)
@@ -413,6 +415,7 @@ class MainActivity : ComponentActivity() {
     private var appScale by mutableStateOf(com.droiddeck.launcher.core.AppUiPrefs.DEFAULT_SCALE)
     private var hdrOn by mutableStateOf(false)
     private var fpsLimit by mutableStateOf(0)
+    private var refreshLimit by mutableStateOf(0)
     private var upscaler by mutableStateOf(0)
     private var upscaleSharpness by mutableStateOf(75)
     private var hdrReason by mutableStateOf<String?>(null)
@@ -1488,7 +1491,7 @@ class MainActivity : ComponentActivity() {
             ModeSettings(
                 mode = mode, resolution = resolution,
                 panelSize = com.droiddeck.launcher.session.SessionDisplay.panelSize(this),
-                hdr = hdrOn, hdrReason = hdrReason, fpsLimit = fpsLimit,
+                hdr = hdrOn, hdrReason = hdrReason, fpsLimit = fpsLimit, refreshLimit = refreshLimit,
                 upscaler = upscaler, upscaleSharpness = upscaleSharpness,
                 gpuDrivers = drivers.summary(),
                 touchMode = touchMode,
@@ -1553,6 +1556,7 @@ class MainActivity : ComponentActivity() {
                 onHdr = { on -> SessionPrefs.setHdr(this, mode, on); hdrOn = on },
                 onGpuDrivers = { openComponents(focusContent = true, tab = com.droiddeck.launcher.ui.GPU_TAB) },
                 onFpsLimit = { fps -> SessionPrefs.setFpsLimit(this, mode, fps); fpsLimit = fps },
+                onRefreshLimit = { hz -> SessionPrefs.setRefreshLimit(this, mode, hz); refreshLimit = hz },
                 onUpscaler = { m -> SessionPrefs.setUpscaler(this, m); upscaler = m },
                 onUpscaleSharpness = { pct -> SessionPrefs.setUpscaleSharpness(this, pct); upscaleSharpness = pct },
                 onTouch = { t -> SessionPrefs.setTouchMode(this, t); touchMode = t },
@@ -1637,6 +1641,8 @@ class MainActivity : ComponentActivity() {
             fsyncFirst = fsyncFirst,
             gamescopeRealtime = gamescopeRealtime,
             gpuClockPin = gpuClockPin,
+            threadHints = threadHints,
+            sustainedPerformance = sustainedPerformance,
             prootNoSeccomp = prootNoSeccomp, prootFastPath = prootFastPath, guestHostname = guestHostname, phantomWarning = phantomWarning,
             onClientOverride = { on -> SessionPrefs.setClientCpusOverride(this, on); clientOverride = on },
             onTuSysmem = { on -> SessionPrefs.setTuSysmem(this, on); tuSysmem = on },
@@ -1649,6 +1655,8 @@ class MainActivity : ComponentActivity() {
             onFsyncFirst = { on -> SessionPrefs.setFsyncFirst(this, on); fsyncFirst = on },
             onGamescopeRealtime = { on -> SessionPrefs.setGamescopeRealtime(this, on); gamescopeRealtime = on },
             onGpuClockPin = { on -> SessionPrefs.setGpuClockPin(this, on); gpuClockPin = on },
+            onThreadHints = { on -> SessionPrefs.setGameThreadHints(this, on); threadHints = on },
+            onSustainedPerformance = { on -> SessionPrefs.setSustainedPerformance(this, on); sustainedPerformance = on },
             onProotNoSeccomp = { on -> SessionPrefs.setProotNoSeccomp(this, on); prootNoSeccomp = on },
             onProotFastPath = { on -> SessionPrefs.setProotFastPath(this, on); prootFastPath = on },
             onGuestHostname = { name -> SessionPrefs.setGuestHostname(this, name) },
@@ -1744,6 +1752,7 @@ class MainActivity : ComponentActivity() {
         loadBootMovie()
         hdrOn = SessionPrefs.hdr(this, mode)
         fpsLimit = SessionPrefs.fpsLimit(this, mode)
+        refreshLimit = SessionPrefs.refreshLimit(this, mode)
         upscaler = SessionPrefs.upscaler(this)
         upscaleSharpness = SessionPrefs.upscaleSharpness(this)
         hdrReason = com.droiddeck.launcher.wayland.HdrSupport.probe(this).reason
@@ -1806,6 +1815,8 @@ class MainActivity : ComponentActivity() {
         fsyncFirst = SessionPrefs.fsyncFirst(this)
         gamescopeRealtime = SessionPrefs.gamescopeRealtime(this)
         gpuClockPin = SessionPrefs.gpuClockPin(this)
+        threadHints = SessionPrefs.gameThreadHints(this)
+        sustainedPerformance = SessionPrefs.sustainedPerformance(this)
         prootNoSeccomp = SessionPrefs.prootNoSeccomp(this)
         prootFastPath = SessionPrefs.prootFastPath(this)
         guestHostname = SessionPrefs.guestHostname(this)

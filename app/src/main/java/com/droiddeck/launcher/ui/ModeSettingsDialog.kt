@@ -59,6 +59,7 @@ class ModeSettings(
     val hdrReason: String?,
     val gpuDrivers: String? = null,
     val fpsLimit: Int = 0,
+    val refreshLimit: Int = 0,
     val upscaler: Int = 0,
     val upscaleSharpness: Int = 75,
     val touchMode: String,
@@ -111,6 +112,7 @@ class ModeSettingsActions(
     val onHdr: (Boolean) -> Unit,
     val onGpuDrivers: () -> Unit = {},
     val onFpsLimit: (Int) -> Unit = {},
+    val onRefreshLimit: (Int) -> Unit = {},
     val onUpscaler: (Int) -> Unit = {},
     val onUpscaleSharpness: (Int) -> Unit = {},
     val onTouch: (String) -> Unit,
@@ -234,6 +236,8 @@ fun ModeSheetRows(s: ModeSettings, a: ModeSettingsActions, tab: String, extras: 
         SettingsGroup(stringResource(R.string.display_frame_rate)) {
             ChoiceRow(host, "fps", stringResource(R.string.mode_fps), stringResource(R.string.common_applies_next_session),
                 SessionPrefs.fpsLimitChoices(LocalContext.current), s.fpsLimit, note = stringResource(R.string.mode_fps_note), onPick = a.onFpsLimit)
+            ChoiceRow(host, "refresh", stringResource(R.string.mode_refresh), stringResource(R.string.mode_refresh_hint),
+                SessionPrefs.refreshLimitChoices(LocalContext.current), s.refreshLimit, onPick = a.onRefreshLimit)
         }
         SettingsGroup(stringResource(R.string.mode_hdr)) {
             ToggleRow(

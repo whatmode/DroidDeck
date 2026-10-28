@@ -1277,3 +1277,50 @@ Still open, and why this is not yet the 60 fps fix: the path is S3TC-only, so BC
 the formats the probe says this driver must emulate -- still decode on the CPU. Widening the shader
 to those formats is the next step and needs a new `.comp`, a new reference decoder in `genref.py`
 and a new embedded SPIR-V array; it is not a config change.
+
+## The power levers a plain app cannot have, and what the drawer offers instead
+
+The session drawer's performance page was extended with the Deck-QAM controls that are reachable
+without root. Three of the Deck's are not, and they are recorded here so the next attempt does not
+re-derive it:
+
+- **TDP.** SteamOS writes an SMU power limit through the kernel's power interface. Android has no
+  equivalent a normal app may call: the power HAL (`android.hardware.power`) is a vendor service
+  reached over binder, and the kernel's `sysfs` nodes for it (`/sys/class/power_supply/*/…`,
+  `/sys/devices/system/cpu/cpu*/cpufreq/*`) are root-owned and not writable by the app's uid. There
+  is no public `PowerManager` call that sets a watt or thermal budget.
+- **Mali GPU clock / DVFS.** The `gpuClockPin` switch the Performance page already had is the
+  **Adreno** path: `GpuClockPin.start()` calls `nativeSetGpuTurbo()`, which is
+  `adrenotools_set_turbo()` (see `waylandcomp_jni.c`), and it is gated on `/dev/kgsl-3d0` existing.
+  Neither holds on this target. Tensor G4 is **Mali-G715 MC7**, there is no `/dev/kgsl-3d0`, and
+  `GpuClockPin` reports `gpu clock: no /dev/kgsl-3d0, left governed`. The Mali equivalent was the
+  kbase DVFS `sysfs` pinning, and `mali-gl/patches/0005` **deletes** it outright (see "The kbase
+  tunables are now automatic"), so it is not a knob on this branch either.
+- **`GameManager.setGameMode()`.** Hidden `SystemApi` behind the `android.permission.MANAGE_GAME_MODE`
+  signature|privileged permission, so it is not callable from a sideloaded app.
+
+What the drawer does offer, and why each is safe unprivileged:
+
+- **Refresh-rate cap** (`mode_refresh` / `display_frame_rate`). Only *lowers* the ceiling the
+  session picks its display mode under, through the public display-mode API. The Android
+  `peak_refresh_rate` setting and the glasses' output rate still cap it on top, so it can never ask
+  for a rate the system forbids. `SessionPrefs.tightestRefreshLimit()` combines it with the mirror's
+  rate; 0 means "the panel's own", which is the default and the previous behaviour.
+- **Frame limit** (`mode_fps`). The live native knob (`g_fps_limit`), unchanged; the drawer now
+  exposes it on the DISPLAY page next to the refresh cap.
+- **Sustained performance mode** (`mode_sustained`). `Window.setSustainedPerformanceMode()`, a
+  public no-permission call. It is a *window* flag, so it is applied in `onResume` as well as when
+  the switch is flipped -- the activity's window is replaced on resume and the flag goes with it.
+- **Performance overlay level** (`overlay_off` / `overlay_level_1..3`). The app's own HUD, so it is
+  free. Level 1 is the frame-rate line the HUD always drew; 2 adds the zero-copy counters and 3 the
+  HDR and frame-gen numbers, all read from `WaylandCompositor` natives that are wrapped in `try`
+  because they are only valid once the compositor has a surface.
+- **ADPF thread hints** (`perf_threadhints`). `PerformanceHintManager`, public since API 31, already
+  implemented in `GameThreadHints`. It had a preference and a reader but no setter and no UI; both
+  were added.
+
+One bug worth recording, because the same shape will recur: the new per-mode writes first used
+`SessionState.mode`, but a game launched from the library runs in `MODE_RUN` while the *reader* uses
+`SessionPrefs.prefMode()`, which maps `run` -> `steam`. A change made from a game's session would
+have landed on `refreshLimit.run`, a key no later session reads. Every per-mode read and write in
+`SessionActivity` now goes through one `prefMode()` helper.
