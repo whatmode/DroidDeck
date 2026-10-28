@@ -1373,3 +1373,73 @@ One bug worth recording, because the same shape will recur: the new per-mode wri
 `SessionPrefs.prefMode()`, which maps `run` -> `steam`. A change made from a game's session would
 have landed on `refreshLimit.run`, a key no later session reads. Every per-mode read and write in
 `SessionActivity` now goes through one `prefMode()` helper.
+
+## The 2026-10-28-06 bundle: the plateau is CPU + present-wait in series, and the collapse is not the decode
+
+This bundle is the first one with both builds in the same file, so the plateau can be compared
+directly rather than across sessions. It answers the "framepacing still happens" report and it
+retires three of the open candidates.
+
+**The two builds.** `steam/droiddeck_vulkan.txt` is a concatenation of many sessions, and the BC
+stats line distinguishes them without a version string: the `on the GPU` field only exists in the
+build with the raised `DROIDDECK_VN_BC_GPU_MAX_MB` cap (`0810dcc` and later), and the run with
+`BC textures: decoding on the GPU ... alignment 64` is the GPU-decode build. Both are in the file,
+interleaved, so any per-window number has to be read with its build.
+
+**The plateau did not move, and it is a serialization.** Every plateau window, on both builds, sits
+at 17.3-20.3 ms/frame, i.e. ~51 fps. Across the 18 plateau windows the frame time decomposes
+exactly:
+
+    mean ms/frame = 19.72   mean present GPU wait = 7.00   mean cpu = 12.72
+    12.72 + 7.00 = 19.72
+
+so the frame is CPU time **plus** the present wait, not their maximum. That is the signature of the
+drain: with the queue drained before every present the CPU cannot run ahead of the GPU by even one
+frame. The GPU-decode build has the same plateau (18.98, 19.28, 19.33, 19.35 ms) as the CPU-decode
+one (17.25-20.15 ms), so the decode is not what the plateau is made of.
+
+**The drain is on, and the app is why.** `SessionService.kt:580` adds
+`DROIDDECK_VN_SYNC_PRESENT=1` on the venus branch (commit `fcb2347`, an ancestor of HEAD), which
+re-enables the drain patch 0021 turned off by default. The log confirms it from the other side: the
+`present GPU wait` field is only ever assigned inside `if (sync_present)`, and it is nonzero
+(up to 94.4 ms) in the runs that show the plateau. The runs with `present GPU wait 0.00` are the
+ones launched with the per-game override.
+
+**The collapse to 3-6 fps is not the decode, and not the drain.** Two clean separations:
+
+  * Windows with `present GPU wait 0.00` still read 9.8-19.6 fps, so the drain is not what produces
+    the collapse (it is what caps the plateau).
+  * The decode share is weak-to-moderate at best (`corr(decode_ms, fps) = -0.54`, `-0.29` on the
+    strict window set) and there are windows with **0-0.5% decode share and 9-19 fps**. So decode is
+    a contributor while the level streams, not the steady-state cause.
+
+**What does scale with the collapse is the descriptor storm.** In the fast window the host ring is
+`766 ms busy of 10 s` with `vkAllocateDescriptorSets 3413x`; in the slow window it is `2333-2915 ms
+busy of 10 s` with `vkAllocateDescriptorSets 11173x -> 66782x` and `vkUpdateDescriptorSets
+8027x -> 49499x`. The per-10s allocation count grows 20-50x exactly where the frame rate falls.
+`corr(vkExecuteCommandStreamsMESA ms, fps) = -0.57` is the strongest host correlation found.
+`guest VK_ERROR_OUT_OF_POOL_MEMORY` is ~490 per run in every run (flat), and patch 0023's
+`deferring to the real pool` line fires once per run -- so the guest's shadow accounting is wrong
+once, 0023 hands the decision to the driver, and the real pool is what refuses afterwards. The
+refusals themselves are DXVK's own pools, which is why they are not the frame cost either.
+
+**Memory pressure is the other half.** The host logs `dma-heap ... total 1624, 15688.6 MiB` against
+a `heap 0 (15356 MiB)`, i.e. host-visible allocations reach essentially the whole heap, and the
+`native device-local` total grows with it. Host-visible memory comes from
+`/dev/dma_heap/system-uncached`, so every guest upload that lands there is uncached on the CPU side
+too.
+
+**What was tried and did not help.** The GPU BC decode (0024) with the raised cap took the decode
+cost from 3675 ms to 255 ms in the best windows and the plateau is byte-identical, so the decode is
+not on the critical path at the plateau. The descriptor deferral (0023) is correct but does not
+remove the host refusals. The BC7 GPU decode is off by default and stays off.
+
+**The fix this bundle argues for.** The plateau is the drain, the app forces the drain on, and the
+drain is a full `vkQueueWaitIdle`. The ordering it exists for -- the server must not read a
+swapchain image the frame is still writing -- is already available more cheaply: the ring seqno of
+the present's own submit, which is exactly what the implicit-fencing path in the same function
+waits on. Patch 0021 now waits on that seqno when `DROIDDECK_VN_SYNC_PRESENT=1` and falls back to
+`vn_QueueWaitIdle` only when there is no seqno to wait on. The white-frame ordering is preserved
+(the wait still covers the submit that hands the buffer to the server) but the CPU is no longer
+parked until the GPU is idle, so the frame can go back to max(cpu, gpu) instead of cpu + gpu.
+`DROIDDECK_VN_SYNC_PRESENT=0` remains the fast-path control and `=1` the drain control.

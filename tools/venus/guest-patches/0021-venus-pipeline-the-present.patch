@@ -78,7 +78,7 @@ diff -ru a/src/virtio/vulkan/vn_queue.c b/src/virtio/vulkan/vn_queue.c
  
     if (!submit->wsi_mem)
        return;
-@@ -1022,8 +1025,27 @@
+@@ -1022,8 +1025,39 @@
                     "forcing vkQueueWaitIdle before presenting");
        }
  
@@ -98,7 +98,20 @@ diff -ru a/src/virtio/vulkan/vn_queue.c b/src/virtio/vulkan/vn_queue.c
 +         sync_present = debug_get_bool_option("DROIDDECK_VN_SYNC_PRESENT", false);
 +      if (sync_present) {
 +         const int64_t start = os_time_get_nano();
-+         vn_QueueWaitIdle(submit->queue_handle);
++         /* Order the present after this frame's work without draining the whole queue.  The
++          * drain above is what the app's DROIDDECK_VN_SYNC_PRESENT=1 asks for, but it waits for
++          * the GPU to go idle, so the CPU cannot run ahead by even one frame and the frame time
++          * is CPU time plus GPU time in series: on Lake the per-window plateau was exactly
++          * cpu + present-wait (12.72 + 7.00 = 19.72 ms/frame) on every run.  The ring seqno of
++          * this submit is the same ordering the implicit-fencing path above relies on: the guest
++          * blocks until the host has executed through the submit that hands the buffer to the
++          * server, so the server cannot read an image the frame has not finished writing, but it
++          * does not wait for the GPU to idle.  Fall back to the drain when there is no seqno to
++          * wait on. */
++         if (submit->external_payload.ring_seqno_valid)
++            vn_ring_wait_seqno(dev->primary_ring, submit->external_payload.ring_seqno);
++         else
++            vn_QueueWaitIdle(submit->queue_handle);
 +         present_wait_ns = os_time_get_nano() - start;
 +      }
     }
