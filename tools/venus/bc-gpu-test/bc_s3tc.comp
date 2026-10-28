@@ -1,18 +1,21 @@
 #version 450
-/* DroidDeck: S3TC (BC1/BC2/BC3) block decode on the GPU.
+/* DroidDeck: BC block decode on the GPU, S3TC (BC1/BC2/BC3) and BC7 (BPTC).
  *
- * This must match bc_decode_s3tc() in vn_droiddeck_bc.c exactly: the CPU path and this shader are
+ * This must match the CPU decoders in vn_droiddeck_bc.c exactly: the CPU path and this shader are
  * two implementations of one contract, and bc-band-test/run.sh records what happens when a copy
  * drifts from the driver. bc-gpu-test/run.sh translates the SPIR-V that actually ships into C++
- * with SPIRV-Cross and runs it against the real decoder, so the two cannot disagree unnoticed.
+ * with SPIRV-Cross and runs it against the real decoders, so the two cannot disagree unnoticed.
  *
  * One invocation per 4x4 block. The destination is the RGBA8 image the BC format was substituted
  * with, so a pixel is exactly one uint: R in the low byte, A in the high byte.
  *
- * Block layout, in words (little-endian), matching the byte offsets the CPU decoder uses:
+ * S3TC block layout, in words (little-endian), matching the byte offsets the CPU decoder uses:
  *   BC1 (8 bytes):  w0 = c0 | c1<<16,  w1 = colour indices
  *   BC2/BC3 (16):   w0 = alpha bytes 0..3, w1 = alpha bytes 4..7,
  *                   w2 = c0 | c1<<16,      w3 = colour indices
+ *
+ * BC7 is 16 bytes like BC2/BC3 but has no fixed field layout: eight modes, each with its own
+ * subset count, endpoint and index widths. Its decode reads the block as bytes, not words.
  */
 
 layout(local_size_x = 64) in;
@@ -26,7 +29,7 @@ layout(set = 0, binding = 1, std430) buffer Dst { uint dst[]; };
  * before its next draw. Descriptor bindings are per bind point, so binding this set for compute
  * cannot disturb the program's graphics bindings. */
 layout(set = 0, binding = 2, std430) readonly buffer Params {
-   uint kind;      /* 0 BC1_RGB, 1 BC1_RGBA, 2 BC2, 3 BC3 */
+   uint kind;      /* 0 BC1_RGB, 1 BC1_RGBA, 2 BC2, 3 BC3, 4 BC7 */
    uint bw;        /* blocks across */
    uint dst_pitch; /* uint stride between destination rows */
    uint dst_off;   /* first destination word of this job */
@@ -78,6 +81,354 @@ bits3(uint lo, uint hi, uint t)
    return v & 7u;
 }
 
+/* ---- generated tables (gen-bc7-tables.py) ---- */
+/* BC7-TABLES-BEGIN (gen-bc7-tables.py) */
+/* Generated from texcompress_bptc_tmp.h by gen-bc7-tables.py. Do not edit. */
+const uint BC7_NSUBSETS[8] = uint[8](
+   3u, 2u, 3u, 2u, 1u, 1u, 1u, 2u
+);
+const uint BC7_NPART[8] = uint[8](
+   4u, 6u, 6u, 6u, 0u, 0u, 0u, 6u
+);
+const uint BC7_ROT[8] = uint[8](
+   0u, 0u, 0u, 0u, 1u, 1u, 0u, 0u
+);
+const uint BC7_IDSEL[8] = uint[8](
+   0u, 0u, 0u, 0u, 1u, 0u, 0u, 0u
+);
+const uint BC7_COLORBITS[8] = uint[8](
+   4u, 6u, 5u, 7u, 5u, 7u, 7u, 5u
+);
+const uint BC7_ALPHABITS[8] = uint[8](
+   0u, 0u, 0u, 0u, 6u, 8u, 7u, 5u
+);
+const uint BC7_EPBITS[8] = uint[8](
+   1u, 0u, 0u, 1u, 0u, 0u, 1u, 1u
+);
+const uint BC7_SHAREDPBITS[8] = uint[8](
+   0u, 1u, 0u, 0u, 0u, 0u, 0u, 0u
+);
+const uint BC7_INDEXBITS[8] = uint[8](
+   3u, 3u, 2u, 2u, 2u, 2u, 4u, 2u
+);
+const uint BC7_SECINDEXBITS[8] = uint[8](
+   0u, 0u, 0u, 0u, 3u, 2u, 0u, 0u
+);
+const uint BC7_PART1[64] = uint[64](
+   0x50505050u, 0x40404040u, 0x54545454u, 0x54505040u,
+   0x50404000u, 0x55545450u, 0x55545040u, 0x54504000u,
+   0x50400000u, 0x55555450u, 0x55544000u, 0x54400000u,
+   0x55555440u, 0x55550000u, 0x55555500u, 0x55000000u,
+   0x55150100u, 0x00004054u, 0x15010000u, 0x00405054u,
+   0x00004050u, 0x15050100u, 0x05010000u, 0x40505054u,
+   0x00404050u, 0x05010100u, 0x14141414u, 0x05141450u,
+   0x01155440u, 0x00555500u, 0x15014054u, 0x05414150u,
+   0x44444444u, 0x55005500u, 0x11441144u, 0x05055050u,
+   0x05500550u, 0x11114444u, 0x41144114u, 0x44111144u,
+   0x15055054u, 0x01055040u, 0x05041050u, 0x05455150u,
+   0x14414114u, 0x50050550u, 0x41411414u, 0x00141400u,
+   0x00041504u, 0x00105410u, 0x10541000u, 0x04150400u,
+   0x50410514u, 0x41051450u, 0x05415014u, 0x14054150u,
+   0x41050514u, 0x41505014u, 0x40011554u, 0x54150140u,
+   0x50505500u, 0x00555050u, 0x15151010u, 0x54540404u
+);
+const uint BC7_PART2[64] = uint[64](
+   0xaa685050u, 0x6a5a5040u, 0x5a5a4200u, 0x5450a0a8u,
+   0xa5a50000u, 0xa0a05050u, 0x5555a0a0u, 0x5a5a5050u,
+   0xaa550000u, 0xaa555500u, 0xaaaa5500u, 0x90909090u,
+   0x94949494u, 0xa4a4a4a4u, 0xa9a59450u, 0x2a0a4250u,
+   0xa5945040u, 0x0a425054u, 0xa5a5a500u, 0x55a0a0a0u,
+   0xa8a85454u, 0x6a6a4040u, 0xa4a45000u, 0x1a1a0500u,
+   0x0050a4a4u, 0xaaa59090u, 0x14696914u, 0x69691400u,
+   0xa08585a0u, 0xaa821414u, 0x50a4a450u, 0x6a5a0200u,
+   0xa9a58000u, 0x5090a0a8u, 0xa8a09050u, 0x24242424u,
+   0x00aa5500u, 0x24924924u, 0x24499224u, 0x50a50a50u,
+   0x500aa550u, 0xaaaa4444u, 0x66660000u, 0xa5a0a5a0u,
+   0x50a050a0u, 0x69286928u, 0x44aaaa44u, 0x66666600u,
+   0xaa444444u, 0x54a854a8u, 0x95809580u, 0x96969600u,
+   0xa85454a8u, 0x80959580u, 0xaa141414u, 0x96960000u,
+   0xaaaa1414u, 0xa05050a0u, 0xa0a5a5a0u, 0x96000000u,
+   0x40804080u, 0xa9a8a9a8u, 0xaaaaaa44u, 0x2a4a5254u
+);
+const uint BC7_ANCHOR_A[64] = uint[64](
+   15u, 15u, 15u, 15u, 15u, 15u, 15u, 15u, 15u, 15u, 15u, 15u, 15u, 15u, 15u, 15u,
+   15u, 2u, 8u, 2u, 2u, 8u, 8u, 15u, 2u, 8u, 2u, 2u, 8u, 8u, 2u, 2u,
+   15u, 15u, 6u, 8u, 2u, 8u, 15u, 15u, 2u, 8u, 2u, 2u, 2u, 15u, 15u, 6u,
+   6u, 2u, 6u, 8u, 15u, 15u, 2u, 2u, 15u, 15u, 15u, 15u, 15u, 2u, 2u, 15u
+);
+const uint BC7_ANCHOR_B[64] = uint[64](
+   3u, 3u, 15u, 15u, 8u, 3u, 15u, 15u, 8u, 8u, 6u, 6u, 6u, 5u, 3u, 3u,
+   3u, 3u, 8u, 15u, 3u, 3u, 6u, 10u, 5u, 8u, 8u, 6u, 8u, 5u, 15u, 15u,
+   8u, 15u, 3u, 5u, 6u, 10u, 8u, 15u, 15u, 3u, 15u, 5u, 15u, 15u, 15u, 15u,
+   3u, 15u, 5u, 5u, 5u, 8u, 5u, 10u, 5u, 10u, 8u, 13u, 15u, 12u, 3u, 3u
+);
+const uint BC7_ANCHOR_C[64] = uint[64](
+   15u, 8u, 8u, 3u, 15u, 15u, 3u, 8u, 15u, 15u, 15u, 15u, 15u, 15u, 15u, 8u,
+   15u, 8u, 15u, 3u, 15u, 8u, 15u, 8u, 3u, 15u, 6u, 10u, 15u, 15u, 10u, 8u,
+   15u, 3u, 15u, 10u, 10u, 8u, 9u, 10u, 6u, 15u, 8u, 15u, 3u, 6u, 6u, 8u,
+   15u, 3u, 15u, 15u, 15u, 15u, 15u, 15u, 15u, 15u, 15u, 15u, 3u, 15u, 15u, 8u
+);
+/* BC7-TABLES-END */
+
+/* ---- BC7 (BPTC) ----
+ *
+ * A port of decompress_rgba_unorm_block() from Mesa's texcompress_bptc_tmp.h, which is what the
+ * CPU path runs for BC7: bc_decode_s3tc() and bc_decode_rgtc() do not handle it, so the job falls
+ * through to util_format_translate. BC7 substitutes to RGBA8, four bytes a texel, so it shares
+ * this shader's one-uint-per-pixel destination and needs no change to the driver's copy path.
+ *
+ * Mode 0 is reserved; the reference writes zeroes for it. The tables are generated from the same
+ * header by gen-bc7-tables.py, because a wrong partition or anchor row reads a plausible wrong
+ * texel rather than crashing.
+ */
+
+/* extract_bits() walks the block as bytes, so this reads byte n of the 16-byte block. */
+uint
+bc7_byte(uint base, uint n)
+{
+   return (src[base + (n >> 2)] >> (8u * (n & 3u))) & 0xffu;
+}
+
+uint
+bc7_bits(uint base, uint bit_off, uint n_bits)
+{
+   uint result = 0u, got = 0u;
+   uint byte_index = bit_off >> 3;
+   uint bit_index = bit_off & 7u;
+   uint n_in_byte = min(n_bits, 8u - bit_index);
+   while (true) {
+      uint b = (bc7_byte(base, byte_index) >> bit_index) & ((1u << n_in_byte) - 1u);
+      result |= b << got;
+      n_bits -= n_in_byte;
+      if (n_bits == 0u)
+         return result;
+      got += n_in_byte;
+      byte_index++;
+      bit_index = 0u;
+      n_in_byte = min(n_bits, 8u);
+   }
+}
+
+/* expand_component(): copy the top bits into the unused low bits of a byte. */
+uint
+bc7_expand(uint v, uint n_bits)
+{
+   return (v << (8u - n_bits)) | (v >> (2u * n_bits - 8u));
+}
+
+/* interpolate(): weights indexed by index width. */
+uint
+bc7_interp(uint a, uint b, uint index, uint index_bits)
+{
+   uint w;
+   if (index_bits == 2u) {
+      uint w2[4] = uint[4](0u, 21u, 43u, 64u);
+      w = w2[index];
+   } else if (index_bits == 3u) {
+      uint w3[8] = uint[8](0u, 9u, 18u, 27u, 37u, 46u, 55u, 64u);
+      w = w3[index];
+   } else {
+      uint w4[16] = uint[16](0u, 4u, 9u, 13u, 17u, 21u, 26u, 30u, 34u, 38u, 43u, 47u,
+                            51u, 55u, 60u, 64u);
+      w = w4[index];
+   }
+   return ((64u - w) * a + w * b + 32u) >> 6u;
+}
+
+uint
+bc7_anchor(uint n_subsets, uint part, uint texel)
+{
+   if (texel == 0u)
+      return 1u;
+   if (n_subsets == 1u)
+      return 0u;
+   if (n_subsets == 2u)
+      return BC7_ANCHOR_A[part] == texel ? 1u : 0u;
+   return (BC7_ANCHOR_B[part] == texel || BC7_ANCHOR_C[part] == texel) ? 1u : 0u;
+}
+
+uint
+bc7_anchors_before(uint n_subsets, uint part, uint texel)
+{
+   uint count = 1u;
+   if (texel == 0u)
+      return 0u;
+   if (n_subsets == 2u) {
+      if (texel > BC7_ANCHOR_A[part])
+         count++;
+   } else if (n_subsets == 3u) {
+      if (texel > BC7_ANCHOR_B[part])
+         count++;
+      if (texel > BC7_ANCHOR_C[part])
+         count++;
+   }
+   return count;
+}
+
+/* extract_unorm_endpoints(): colour, then alpha, then the p-bits, then expand to a byte. */
+/* Returns the bit offset just past the endpoints, which is where the indices start.  GLSL passes
+ * scalars by value, so the caller cannot see bit_off advance inside here. */
+uint
+bc7_endpoints(uint base, uint bit_off, uint mode, out uint endpoints[6][4])
+{
+   uint n_subsets = BC7_NSUBSETS[mode];
+   uint color_bits = BC7_COLORBITS[mode];
+   uint alpha_bits = BC7_ALPHABITS[mode];
+   uint ep_pbits = BC7_EPBITS[mode];
+   uint shared_pbits = BC7_SHAREDPBITS[mode];
+   uint sub, e, comp;
+
+   for (comp = 0u; comp < 3u; comp++)
+      for (sub = 0u; sub < n_subsets; sub++)
+         for (e = 0u; e < 2u; e++) {
+            endpoints[sub * 2u + e][comp] = bc7_bits(base, bit_off, color_bits);
+            bit_off += color_bits;
+         }
+
+   uint n_comp = 4u;
+   if (alpha_bits > 0u) {
+      for (sub = 0u; sub < n_subsets; sub++)
+         for (e = 0u; e < 2u; e++) {
+            endpoints[sub * 2u + e][3] = bc7_bits(base, bit_off, alpha_bits);
+            bit_off += alpha_bits;
+         }
+   } else {
+      for (sub = 0u; sub < n_subsets; sub++)
+         for (e = 0u; e < 2u; e++)
+            endpoints[sub * 2u + e][3] = 255u;
+      n_comp = 3u;
+   }
+
+   if (ep_pbits != 0u) {
+      for (sub = 0u; sub < n_subsets; sub++)
+         for (e = 0u; e < 2u; e++) {
+            uint pbit = bc7_bits(base, bit_off, 1u);
+            bit_off += 1u;
+            for (comp = 0u; comp < n_comp; comp++) {
+               endpoints[sub * 2u + e][comp] = (endpoints[sub * 2u + e][comp] << 1u) | pbit;
+            }
+         }
+   } else if (shared_pbits != 0u) {
+      for (sub = 0u; sub < n_subsets; sub++) {
+         uint pbit = bc7_bits(base, bit_off, 1u);
+         bit_off += 1u;
+         for (e = 0u; e < 2u; e++)
+            for (comp = 0u; comp < n_comp; comp++)
+               endpoints[sub * 2u + e][comp] =
+                  (endpoints[sub * 2u + e][comp] << 1u) | pbit;
+      }
+   }
+
+   uint expand_bits = color_bits + ep_pbits + shared_pbits;
+   for (sub = 0u; sub < n_subsets; sub++)
+      for (e = 0u; e < 2u; e++) {
+         for (comp = 0u; comp < 3u; comp++)
+            endpoints[sub * 2u + e][comp] =
+               bc7_expand(endpoints[sub * 2u + e][comp], expand_bits);
+         if (alpha_bits > 0u)
+            endpoints[sub * 2u + e][3] =
+               bc7_expand(endpoints[sub * 2u + e][3], alpha_bits + ep_pbits + shared_pbits);
+      }
+   return bit_off;
+}
+
+void
+bc7_block(uint base, uint dst_base, uint bx, uint by)
+{
+   uint mode_num = 0u;
+   for (uint b = 0u; b < 8u; b++)
+      if ((bc7_byte(base, 0u) & (1u << b)) != 0u) {
+         mode_num = b + 1u;
+         break;
+      }
+   if (mode_num == 0u) {
+      /* Mode 0 is reserved.  The reference writes zeroes for the whole block, and the destination
+       * is not otherwise initialised, so leaving it alone would put stale bytes on screen. */
+      for (uint y = 0u; y < 4u; y++)
+         for (uint x = 0u; x < 4u; x++)
+            dst[dst_base + (by * 4u + y) * pc.dst_pitch + (bx * 4u + x)] = 0u;
+      return;
+   }
+
+   uint mode = mode_num - 1u;
+   uint n_subsets = BC7_NSUBSETS[mode];
+   uint bit_off = mode_num;
+
+   uint part = bc7_bits(base, bit_off, BC7_NPART[mode]);
+   bit_off += BC7_NPART[mode];
+
+   uint subsets = n_subsets == 1u ? 0u
+                  : (n_subsets == 2u ? BC7_PART1[part] : BC7_PART2[part]);
+
+   uint rotation = 0u;
+   if (BC7_ROT[mode] != 0u) {
+      rotation = bc7_bits(base, bit_off, 2u);
+      bit_off += 2u;
+   }
+   uint index_selection = 0u;
+   if (BC7_IDSEL[mode] != 0u) {
+      index_selection = bc7_bits(base, bit_off, 1u);
+      bit_off += 1u;
+   }
+
+   uint endpoints[6][4];
+   bit_off = bc7_endpoints(base, bit_off, mode, endpoints);
+
+   uint n_index_bits = BC7_INDEXBITS[mode];
+   uint n_sec = BC7_SECINDEXBITS[mode];
+
+   for (uint y = 0u; y < 4u; y++) {
+      for (uint x = 0u; x < 4u; x++) {
+         uint texel = x + y * 4u;
+         uint before = bc7_anchors_before(n_subsets, part, texel);
+         uint bo = bit_off + n_index_bits * texel - before;
+         uint sec_off = bit_off + 16u * n_index_bits - n_subsets + n_sec * texel - before;
+
+         uint subset = (subsets >> (texel * 2u)) & 3u;
+         uint anchor = bc7_anchor(n_subsets, part, texel);
+
+         uint ibits = anchor != 0u ? n_index_bits - 1u : n_index_bits;
+         uint idx0 = bc7_bits(base, bo, ibits);
+         uint idx1 = 0u;
+         if (n_sec != 0u) {
+            ibits = anchor != 0u ? n_sec - 1u : n_sec;
+            idx1 = bc7_bits(base, sec_off, ibits);
+         }
+
+         uint color_index = index_selection != 0u ? idx1 : idx0;
+         uint color_bits = index_selection != 0u ? n_sec : n_index_bits;
+
+         uint rgba[4];
+         for (uint comp = 0u; comp < 3u; comp++)
+            rgba[comp] = bc7_interp(endpoints[subset * 2u][comp],
+                                    endpoints[subset * 2u + 1u][comp],
+                                    color_index, color_bits);
+
+         /* Alpha uses the opposite index from the colour components. */
+         uint alpha_index, alpha_bits;
+         if (n_sec != 0u && index_selection == 0u) {
+            alpha_index = idx1;
+            alpha_bits = n_sec;
+         } else {
+            alpha_index = idx0;
+            alpha_bits = n_index_bits;
+         }
+         rgba[3] = bc7_interp(endpoints[subset * 2u][3], endpoints[subset * 2u + 1u][3],
+                              alpha_index, alpha_bits);
+
+         if (rotation != 0u) {
+            uint r = rotation - 1u;
+            uint t = rgba[r];
+            rgba[r] = rgba[3];
+            rgba[3] = t;
+         }
+
+         uint row = (by * 4u + y) * pc.dst_pitch + (bx * 4u + x);
+         dst[dst_base + row] = rgba[0] | (rgba[1] << 8) | (rgba[2] << 16) | (rgba[3] << 24);
+      }
+   }
+}
+
 void
 main()
 {
@@ -94,6 +445,13 @@ main()
    /* Source block rows can be padded: the driver's src_row is derived from bufferRowLength when
     * the program gave one, so the row a block sits in is not always bw blocks wide. */
    uint s = pc.src_off + by * pc.src_pitch + bx * words;
+
+   /* BC7 has no fixed field layout, so it decodes the whole block itself. */
+   if (pc.kind == 4u) {
+      bc7_block(s, pc.dst_off, bx, by);
+      return;
+   }
+
    uint w0 = src[s];
    uint w1 = src[s + 1u];
 

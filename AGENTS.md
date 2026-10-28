@@ -1107,6 +1107,46 @@ fail once the pool is exercised -- the same "the picture is wrong, not the call"
 of this file, and it is invisible to a shader-only test because the shader test never allocates a
 real set.
 
+### Which BC formats a program actually uses, and the shader now covering BC7
+
+The claim that the game "uses BC1/BC3/BC5/BC7" came from the launcher's probe list, not from a
+measurement: `app/src/main/cpp/deviceinfo/vkreport.c` asks about a fixed representative set
+regardless of the program, and all of them report `optimal tiling features = 0x0`, so the emulated
+path is what makes them work. Nothing in the driver logged which formats reached the BC path, so
+the shader work was being aimed by that list alone. The stats line now carries one more line per
+report:
+
+    BC textures by format (images/compressed MiB): BC1 412/38, BC3 96/11, BC7 7/2
+
+It is a single line, not one per format, because the guest log stops after 600 lines per process.
+Read it before widening the shader again: if the program's compressed bytes are almost all BC1/BC3
+the widening cannot move much of the decode off the CPU, and the frame collapse is elsewhere (see
+the bandwidth section above).
+
+**BC7 is decoded on the GPU as `kind == 4`.** It was the largest real gap that also fits the
+existing destination: `bc_sub()` maps BC7 to RGBA8, four bytes a texel, the same model the S3TC
+path already writes, so it needed no change to the copy path. BC4/BC5/BC6H substitute to 1, 2 and 8
+bytes a texel, so they do **not** fit the one-uint-per-pixel output and would need that path
+reworked first; BC4/BC5 also already have a CPU decoder (`bc_decode_rgtc`).
+
+BC7 has eight modes and no fixed field layout, so its decode reads the block as bytes
+(`bc7_byte`/`bc7_bits`) rather than as words, and the mode, partition and anchor tables are
+generated from Mesa's own `texcompress_bptc_tmp.h` by `gen-bc7-tables.py`. They are generated, not
+typed, because a wrong partition or anchor row does not crash -- it reads a plausible wrong texel.
+`run.sh` regenerates them and `check-bc7-tables.py` fails if the shader's copy is not the same
+numbers, the same anti-drift rule as `genref.py` and `check-embedded-spirv.py`.
+
+The reference for the BC7 test is `decompress_rgba_unorm_block()` extracted from that header by
+`genref-bc7.py`: the decoder the CPU path actually runs for BC7, since `bc_decode_s3tc()` and
+`bc_decode_rgtc()` do not handle it and the job falls through to `util_format_translate`. `test_bc7`
+compares whole images over 5000 random blocks, forcing each of the eight modes in turn plus the
+reserved mode (byte 0 == 0), whose zero-fill the reference writes and the shader must match.
+
+One bug that only the differential test could find: GLSL passes scalars by value, so
+`bc7_endpoints()` advancing its own `bit_off` did not reach the caller, and the index offsets were
+computed from the start of the endpoint block instead of the end. It compiled, it looked right, and
+it put every pixel in the wrong subset. `bc7_endpoints()` returns the new offset now.
+
 Two things the patch does **not** do, both recorded in the source: only the first Vulkan device
 decodes on the GPU (a second device logs a warning), and the GPU path has never run on hardware.
 There is no Vulkan implementation in the build environment, so it compiles and the shader is

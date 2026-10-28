@@ -28,7 +28,8 @@ def emit(words, out):
         f.write(
             "/* Generated from bc_s3tc.comp by tools/venus/bc-gpu-test/gen-spirv-header.py.\n"
             " * Do not edit: run.sh recompiles the .comp and fails if this array is not the same\n"
-            " * words.  The shader decodes one BC1/BC2/BC3 4x4 block per invocation. */\n"
+            " * words.  The shader decodes one 4x4 block per invocation: BC1/BC2/BC3 by kind, and\n"
+            " * BC7 (kind 4), which reads the block as bytes because it has no fixed field layout. */\n"
             "#ifndef VN_DROIDDECK_BC_SPIRV_H\n"
             "#define VN_DROIDDECK_BC_SPIRV_H\n"
             "\n"

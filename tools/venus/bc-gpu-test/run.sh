@@ -49,13 +49,25 @@ GLM=${GLM_DIR:-/usr/include}
 
 python3 "$HERE/genref.py" "$MESA/src/virtio/vulkan/vn_droiddeck_bc.c" "$OUT/ref_s3tc.c"
 
+# The BC7 partition/anchor/mode tables are generated from Mesa's header into the shader, because a
+# wrong row reads a plausible wrong texel rather than crashing.  Regenerate them and fail if the
+# shader's copy is not the same numbers.
+python3 "$HERE/gen-bc7-tables.py" "$MESA" "$OUT/bc7_tables.glsl"
+python3 "$HERE/check-bc7-tables.py" "$HERE/bc_s3tc.comp" "$OUT/bc7_tables.glsl"
+
 # The guest ICD cannot load a shader at runtime, so the SPIR-V is embedded in the driver as a C
 # array by gen-spirv-header.py. That array is what the GPU runs; if it drifts from bc_s3tc.comp,
 # the tested shader is no longer the shipped one. Compare the words.
 python3 "$HERE/check-embedded-spirv.py" "$OUT/bc_s3tc.spv" \
   "$MESA/src/virtio/vulkan/vn_droiddeck_bc_spirv.h"
 
-cp "$HERE/ref_s3tc.h" "$HERE/test_s3tc.cpp" "$OUT/"
+python3 "$HERE/genref-bc7.py" "$MESA" "$OUT/ref_bc7.c"
+
+cp "$HERE/ref_s3tc.h" "$HERE/test_s3tc.cpp" "$HERE/test_bc7.cpp" "$OUT/"
 g++ -O1 -g -std=c++14 -I"$OUT" -I"$SC_INC" -I"$GLM" \
   -o "$OUT/test_s3tc" "$OUT/test_s3tc.cpp" -lpthread
 "$OUT/test_s3tc"
+
+g++ -O1 -g -std=c++14 -I"$OUT" -I"$SC_INC" -I"$GLM" \
+  -o "$OUT/test_bc7" "$OUT/test_bc7.cpp" -lpthread
+"$OUT/test_bc7"
