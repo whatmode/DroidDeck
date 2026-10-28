@@ -1209,6 +1209,12 @@ Mesa does not parse as true) keeps it on the CPU, which is the decode that shipp
 commit and needs no new code. The rest of the GPU path (BC1/BC2/BC3) is unchanged and still on by
 default.
 
+Verified in `venus-bridge-build.yml` on `da47ddd`: the guest job compiled the ICD with all 24
+patches, passed the band split, and printed `1280000 pixels compared, 0 mismatches` and `1280000
+BC7 pixels compared, 0 mismatches, modes seen 0xff`. The published
+`libvulkan_panvk.so` in `Venus-Bridge-guest-mesa-25.2.5-84c1064e.zip` carries the
+`DROIDDECK_VN_BC7_GPU` string, so the switch is in the artifact the phone installs.
+
 **A latent use-before-init came out of this.** `bc_gpu_copy()` dereferences `cmd->dd_bc` through
 `bc_chunk_gpu_current()`, and `vn_dd_bc_copy_begin()` called it *before* the `calloc` that creates
 `cmd->dd_bc` -- the allocation sat below the GPU call, on the CPU fallback only. It was masked in
