@@ -1123,11 +1123,13 @@ Read it before widening the shader again: if the program's compressed bytes are 
 the widening cannot move much of the decode off the CPU, and the frame collapse is elsewhere (see
 the bandwidth section above).
 
-**BC7 is decoded on the GPU as `kind == 4`.** It was the largest real gap that also fits the
-existing destination: `bc_sub()` maps BC7 to RGBA8, four bytes a texel, the same model the S3TC
-path already writes, so it needed no change to the copy path. BC4/BC5/BC6H substitute to 1, 2 and 8
-bytes a texel, so they do **not** fit the one-uint-per-pixel output and would need that path
-reworked first; BC4/BC5 also already have a CPU decoder (`bc_decode_rgtc`).
+**BC7 is decoded on the GPU as `kind == 4`, but only with `DROIDDECK_VN_BC7_GPU=1`.** It was the
+largest real gap that also fits the existing destination: `bc_sub()` maps BC7 to RGBA8, four bytes a
+texel, the same model the S3TC path already writes, so it needed no change to the copy path.
+BC4/BC5/BC6H substitute to 1, 2 and 8 bytes a texel, so they do **not** fit the one-uint-per-pixel
+output and would need that path reworked first; BC4/BC5 also already have a CPU decoder
+(`bc_decode_rgtc`). The switch is off by default -- see "BC7 is off on the GPU by default again"
+below for the measurement that put it there.
 
 BC7 has eight modes and no fixed field layout, so its decode reads the block as bytes
 (`bc7_byte`/`bc7_bits`) rather than as words, and the mode, partition and anchor tables are
@@ -1182,6 +1184,38 @@ BC textures: decoding on the GPU (DROIDDECK_VN_BC_GPU), alignment N
 
 or one of the two fallback lines (`... staying on the CPU`, `a second Vulkan device ...`). Absence
 of all three means the copy never reached the BC path at all.
+
+BC7 has its own switch in the same file, off unless set: `DROIDDECK_VN_BC7_GPU=1` sends BC7 to the
+GPU, and leaving it unset (or `=0`) keeps it on the CPU. See the next section for why.
+
+### BC7 is off on the GPU by default again (`DROIDDECK_VN_BC7_GPU`)
+
+The BC7 GPU decode shipped on by default and is now opt-in, for two measured reasons.
+
+- **It cannot move the frame rate.** The per-format stats line from the device says BC7 is **1.4%**
+  of the compressed bytes (`BC7 44/8M` against `BC1 60.4%/349M` and `BC3 38.1%/220M`). Even a free
+  decode of that share is inside the noise of a 24 fps frame. The FPS target is not reachable from
+  this format, so leaving it on the CPU costs nothing that was ever going to be won.
+- **It is the only thing that changed for BC7, and the logs after it shipped report black
+  textures.** The shader itself is not suspect: `bc-gpu-test/run.sh` translates the shipped SPIR-V
+  and compares it against Mesa's own `decompress_rgba_unorm_block()` over 1.28M pixels with all
+  eight modes forced -- `0 mismatches`. The tables match `texcompress_bptc_tmp.h`, and the embedded
+  array matches the tested shader. So the decode is byte-exact in the differential test while the
+  GPU path around it has never run on hardware (there is no Vulkan implementation in the build
+  environment), which is exactly the gap a test cannot cover.
+
+`DROIDDECK_VN_BC7_GPU=1` puts BC7 back on the GPU for a re-test; the default (`=0`, and anything
+Mesa does not parse as true) keeps it on the CPU, which is the decode that shipped before the BC7
+commit and needs no new code. The rest of the GPU path (BC1/BC2/BC3) is unchanged and still on by
+default.
+
+**A latent use-before-init came out of this.** `bc_gpu_copy()` dereferences `cmd->dd_bc` through
+`bc_chunk_gpu_current()`, and `vn_dd_bc_copy_begin()` called it *before* the `calloc` that creates
+`cmd->dd_bc` -- the allocation sat below the GPU call, on the CPU fallback only. It was masked in
+practice (the first upload in a command buffer is usually larger than the 8 MiB per-copy cap, which
+returns to the CPU path, and that path allocates the state), which is why 761 logged GPU decodes
+did not crash. It is not masked for a small first upload. The allocation now happens before the GPU
+call, so the state exists on both paths.
 
 ### Generating the patch
 
