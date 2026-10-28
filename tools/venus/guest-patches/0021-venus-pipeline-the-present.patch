@@ -78,7 +78,7 @@ diff -ru a/src/virtio/vulkan/vn_queue.c b/src/virtio/vulkan/vn_queue.c
  
     if (!submit->wsi_mem)
        return;
-@@ -1022,8 +1025,39 @@
+@@ -1022,8 +1025,40 @@
                     "forcing vkQueueWaitIdle before presenting");
        }
  
