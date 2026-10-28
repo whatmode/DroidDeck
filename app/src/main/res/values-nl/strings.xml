@@ -500,7 +500,6 @@
     <string name="drawer_open_qam">Snelmenu openen</string>
     <string name="drawer_prev_page">Vorige pagina</string>
     <string name="drawer_next_page">Volgende pagina</string>
-    <string name="drawer_hud">Prestatie-HUD</string>
     <string name="drawer_scaling">Schaalmodus</string>
     <string name="drawer_scaling_sharpness">Schaalscherpte</string>
     <string name="drawer_effects">Schermeffecten</string>

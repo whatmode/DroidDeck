@@ -504,7 +504,6 @@
     <string name="drawer_open_qam">Otevřít nabídku Rychlý přístup</string>
     <string name="drawer_prev_page">Předchozí stránka</string>
     <string name="drawer_next_page">Další stránka</string>
-    <string name="drawer_hud">HUD výkonu</string>
     <string name="drawer_scaling">Režim škálování</string>
     <string name="drawer_scaling_sharpness">Ostrost škálování</string>
     <string name="drawer_effects">Efekty obrazovky</string>

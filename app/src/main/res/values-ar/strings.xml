@@ -508,7 +508,6 @@
     <string name="drawer_open_qam">فتح قائمة الوصول السريع</string>
     <string name="drawer_prev_page">الصفحة السابقة</string>
     <string name="drawer_next_page">الصفحة التالية</string>
-    <string name="drawer_hud">واجهة الأداء</string>
     <string name="drawer_scaling">وضع التحجيم</string>
     <string name="drawer_scaling_sharpness">حدة التحجيم</string>
     <string name="drawer_effects">مؤثرات الشاشة</string>

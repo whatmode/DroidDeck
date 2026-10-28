@@ -498,7 +498,6 @@
     <string name="drawer_open_qam">빠른 액세스 메뉴 열기</string>
     <string name="drawer_prev_page">이전 페이지</string>
     <string name="drawer_next_page">다음 페이지</string>
-    <string name="drawer_hud">성능 HUD</string>
     <string name="drawer_scaling">스케일링 모드</string>
     <string name="drawer_scaling_sharpness">스케일링 선명도</string>
     <string name="drawer_effects">화면 효과</string>

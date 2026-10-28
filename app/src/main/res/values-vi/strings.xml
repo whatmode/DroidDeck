@@ -498,7 +498,6 @@
     <string name="drawer_open_qam">Mở Quick Access Menu</string>
     <string name="drawer_prev_page">Trang trước</string>
     <string name="drawer_next_page">Trang sau</string>
-    <string name="drawer_hud">HUD hiệu năng</string>
     <string name="drawer_scaling">Chế độ chia tỷ lệ</string>
     <string name="drawer_scaling_sharpness">Độ sắc nét khi chia tỷ lệ</string>
     <string name="drawer_effects">Hiệu ứng màn hình</string>

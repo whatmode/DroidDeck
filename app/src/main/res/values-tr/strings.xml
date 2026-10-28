@@ -497,7 +497,6 @@
     <string name="drawer_open_qam">Hızlı Erişim Menüsünü aç</string>
     <string name="drawer_prev_page">Önceki sayfa</string>
     <string name="drawer_next_page">Sonraki sayfa</string>
-    <string name="drawer_hud">Performans HUD\'u</string>
     <string name="drawer_scaling">Ölçekleme modu</string>
     <string name="drawer_scaling_sharpness">Ölçekleme keskinliği</string>
     <string name="drawer_effects">Ekran efektleri</string>

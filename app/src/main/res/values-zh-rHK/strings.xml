@@ -498,7 +498,6 @@
     <string name="drawer_open_qam">開啟快速存取選單</string>
     <string name="drawer_prev_page">上一頁</string>
     <string name="drawer_next_page">下一頁</string>
-    <string name="drawer_hud">效能 HUD</string>
     <string name="drawer_scaling">縮放模式</string>
     <string name="drawer_scaling_sharpness">縮放銳利度</string>
     <string name="drawer_effects">畫面效果</string>

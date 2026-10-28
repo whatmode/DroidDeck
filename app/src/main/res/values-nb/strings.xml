@@ -500,7 +500,6 @@
     <string name="drawer_open_qam">Åpne Hurtigmenyen</string>
     <string name="drawer_prev_page">Forrige side</string>
     <string name="drawer_next_page">Neste side</string>
-    <string name="drawer_hud">Ytelses-HUD</string>
     <string name="drawer_scaling">Skaleringsmodus</string>
     <string name="drawer_scaling_sharpness">Skaleringsskarphet</string>
     <string name="drawer_effects">Skjermeffekter</string>

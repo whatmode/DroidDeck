@@ -500,7 +500,6 @@
     <string name="drawer_open_qam">Άνοιγμα Quick Access Menu</string>
     <string name="drawer_prev_page">Προηγούμενη σελίδα</string>
     <string name="drawer_next_page">Επόμενη σελίδα</string>
-    <string name="drawer_hud">HUD απόδοσης</string>
     <string name="drawer_scaling">Λειτουργία κλιμάκωσης</string>
     <string name="drawer_scaling_sharpness">Οξύτητα κλιμάκωσης</string>
     <string name="drawer_effects">Εφέ οθόνης</string>

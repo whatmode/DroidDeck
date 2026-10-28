@@ -500,7 +500,6 @@
     <string name="drawer_open_qam">Quick Access Menu खोलें</string>
     <string name="drawer_prev_page">पिछला पेज</string>
     <string name="drawer_next_page">अगला पेज</string>
-    <string name="drawer_hud">परफ़ॉर्मेंस HUD</string>
     <string name="drawer_scaling">स्केलिंग मोड</string>
     <string name="drawer_scaling_sharpness">स्केलिंग शार्पनेस</string>
     <string name="drawer_effects">स्क्रीन इफ़ेक्ट</string>

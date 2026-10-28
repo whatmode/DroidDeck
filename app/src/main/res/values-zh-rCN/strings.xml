@@ -498,7 +498,6 @@
     <string name="drawer_open_qam">打开快捷访问菜单</string>
     <string name="drawer_prev_page">上一页</string>
     <string name="drawer_next_page">下一页</string>
-    <string name="drawer_hud">性能 HUD</string>
     <string name="drawer_scaling">缩放模式</string>
     <string name="drawer_scaling_sharpness">缩放锐度</string>
     <string name="drawer_effects">屏幕效果</string>

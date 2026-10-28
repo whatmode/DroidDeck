@@ -500,7 +500,6 @@
     <string name="drawer_open_qam">Отваряне на менюто за бърз достъп</string>
     <string name="drawer_prev_page">Предишна страница</string>
     <string name="drawer_next_page">Следваща страница</string>
-    <string name="drawer_hud">HUD за производителност</string>
     <string name="drawer_scaling">Режим на мащабиране</string>
     <string name="drawer_scaling_sharpness">Острота на мащабиране</string>
     <string name="drawer_effects">Ефекти на екрана</string>

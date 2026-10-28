@@ -501,7 +501,6 @@
     <string name="drawer_open_qam">Открыть меню быстрого доступа</string>
     <string name="drawer_prev_page">Предыдущая страница</string>
     <string name="drawer_next_page">Следующая страница</string>
-    <string name="drawer_hud">HUD производительности</string>
     <string name="drawer_scaling">Режим масштабирования</string>
     <string name="drawer_scaling_sharpness">Резкость масштабирования</string>
     <string name="drawer_effects">Экранные эффекты</string>

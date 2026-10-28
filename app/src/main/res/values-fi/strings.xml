@@ -500,7 +500,6 @@
     <string name="drawer_open_qam">Avaa pikavalikko</string>
     <string name="drawer_prev_page">Edellinen sivu</string>
     <string name="drawer_next_page">Seuraava sivu</string>
-    <string name="drawer_hud">Suorituskyky-HUD</string>
     <string name="drawer_scaling">Skaalaustila</string>
     <string name="drawer_scaling_sharpness">Skaalauksen terävyys</string>
     <string name="drawer_effects">Näyttötehosteet</string>

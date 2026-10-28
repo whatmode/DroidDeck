@@ -499,7 +499,6 @@
     <string name="drawer_open_qam">Apri il menu di accesso rapido</string>
     <string name="drawer_prev_page">Pagina precedente</string>
     <string name="drawer_next_page">Pagina successiva</string>
-    <string name="drawer_hud">HUD prestazioni</string>
     <string name="drawer_scaling">Modalità di ridimensionamento</string>
     <string name="drawer_scaling_sharpness">Nitidezza del ridimensionamento</string>
     <string name="drawer_effects">Effetti schermo</string>

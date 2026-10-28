@@ -497,7 +497,6 @@
     <string name="drawer_open_qam">Schnellzugriffsmenü öffnen</string>
     <string name="drawer_prev_page">Vorherige Seite</string>
     <string name="drawer_next_page">Nächste Seite</string>
-    <string name="drawer_hud">Leistungs-HUD</string>
     <string name="drawer_scaling">Skalierungsmodus</string>
     <string name="drawer_scaling_sharpness">Skalierungsschärfe</string>
     <string name="drawer_effects">Bildschirmeffekte</string>

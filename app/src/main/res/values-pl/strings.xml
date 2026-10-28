@@ -504,7 +504,6 @@
     <string name="drawer_open_qam">Otwórz menu szybkiego dostępu</string>
     <string name="drawer_prev_page">Poprzednia strona</string>
     <string name="drawer_next_page">Następna strona</string>
-    <string name="drawer_hud">HUD wydajności</string>
     <string name="drawer_scaling">Tryb skalowania</string>
     <string name="drawer_scaling_sharpness">Ostrość skalowania</string>
     <string name="drawer_effects">Efekty ekranowe</string>

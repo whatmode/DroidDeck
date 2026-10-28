@@ -498,7 +498,6 @@
     <string name="drawer_open_qam">Buka Menu Akses Cepat</string>
     <string name="drawer_prev_page">Halaman sebelumnya</string>
     <string name="drawer_next_page">Halaman berikutnya</string>
-    <string name="drawer_hud">HUD performa</string>
     <string name="drawer_scaling">Mode penskalaan</string>
     <string name="drawer_scaling_sharpness">Ketajaman penskalaan</string>
     <string name="drawer_effects">Efek layar</string>

@@ -498,7 +498,6 @@
     <string name="drawer_open_qam">クイックアクセスメニューを開く</string>
     <string name="drawer_prev_page">前のページ</string>
     <string name="drawer_next_page">次のページ</string>
-    <string name="drawer_hud">パフォーマンスHUD</string>
     <string name="drawer_scaling">スケーリングモード</string>
     <string name="drawer_scaling_sharpness">スケーリングのシャープネス</string>
     <string name="drawer_effects">画面エフェクト</string>

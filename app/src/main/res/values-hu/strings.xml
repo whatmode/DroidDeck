@@ -500,7 +500,6 @@
     <string name="drawer_open_qam">Gyors hozzáférés menü megnyitása</string>
     <string name="drawer_prev_page">Előző oldal</string>
     <string name="drawer_next_page">Következő oldal</string>
-    <string name="drawer_hud">Teljesítmény HUD</string>
     <string name="drawer_scaling">Méretezési mód</string>
     <string name="drawer_scaling_sharpness">Méretezési élesség</string>
     <string name="drawer_effects">Képernyőeffektek</string>
