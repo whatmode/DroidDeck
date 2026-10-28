@@ -1278,6 +1278,37 @@ the formats the probe says this driver must emulate -- still decode on the CPU. 
 to those formats is the next step and needs a new `.comp`, a new reference decoder in `genref.py`
 and a new embedded SPIR-V array; it is not a config change.
 
+## The GPU BC decode declined the large textures, on a bound its own source size inflated
+
+`0024`'s GPU path is on by default, but every bundle on this machine predates it -- no `BC textures`
+line carries the `N on the GPU` counter that `0024` added -- so the path has no on-device evidence
+yet, in either direction. What the code says is that `bc_gpu_copy()` gave up on two size tests, and
+one of them was wrong:
+
+- `src_total` was computed as `align(w4 * h4 * 4 * slices)`, the *uncompressed* size, while the copy
+  it reserves for is `src_slice * slices` compressed -- `block` bytes a 4x4 block, so 4x smaller for
+  BC1 and 2x for BC3/BC7. It is now computed from the same `bufferRowLength`/`bufferImageHeight`
+  strides pass two copies with. Because the old expression was identical to `dst_total`, this did not
+  change which copies were accepted; it changes how much source capacity a chunk reserves.
+- The per-copy cap was `8u << 20` on both totals. The destination is RGBA8, so 8 MiB is 2 Mi blocks,
+  i.e. nothing past ~1448x1448: a 2048x2048 texture expands to 16 MiB and fell to the CPU, and with
+  it the sizes most of a level's bytes sit in. `bc_gpu_max_bytes()` now reads
+  `DROIDDECK_VN_BC_GPU_MAX_MB` (default 16, clamped 1..256), so the bound is 16 MiB and can be A/B'd
+  on a device without a rebuild. The chunk floor stays 8 MiB; a larger copy allocates its own size,
+  and `bc_chunk_take_pooled()` matches on all three capacities, so the pool is not over-read.
+
+This is not by itself the 2x. The cap decides the tail: the mean upload in these logs is small --
+`1651 uploads` expand to `1013 MiB`, so ~0.6 MiB of output each -- and most were already under 8 MiB.
+Raising the cap removes the fallback for the large textures, which is where the bytes are, but
+whether that pays depends on the GPU path's own cost (the staging copy, the dispatch, and a compute
+shader through venus), which only a device log with the `on the GPU` counter can settle.
+
+One earlier argument for the uncached-write cost does not survive the compiler. The section above
+notes the inner loop stores each pixel as four byte writes into host-visible memory; in the shipped
+build it does not: `bc_decode_task`'s disassembly has one `movb` and 122 32-bit stores, so GCC
+coalesces `row[i*4+0..3]` into one store. The byte-store count is a property of the source, not of
+the code that runs, so it cannot be offered as the machine-level cost of the decode.
+
 ## The power levers a plain app cannot have, and what the drawer offers instead
 
 The session drawer's performance page was extended with the Deck-QAM controls that are reachable
