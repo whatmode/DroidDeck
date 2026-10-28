@@ -1309,6 +1309,24 @@ build it does not: `bc_decode_task`'s disassembly has one `movb` and 122 32-bit 
 coalesces `row[i*4+0..3]` into one store. The byte-store count is a property of the source, not of
 the code that runs, so it cannot be offered as the machine-level cost of the decode.
 
+The driver that carries this is built and published by CI, not locally. On `0810dcc` the
+`venus-bridge-build` run compiled the ICD with all 24 patches, passed the band split (`75/75`) and
+the shader check (`0 mismatches`, S3TC and BC7), and the `publish` job clobbered the
+`venus-bridge-latest` release at 20:59. The guest zip's `libvulkan_panvk.so` carries
+`DROIDDECK_VN_BC_GPU_MAX_MB`, a string that exists only in the new patch, so the artifact the phone
+installs contains the raised cap and not the old 8 MiB bound. Two things about that check are worth
+knowing: the release's `target_commitish` stays at `84b66bfa` because the tag was created once and
+`gh release upload --clobber` only replaces assets, so the target is not the run that produced them
+-- the asset `created_at` is; and the published `libvulkan_panvk.so` is AArch64, so the default
+cannot be read out of the shipped binary here without an ARM disassembler, which is why the string
+is the evidence rather than the constant.
+
+Also worth checking before raising that cap: the use-before-init below was *masked* by the cap
+(`the first upload in a command buffer is usually larger than the 8 MiB per-copy cap`). The fix for
+it is in `vn_dd_bc_copy_begin()`, which now `calloc`s `cmd->dd_bc` before the GPU call, so the cap
+can move without exposing it. A smaller first upload that now takes the GPU path is exactly the case
+that used to crash, so that ordering is a precondition of this change and not an independent fix.
+
 ## The power levers a plain app cannot have, and what the drawer offers instead
 
 The session drawer's performance page was extended with the Deck-QAM controls that are reachable
