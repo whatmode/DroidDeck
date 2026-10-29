@@ -1498,40 +1498,34 @@ and 27.2 fps at 20:28. The limiter sets the ceiling and the vblank decides wheth
 separate, still-open question. With the limiter gone a frame just over the budget should present
 at the next vblank instead of the second one, which is the difference between ~30 and ~52 fps.
 
-### The plateau is not what the 2026-10-28-06 bundle shows, and that bundle predates the fix
+### Which build a bundle came from, and why that was unanswerable
 
-The `2026-10-28-06-steam` bundle (fetched from fex.net `tvosscy`) reports "still lags during
-gameplay". It is **not** a plateau and it is **not** a run of the fixed build, so it cannot confirm
-or refute anything above:
+The `2026-10-28-06-steam` bundle (fex.net share `tvosscy`) is the one the plateau analysis above
+reads. Two provenance facts about it matter more than its numbers, because they apply to every
+bundle collected before this session:
 
-- It predates `55fa3d8`: `proton/game-environment.json` still carries
-  `DXVK_CONFIG = "dxvk.maxFrameRate = 60; ..."`, so the app was still publishing the limiter.
-- Its `droiddeck_vulkan.txt` is a byte-identical **prefix** of the 2026-10-29-02 one -- same md5
-  over the first 20,759 lines -- so the two bundles overlap and are not independent samples. The
-  zip was written 2026-10-28 23:29, about 30 minutes after `b61900f` and before `a0deac6` (23:52)
-  and `7f3415a` (23:58), which is consistent with the prefix.
-- `session.log`'s `mali-gl <sha> mesa <sha>` line names the **mali-gl runtime's** build commit (a
-  separate release the APK downloads, per `mali-gl/release.env`), not the APK's and not the guest
-  ICD's. Do not read it as the build under test. The guest ICD's own identity is `device.txt`'s
-  `Linux driver` line, and until this session that line read
-  `DroidDeck-venus-bridge mesa-25.2.5 mesa-25.2.5 84c1064e` on **every** build: `build-guest.sh`
-  derived `name`/`driverVersion` from the upstream `mesa-25.2.5` tag commit and applied DroidDeck's
-  patches without committing, so no DroidDeck commit reached the string. The driver menu, the
-  report and the zip name were therefore all build-invariant. `build-guest.sh` now appends
-  DroidDeck's own commit (`dd.<sha>`) to the name, the version and the zip name, so the driver
-  differs per build and a stale one is visible.
+- **The guest ICD could not name its own build.** `device.txt`'s `Linux driver` line read
+  `DroidDeck-venus-bridge mesa-25.2.5 mesa-25.2.5 84c1064e` on this bundle *and* on
+  2026-10-29-02: `build-guest.sh` cloned the upstream `mesa-25.2.5` tag, applied DroidDeck's
+  patches without committing them, and then derived `meta.json`'s `name`/`driverVersion` and the
+  zip name from that tag's commit. No DroidDeck commit could reach any of the three, so the driver
+  menu, the session report and the artifact name were identical on every build the branch ever
+  produced. `app/build.gradle`'s `versionCode` 13 is hand-bumped and equally static, so `Version
+  0.4.0 (13)` does not identify a build either. A report from a stale install therefore looks
+  exactly like one from the current build -- which is how a fixed build gets reported broken.
+  `build-guest.sh` now appends DroidDeck's own commit as `dd.<sha>` to the name, the version and
+  the zip name and records `droiddeckCommit` in `meta.json`; `DeviceReport` prints `Build` and
+  `Commit` from `BuildConfig`. Read those two before attributing a result to a build.
+- **`session.log`'s `mali-gl <sha> mesa <sha>` line is not the build under test.** It names the
+  **mali-gl runtime's** commit (a separate release the APK downloads, per `mali-gl/release.env`),
+  not the APK's and not the guest ICD's. It happens to read `1806802` here, a 2026-10-24 commit
+  that is on neither `main` nor this branch, which is easy to mistake for the run's driver.
 
-What it does show is a **decay**, not a cap: all 14 Lake launches that ran three or more windows
-fall by more than half -- 12 open at 49-58 fps and 2 at 27 fps, and every one reaches 3-9 fps
-within two or three windows (~20-30 s). The flat 29.9-30.0 / 33.4 ms signature appears once in 173
-windows here against 26 times in the later bundle, so the "lag" is a progressive collapse and the
-limiter is a separate, later-pinned symptom. Correlates on this bundle: fps against decode share of
-wall time r = -0.68, against uploads r = -0.63; host ring busy p50 2253 ms of 10 s (22%) with 31 of
-51 windows over 2 s; `vkAllocateMemory` stalls of 719-1683 ms per 10 s window. The GPU decode does
-engage (90-98% of uploads) yet the CPU path still costs 20-33% of wall time, so the uncached-write
-cost above is still on the critical path in this build.
-
-One window is worth noting for the compute-pipeline storm already recorded above: ring
-`508148326272` shows `vkCreateComputePipelines 114x 9884.3 ms of 10 s` at pid 8036, whose launch
-is one of the collapses. The other four pipeline stalls total only 272 ms, so this is the same
-one-off rebuild shape, not a steady cost.
+One caveat on treating bundles as independent samples: this bundle's `steam/droiddeck_vulkan.txt`
+is a raw byte-prefix of the 2026-10-29-02 one (identical md5 `c27fa0d2ed72ddba8c099a098cac17ac`
+over all 2,835,755 bytes; 20,759 of that bundle's 24,020 lines). The log is appended across
+sessions, so a later bundle can contain an earlier one whole. Check the prefix before counting two
+bundles as two data points. This session ran 21:21:42Z to 21:28:55Z on 2026-10-28 (`events.jsonl`;
+`device.txt` prints the same instant as `23:21:42 GMT+02:00`), ending about 2.5 h before `a0deac6`
+(23:52Z) and `7f3415a` (23:58Z), so it does not carry the seqno-present change and the plateau it
+shows is the drain, as the section above establishes.
