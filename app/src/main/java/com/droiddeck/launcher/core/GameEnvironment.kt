@@ -29,6 +29,34 @@ object GameEnvironment {
 
     const val FORCE_SSBS = "DROIDDECK_FORCE_SSBS"
 
+    /* The per-game DXVK option editor that wrote `dxvk.maxFrameRate = 60` was removed, but the
+     * value it saved survives in this file and is republished to every launch, and nothing in the
+     * UI can change it any more. A limiter pinned to the panel rate is also the worst case for
+     * DXVK's limiter, which yields to vsync and then lands on every second vblank: a flat 2x
+     * vblank frame time (33.37 ms on a 60 Hz panel) that reads like a vsync or driver fault
+     * rather than a limiter. The session's own frame limiter is the supported knob, so a stale
+     * one is dropped here. Only the limiter key goes; other DXVK options are kept. */
+    private val FRAME_LIMITER = Regex("""(?:dxvk|dxgi|d3d9)\.maxFrameRate\s*=\s*[^;]*;?""")
+
+    fun withoutFrameLimiter(dxvk: String): String =
+        dxvk.replace(FRAME_LIMITER, "")
+            .split(';')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .joinToString("; ")
+
+    private fun withoutFrameLimiter(shared: Map<String, String?>): Map<String, String?> {
+        val dxvk = shared["DXVK_CONFIG"] ?: return shared
+        val cleaned = withoutFrameLimiter(dxvk)
+        if (cleaned == dxvk) return shared
+        val entries = shared.toMutableMap()
+        if (cleaned.isEmpty()) entries.remove("DXVK_CONFIG") else entries["DXVK_CONFIG"] = cleaned
+        return entries
+    }
+
+    fun withoutFrameLimiter(config: Config): Config =
+        config.copy(shared = withoutFrameLimiter(config.shared))
+
     fun effective(config: Config, preset: String, forceSsbs: Boolean = false): Map<String, String?> =
         defaults(preset, forceSsbs) + config.shared
 

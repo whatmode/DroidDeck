@@ -1447,3 +1447,37 @@ from the implicit-fencing path in the same function, not something this bundle m
 white-frame regression itself was never captured, so the fix is not yet confirmed against it.
 `DROIDDECK_VN_SYNC_PRESENT=0` remains the fast-path control and `=1` the drain control, so the
 next bundle can A/B the three (unset, =0, =1) without a rebuild.
+
+## The 30 fps plateau is a stale DXVK frame limiter, and the app republished it forever
+
+The `2026-10-29-02-steam` bundle pins the plateau to an exact number. Across every Lake run the
+frame time is either the frame's own work or **33.37 ms**, and 33.37 ms is two 16.67 ms vblanks,
+not one. The plateau's fps is 29.9-30.0, to the tenth, in every run that holds it. A frame time
+that lands on a multiple of the vblank is pacing, not cost, and the host agrees: the guest's ring
+is 19% busy, `render_scene` is 3.2 ms, and the compositor ticks 60/s while compositing exactly
+300 scenes per 10 s (0.499, a hard half rate).
+
+The pacing is DXVK's own limiter. The guest environment the app publishes carries
+
+    DXVK_CONFIG = "dxvk.maxFrameRate = 60; dxvk.enableGraphicsPipelineLibrary = False"
+
+and `dxvk.maxFrameRate = 60` on a 60 Hz panel is the worst case for DXVK's limiter: it paces to
+60, yields to vsync, and the frame then lands on every second vblank. DXVK's own `dxvk.conf`
+warns against exactly this and says an external limiter "WILL provide a significantly better
+experience". The value is not an app default any more -- it came from the per-game DXVK option
+editor removed in `f720f53`, whose text field defaulted to `dxvk.maxFrameRate = 60`. Removing the
+editor removed the only way to change it, but `GameEnvironmentStore.publish` re-reads the saved
+map from disk and republishes it to every launch, so the limiter is permanent and invisible.
+
+`GameEnvironment.withoutFrameLimiter` now strips a `dxvk|dxgi|d3d9.maxFrameRate` option on the
+publish path only. The saved settings keep whatever the user has, so nothing is destroyed; only
+the guest snapshot loses the limiter, and the session's own frame limiter stays the supported
+knob. The other option in that string, `enableGraphicsPipelineLibrary = False`, is left alone: it
+is a hand-set value, it is `Auto` by default, and turning GPL off costs pipeline-compile time
+rather than frame rate.
+
+What this does **not** explain is why the same build and the same limiter gave 52.7 fps at 15:25
+and 27.2 fps at 20:28. The limiter sets the ceiling and the vblank decides whether a frame clears
+16.67 ms, so the run-to-run split is the frame's own work crossing that line, and that is the
+separate, still-open question. With the limiter gone a frame just over the budget should present
+at the next vblank instead of the second one, which is the difference between ~30 and ~52 fps.

@@ -73,6 +73,27 @@ class GameEnvironmentStoreTest {
         SessionState.upscaleRatio = 0f
     }
 
+    @Test fun aStaleFrameLimiterIsNotPublishedButTheOtherOptionsAre() {
+        // The per-game DXVK editor that wrote this was removed; the value it saved is still on
+        // disk and used to be republished to every launch with no way to change it.
+        val saved = GameEnvironment.Config(
+            shared = mapOf(
+                "DXVK_CONFIG" to "dxvk.maxFrameRate = 60; dxvk.enableGraphicsPipelineLibrary = False",
+            ),
+        )
+        GameEnvironmentStore.save(context, saved)
+        assertEquals(saved, GameEnvironmentStore.read(context))
+        val published = GameEnvironmentStore.decode(JSONObject(guest.readText()))
+        assertEquals("dxvk.enableGraphicsPipelineLibrary = False", published.shared["DXVK_CONFIG"])
+    }
+
+    @Test fun aFrameLimiterAloneLeavesNoEmptyDxvkConfig() {
+        assertEquals("", GameEnvironment.withoutFrameLimiter("dxvk.maxFrameRate = 60"))
+        assertEquals("", GameEnvironment.withoutFrameLimiter("d3d9.maxFrameRate=0; dxgi.maxFrameRate = -1;"))
+        assertEquals("dxvk.tearFree = True", GameEnvironment.withoutFrameLimiter("dxvk.maxFrameRate = 60; dxvk.tearFree = True"))
+        assertEquals("dxvk.numCompilerThreads = 4", GameEnvironment.withoutFrameLimiter("dxvk.numCompilerThreads = 4"))
+    }
+
     @Test fun thePresetChangeReachesTheGuestWithoutTouchingTheSavedSettings() {
         SessionPrefs.setFexPreset(context, "PERFORMANCE_TSO")
         val original = GameEnvironment.Config(shared = mapOf("PROTON_LOG" to "1"))
