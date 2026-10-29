@@ -89,10 +89,10 @@ environment too and logs what it moved, so check for that line, and confirm the 
   and disables transaction elimination (CRC) tile write-out. Worth a launch before blaming the
   compiler: `csf-v11/019` is a CRC class where tiles stayed CRC-skipped and read back stale.
 
-## Reading a log zip: three traps that silently invalidate an A/B run
+## Reading a log zip: the traps that silently invalidate an A/B run
 
-All three were hit on a real session (2026-10-22-03 for the first two, 2026-10-23-05 for the
-third), so check for them before trusting any result.
+All of these were hit on a real session (2026-10-22-03 for the first two, 2026-10-23-05 for the
+third, 2026-10-28-06 for the last), so check for them before trusting any result.
 
 - There are no per-game environment overrides any more. `game-environment.json` carries a single
   `shared` map, so a diagnostic env var in `shared` reaches every game, and there is no UI row that
@@ -112,6 +112,18 @@ third), so check for them before trusting any result.
   the knob's own evidence (the layer's lines, the driver's) rather than for the string itself.
 - `d3d11.zeroWorkgroupMemory` is a no-op in DXVK 3.1.1 (see above), so its presence in a run's
   `DXVK_CONFIG` is a red herring, not a variable under test.
+- **`device.txt`'s `Version 0.4.0 (13)` does not identify the build, and neither does the driver's.**
+  `versionCode`/`versionName` in `app/build.gradle` are bumped by hand and had not moved for many
+  commits, so every install reports the same version and a report from a stale APK looks current.
+  The guest driver was equally build-invariant until this session (see the `dd.<sha>` note below).
+  Check what a bundle actually carries before accepting a result: `proton/game-environment.json`
+  shows whether app-side changes are present (e.g. a `dxvk.maxFrameRate` in `DXVK_CONFIG` means the
+  bundle predates `55fa3d8`), and the driver's own markers in `droiddeck_vulkan.txt` say which
+  guest patches were applied (e.g. `deferring to the real pool` for 0023, `decoding on the GPU` for
+  0024). A bundle can also be a byte-identical **prefix** of a later one -- the 2026-10-28-06
+  bundle is the first 20,759 lines of 2026-10-29-02's `droiddeck_vulkan.txt`, same md5 -- so
+  compare line counts and hashes before treating two bundles as two data points.
+  `DeviceReport` now prints `Build`/`Commit` from `BuildConfig` for reports made after this note.
 
 ## The 2026-10-23-06 D1 run: D1 applied, and the reboot is a GPU fault
 
@@ -1423,11 +1435,15 @@ busy of 10 s` with `vkAllocateDescriptorSets 11173x -> 66782x` and `vkUpdateDesc
 once, 0023 hands the decision to the driver, and the real pool is what refuses afterwards. The
 refusals themselves are DXVK's own pools, which is why they are not the frame cost either.
 
-**Memory pressure is the other half.** The host logs `dma-heap ... total 1624, 15688.6 MiB` against
-a `heap 0 (15356 MiB)`, i.e. host-visible allocations reach essentially the whole heap, and the
-`native device-local` total grows with it. Host-visible memory comes from
+**Host-visible allocations are heavy, but "total" is not live memory.** The host logs
+`dma-heap ... total 1624, 15688.6 MiB` against a `heap 0 (15356 MiB)`. Read `vkr_dd_memory_stats`
+in `tools/venus/patches/0009` before quoting that: `count`/`bytes` are per-interval, and
+`total_count`/`total_bytes` are **cumulative since process start**, so `total 1624, 15688.6 MiB`
+means 1624 allocations totalling 15.7 GB were *made*, not that 15.7 GB is resident. The heap
+number is not evidence of exhaustion or a leak. What it does show is churn: the peak interval was
+654 allocations / 6483 MiB in 10 s. Host-visible memory comes from
 `/dev/dma_heap/system-uncached`, so every guest upload that lands there is uncached on the CPU side
-too.
+too, which is the real cost.
 
 **What was tried and did not help.** The GPU BC decode (0024) with the raised cap took the decode
 cost from 3675 ms to 255 ms in the best windows and the plateau is byte-identical, so the decode is
@@ -1481,3 +1497,41 @@ and 27.2 fps at 20:28. The limiter sets the ceiling and the vblank decides wheth
 16.67 ms, so the run-to-run split is the frame's own work crossing that line, and that is the
 separate, still-open question. With the limiter gone a frame just over the budget should present
 at the next vblank instead of the second one, which is the difference between ~30 and ~52 fps.
+
+### The plateau is not what the 2026-10-28-06 bundle shows, and that bundle predates the fix
+
+The `2026-10-28-06-steam` bundle (fetched from fex.net `tvosscy`) reports "still lags during
+gameplay". It is **not** a plateau and it is **not** a run of the fixed build, so it cannot confirm
+or refute anything above:
+
+- It predates `55fa3d8`: `proton/game-environment.json` still carries
+  `DXVK_CONFIG = "dxvk.maxFrameRate = 60; ..."`, so the app was still publishing the limiter.
+- Its `droiddeck_vulkan.txt` is a byte-identical **prefix** of the 2026-10-29-02 one -- same md5
+  over the first 20,759 lines -- so the two bundles overlap and are not independent samples. The
+  zip was written 2026-10-28 23:29, about 30 minutes after `b61900f` and before `a0deac6` (23:52)
+  and `7f3415a` (23:58), which is consistent with the prefix.
+- `session.log`'s `mali-gl <sha> mesa <sha>` line names the **mali-gl runtime's** build commit (a
+  separate release the APK downloads, per `mali-gl/release.env`), not the APK's and not the guest
+  ICD's. Do not read it as the build under test. The guest ICD's own identity is `device.txt`'s
+  `Linux driver` line, and until this session that line read
+  `DroidDeck-venus-bridge mesa-25.2.5 mesa-25.2.5 84c1064e` on **every** build: `build-guest.sh`
+  derived `name`/`driverVersion` from the upstream `mesa-25.2.5` tag commit and applied DroidDeck's
+  patches without committing, so no DroidDeck commit reached the string. The driver menu, the
+  report and the zip name were therefore all build-invariant. `build-guest.sh` now appends
+  DroidDeck's own commit (`dd.<sha>`) to the name, the version and the zip name, so the driver
+  differs per build and a stale one is visible.
+
+What it does show is a **decay**, not a cap: all 14 Lake launches that ran three or more windows
+fall by more than half -- 12 open at 49-58 fps and 2 at 27 fps, and every one reaches 3-9 fps
+within two or three windows (~20-30 s). The flat 29.9-30.0 / 33.4 ms signature appears once in 173
+windows here against 26 times in the later bundle, so the "lag" is a progressive collapse and the
+limiter is a separate, later-pinned symptom. Correlates on this bundle: fps against decode share of
+wall time r = -0.68, against uploads r = -0.63; host ring busy p50 2253 ms of 10 s (22%) with 31 of
+51 windows over 2 s; `vkAllocateMemory` stalls of 719-1683 ms per 10 s window. The GPU decode does
+engage (90-98% of uploads) yet the CPU path still costs 20-33% of wall time, so the uncached-write
+cost above is still on the critical path in this build.
+
+One window is worth noting for the compute-pipeline storm already recorded above: ring
+`508148326272` shows `vkCreateComputePipelines 114x 9884.3 ms of 10 s` at pid 8036, whose launch
+is one of the collapses. The other four pipeline stalls total only 272 ms, so this is the same
+one-off rebuild shape, not a steady cost.

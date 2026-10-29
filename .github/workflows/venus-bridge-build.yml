@@ -145,4 +145,11 @@ jobs:
           gh release view "$tag" >/dev/null 2>&1 \
             || gh release create "$tag" --prerelease --target "$GITHUB_SHA" --title "Venus bridge (test)" \
                  --notes "Venus Vulkan bridge: vtest server for Android and the venus ICD for the Linux side, from ${GITHUB_SHA::7}."
+          # The guest zip carries its build in its name now, so --clobber alone would leave every
+          # earlier build's zip in place. Two zips and a `Venus-Bridge-guest-*.zip` glob is how a
+          # tester installs a stale driver and reports the new one as unfixed, so keep exactly the
+          # one this run built.
+          for old in $(gh release view "$tag" --json assets -q '.assets[].name' | grep '^Venus-Bridge-guest-.*\.zip$'); do
+            [ -f "dl/venus-guest/$old" ] || gh release delete-asset "$tag" "$old" -y
+          done
           gh release upload "$tag" dl/venus-server/*.tar.gz dl/venus-guest/*.zip dl/venus-guest/*.tar.gz --clobber

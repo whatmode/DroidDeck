@@ -11,6 +11,7 @@ import android.os.StatFs
 import android.provider.Settings
 import android.util.Log
 import android.view.Display
+import com.droiddeck.launcher.BuildConfig
 import com.droiddeck.launcher.gpu.LinuxVulkanDriver
 import com.droiddeck.launcher.gpu.LinuxVulkanDriverManager
 import com.droiddeck.launcher.gpu.TurnipDriver
@@ -107,6 +108,11 @@ object DeviceReport {
             val info = context.packageManager.getPackageInfo(context.packageName, 0)
             k("Version", "${info.versionName} (${info.longVersionCode})")
         }
+        /* The manifest version does not move between builds, so a report that stops here cannot
+         * say which build ran. Every report from a stale install then looks current, which is how
+         * a fixed build gets reported broken and a broken one gets reported fixed. */
+        k("Build", BuildConfig.BUILD_LABEL)
+        k("Commit", BuildConfig.SOURCE_COMMIT)
         k("Package", context.packageName)
         k("targetSdk", context.applicationInfo.targetSdkVersion)
         k("Native lib dir", context.applicationInfo.nativeLibraryDir)

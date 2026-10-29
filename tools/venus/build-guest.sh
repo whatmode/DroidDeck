@@ -40,19 +40,27 @@ rm -rf "$D"; mkdir -p "$D"
 cp "$SO" "$D/libvulkan_panvk.so"
 cp "$ICD" "$D/virtio_icd.aarch64.json"
 SHA=$(git -C "$WORK/mesa" rev-parse HEAD)
-python3 - "$D/meta.json" "$SHA" "$MESA_REF" <<'PY'
+# DroidDeck's own commit. The upstream tag alone names every build of this driver the same, so a
+# bundle, the driver menu and the session report all show one version for every build and none of
+# them can say which one ran. Keep it short: it lands in the driver name, which is the import id.
+DD_SHA=$(git -C "$HERE/../.." rev-parse --short=8 HEAD 2>/dev/null || true)
+[ -n "$DD_SHA" ] || DD_SHA=${GITHUB_SHA:-}
+DD_SHA=${DD_SHA:0:8}
+[ -n "$DD_SHA" ] || DD_SHA=unknown
+python3 - "$D/meta.json" "$SHA" "$MESA_REF" "$DD_SHA" <<'PY'
 import json, sys
-out, sha, ref = sys.argv[1:]
+out, sha, ref, dd = sys.argv[1:]
 json.dump({
     "schemaVersion": 1,
     "kind": "linux-vulkan-icd",
-    "name": "DroidDeck-venus-bridge " + ref,
-    "driverVersion": ref + " " + sha[:8],
+    "name": "DroidDeck-venus-bridge " + ref + " dd." + dd,
+    "driverVersion": ref + " " + sha[:8] + " dd." + dd,
     "libc": "glibc",
     "libraryName": "libvulkan_panvk.so",
     "abi": "linux-aarch64-glibc",
     "backend": "venus-vtest",
     "sourceCommit": sha,
+    "droiddeckCommit": dd,
 }, open(out, "w"), indent=2)
 PY
 # The GL part (build-guest-gl.sh) goes in under gl/. A failed GL build leaves the Vulkan
@@ -63,5 +71,5 @@ else
   echo "== GL BUILD FAILED"; tail -40 "$OUT/gl-build.log"; rm -rf "$OUT/venus-gl"
 fi
 if [ -d "$OUT/venus-gl" ]; then rm -rf "$D/gl"; cp -r "$OUT/venus-gl" "$D/gl"; fi
-(cd "$D" && sha256sum libvulkan_panvk.so > SHA256SUMS.txt && zip -qr "$OUT/Venus-Bridge-guest-${MESA_REF}-${SHA:0:8}.zip" .)
+(cd "$D" && sha256sum libvulkan_panvk.so > SHA256SUMS.txt && zip -qr "$OUT/Venus-Bridge-guest-${MESA_REF}-${SHA:0:8}-dd${DD_SHA}.zip" .)
 ls -la "$OUT"
