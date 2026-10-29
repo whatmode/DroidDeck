@@ -1634,3 +1634,48 @@ whole `2026-10-29-02-steam` file as a byte-prefix (byte-identical over the first
 md5 `8abaa3698a9134bbe5c6054890ffd0a0`), and only the last 1,505 lines are the new session
 (12:22:50Z-12:28:38Z). So the file's 221 frame windows are 215 from the earlier session and 6 from
 this one -- read the tail, not the file, and count 6 windows, not 221.
+
+## The driver owns its environment now (`tools/venus/guest-env`, `env` in the zip)
+
+Every knob this file recommends setting was unreachable on the device. The app spawns the guest
+with `/usr/bin/env -i` and builds the whole environment itself (`SessionService.addClientEnvironment`),
+so the only route for a variable was the user's env-switch file
+(`Android/data/com.droiddeck.launcher/files/droiddeck-env`), which `extraEnv()` reads from a path
+that did not exist in the bundles -- `device.txt` has no `droiddeck-env` line, so the file was
+never there and every A/B that asked the user to add a line was a no-op. The reports that followed
+("framepacing still happens", "there are still lags", "there are still stutter") were collected
+against a driver whose knobs nobody could set.
+
+The driver carries them itself now. `tools/venus/guest-env` is copied to the zip root as `env`
+by `build-guest.sh`, and the app reads it when the driver is selected:
+
+- `LinuxVulkanDriverManager.installDriver` keeps a root `env` entry (it used to drop every file it
+  did not recognise, so the channel could not exist before this).
+- `driverEnvironment(id, current)` parses it with the same reader as the GL part's `gl/env`:
+  one `NAME=value` per line, `#` comments, `KEY+=value` appends with `:`, `@GL@` is the driver
+  directory. The syntax is shared, so there is one parser and one test for both.
+- `SessionService` adds it **before** the GL part's `gl/env`, and both before `extraEnv()`, so a
+  line in the GL part wins over the same line here and the user's own file still wins over both.
+  The order is the existing one plus the driver's env at the front; nothing that worked before
+  changes position relative to the user's file.
+
+The zip repeats the settings in `gl/env` as well, because that is the channel **every shipped APK**
+already reads (`glEnvironment`, in the release since `51c52f2`). The root file is the source of
+truth and needs the new APK; the `gl/env` copy makes the same zip work on an APK that predates it.
+It is appended only when the GL part built, which is why the root copy is not optional.
+
+What ships baked in, and why these two:
+
+- `DROIDDECK_VN_SYNC_PRESENT=1` -- the ordered present. The app already set this line itself
+  (`SessionService.kt:580`); stating it in the driver is what makes it the driver's decision rather
+  than the APK's, and the app's line stays as the fallback for a driver with no `env`.
+- `DROIDDECK_VN_BC_GPU=1` -- the GPU BC decode, which is already the default. Stated so the zip
+  records which decode it carries, since the artifact is what a tester installs.
+
+The rest of the known knobs are in the file as commented lines with their evidence, so an
+experiment is a one-line edit, a push, and a driver install -- no APK, no file on the phone, no
+manual env. The `env` file is checked by `tools/tests/test_venus_guest_env.py`: every active name
+must be one the guest actually reads (a typo is otherwise silent -- the guest `getenv()`s a name
+nothing defines), values must be `0`/`1`/a number (`debug_get_bool_option` falls back to its
+default for anything else, so `=on` reads as the default), no duplicate names, and the build must
+both ship the file and fail if it is empty.

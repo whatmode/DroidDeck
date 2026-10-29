@@ -39,6 +39,12 @@ rm -rf "$D"; mkdir -p "$D"
 # libvulkan_freedreno/panvk/panfrost/lvp); meta.json's backend marks it as the venus ICD.
 cp "$SO" "$D/libvulkan_panvk.so"
 cp "$ICD" "$D/virtio_icd.aarch64.json"
+# The environment this driver needs (present ordering, which decode it carries). The app reads it
+# when the driver is selected, so a setting change ships as a driver and not as an APK build or a
+# file on the phone. It sits at the zip root, not under gl/, because the GL part below is optional
+# and a failed GL build must not take the Vulkan settings with it.
+cp "$HERE/guest-env" "$D/env"
+[ -s "$D/env" ] || { echo "guest-env is empty"; exit 1; }
 SHA=$(git -C "$WORK/mesa" rev-parse HEAD)
 # DroidDeck's own commit. The upstream tag alone names every build of this driver the same, so a
 # bundle, the driver menu and the session report all show one version for every build and none of
@@ -71,5 +77,14 @@ else
   echo "== GL BUILD FAILED"; tail -40 "$OUT/gl-build.log"; rm -rf "$OUT/venus-gl"
 fi
 if [ -d "$OUT/venus-gl" ]; then rm -rf "$D/gl"; cp -r "$OUT/venus-gl" "$D/gl"; fi
+# The GL part's env file is the one channel every shipped APK already reads, and it only exists
+# when the GL build succeeded. Repeat the driver's own settings there so a driver-only install
+# applies them on an APK that predates the root env file; the root copy stays the source of truth.
+if [ -f "$D/gl/env" ]; then
+  {
+    echo "# --- the Vulkan driver's own settings (see env at the driver root) ---"
+    grep -vE '^[[:space:]]*(#|$)' "$HERE/guest-env" || true
+  } >> "$D/gl/env"
+fi
 (cd "$D" && sha256sum libvulkan_panvk.so > SHA256SUMS.txt && zip -qr "$OUT/Venus-Bridge-guest-${MESA_REF}-${SHA:0:8}-dd${DD_SHA}.zip" .)
 ls -la "$OUT"

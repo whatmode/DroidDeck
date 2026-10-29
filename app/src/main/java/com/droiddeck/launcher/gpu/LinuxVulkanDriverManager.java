@@ -37,6 +37,13 @@ public class LinuxVulkanDriverManager {
     public static final String GL_DIR = "gl";
     public static final String GL_MARKER = "gl.json";
     public static final String GL_ENV = "env";
+    /**
+     * The driver's own env file at the zip root: one NAME=value per line, read when the driver is
+     * selected. It is what lets a driver carry its settings, so a knob that used to live in the
+     * APK or in the user's droiddeck-env changes by shipping a driver. Read before the GL part's
+     * env file, so the GL part can override a line here.
+     */
+    public static final String ENV_NAME = "env";
     /** Used when a zip's own ICD manifest states no api_version. */
     private static final String API_DEFAULT = "1.1.274";
     /** The zip's own ICD manifests, whose api_version the generated one carries over. */
@@ -107,6 +114,18 @@ public class LinuxVulkanDriverManager {
         File env = new File(gl, GL_ENV);
         String text = env.isFile() ? FileUtils.readString(env) : null;
         return parseGlEnv(text, gl.getAbsolutePath(), current);
+    }
+
+    /**
+     * What the session adds to its environment for the driver itself, from the env file at the
+     * driver's root (empty without one). Read before {@link #glEnvironment}, so a line in the GL
+     * part's own env file still wins.
+     */
+    public List<String> driverEnvironment(String id, List<String> current) {
+        if (!isInstalled(id)) return new ArrayList<>();
+        File env = new File(getDriverDir(id), ENV_NAME);
+        String text = env.isFile() ? FileUtils.readString(env) : null;
+        return parseGlEnv(text, getDriverDir(id).getAbsolutePath(), current);
     }
 
     /**
@@ -235,6 +254,10 @@ public class LinuxVulkanDriverManager {
                         } catch (Exception e) {
                             Log.w(TAG, "meta.json unreadable, ignoring: " + e.getMessage());
                         }
+                    } else if (path.equals(ENV_NAME) && isSafeFileName(base)) {
+                        // The driver's own environment. Kept verbatim: it is read back at session
+                        // start (driverEnvironment) and is how a driver carries its settings.
+                        Files.copy(zis, new File(tmpDir, ENV_NAME).toPath(), StandardCopyOption.REPLACE_EXISTING);
                     }
                 }
             }

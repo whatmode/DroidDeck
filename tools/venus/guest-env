@@ -1,0 +1,37 @@
+# DroidDeck venus-bridge guest driver: the environment this driver needs.
+#
+# The app reads this when the driver is selected and adds it to the session after its own
+# defaults and before the user's droiddeck-env, so a line here is the driver's own setting and
+# nothing on the phone has to be edited to change it. One NAME=value per line; "#" starts a
+# comment. This file is what makes the driver zip self-contained: the settings below used to
+# live in the APK or in droiddeck-env, where changing one meant an APK build or a file on the
+# device.
+#
+# Present ordering (guest-patches/0021). The queue drain before every present is skipped and the
+# present is ordered by this submit's ring seqno instead: a wait for the host to execute through
+# the submit, not for the GPU to go idle. =1 is the ordered present; =0 is the fast path with no
+# ordering at all.
+DROIDDECK_VN_SYNC_PRESENT=1
+#
+# BC textures are decoded on the GPU (guest-patches/0024). On by default; stated so the zip
+# records which decode it carries.
+DROIDDECK_VN_BC_GPU=1
+#
+# ---- Diagnostics. Uncomment one line, push, and CI builds a driver that carries it, so the test
+# ---- is a driver install and not an edit on the device.
+#
+# The test that decides the frame collapse: BC emulation off. The textures that needed decoding
+# stay empty, so the picture is wrong on purpose; the "frames:" line is the measurement (back to
+# ~50 fps means the BC path is the collapse).
+#DROIDDECK_VN_EMULATE_BC=0
+#
+# The pacing lever: uncap the nested refresh from the session's 60 Hz to the panel's 120 Hz.
+# Steam's UI can overrun at 120 Hz ("Fatal IO error 11").
+#BL_MALI_REFRESH=120
+#
+# The other end of the present A/B: no ordering before the present.
+#DROIDDECK_VN_SYNC_PRESENT=0
+#
+# BC7 on the GPU. Off by default: BC7 is 1.4% of the compressed bytes, so it cannot move the
+# frame rate, and the black-texture reports came after it shipped on.
+#DROIDDECK_VN_BC7_GPU=1

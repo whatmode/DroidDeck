@@ -574,9 +574,9 @@ class SessionService : Service() {
             // Guest patch 0021 skips the queue drain that used to run before every present. That
             // is where the 24->60 gain came from, but it also lets the server read a swapchain
             // image the GPU is still writing, which reads to the player as a white or garbled
-            // frame. Put the drain back to test whether it is the cause. The user's own
-            // environment file is added later and wins, so this can be set back to 0 to A/B it
-            // without another APK.
+            // frame. Put the ordered present back. The driver's own env file states this now (it
+            // is added below and wins), so this line is the fallback for a driver that ships
+            // without one; the user's environment file is added last and still wins over both.
             guest.add("DROIDDECK_VN_SYNC_PRESENT=1")
         }
         tuDebug(linuxDriverId)?.let { guest.add("TU_DEBUG=$it") }
@@ -607,8 +607,12 @@ class SessionService : Service() {
         if (SessionState.mode == MODE_STEAM && SessionPrefs.zramCompression(this) &&
             com.droiddeck.launcher.core.ZramSupport.supported()) guest.add("BL_ZRAM=1")
         guest.add("BANNER_AUDIO_DIRECT_DECAY=0")
-        // The selected driver's GL part (Zink and GLX/EGL built with it) and the settings it asks
-        // for; the user's own extra variables still come after and win.
+        // The selected driver's own settings and then its GL part (Zink and GLX/EGL built with
+        // it); the user's own extra variables still come after and win. The driver's env comes
+        // first so a line in the GL part's env file can override one here.
+        val driverEnv = LinuxVulkanDriverManager(this).driverEnvironment(linuxDriverId, guest)
+        if (driverEnv.isNotEmpty()) Log.i(TAG, "driver environment: " + driverEnv.joinToString(" "))
+        guest.addAll(driverEnv)
         LinuxVulkanDriverManager(this).glEnvironment(linuxDriverId, guest).let { env ->
             if (env.isNotEmpty()) Log.i(TAG, "driver GL part: " + env.joinToString(" "))
             guest.addAll(env)
