@@ -423,13 +423,18 @@ time plus GPU time in series instead of their maximum.
   is taken. The fence is the one passed to the blit `QueueSubmit`, so waiting on it is another
   `vn_WaitForFences` -> `vn_relax_fini`, landing in the same `VN_RELAX_REASON_FENCE` bucket as the
   `vn_QueueWaitIdle` drain. So there are two places to remove the per-present sync, not one.
-- **The drain is now off by default.** 0021 added `DROIDDECK_VN_SYNC_PRESENT` with the old
-  behaviour as the default (a no-op unless set to 0) because correctness had not been shown. The
-  on-device numbers settled it: on Lake with FEX defaults the drain was **89% of the frame**
-  (present GPU wait 17.6-18.0 ms of a 19.8 ms frame) and the game's own wait report agreed
-  (`fence 1558x 5952.8 ms`, `semaphore 1560x 5838.1 ms` in one 10 s window). The default is now
-  `false`; `DROIDDECK_VN_SYNC_PRESENT=1` restores the drain, so a title that tears or flickers can
-  be A/B'd against the old behaviour without a rebuild.
+- **The drain is now off by default, and `=1` is a seqno wait rather than the drain.** 0021 added
+  `DROIDDECK_VN_SYNC_PRESENT` with the old behaviour as the default (a no-op unless set to 0)
+  because correctness had not been shown. The on-device numbers settled it: on Lake with FEX
+  defaults the drain was **89% of the frame** (present GPU wait 17.6-18.0 ms of a 19.8 ms frame)
+  and the game's own wait report agreed (`fence 1558x 5952.8 ms`, `semaphore 1560x 5838.1 ms` in
+  one 10 s window). The default is now `false`. `a0deac6` then changed what `=1` *does*: it waits
+  on the present's own ring seqno instead of calling `vn_QueueWaitIdle`, and falls back to the
+  drain only when the submit carries no valid seqno. So the three states are: unset and `=0` are
+  the same fast path, and `=1` orders the present after its submit without parking the CPU until
+  the GPU idles. The white-frame symptom `=1` exists for is covered by that ordering only if the
+  seqno is sufficient for it, which is reasoning from the implicit-fencing path in the same
+  function and was never measured. To get the *old* drain back, use a build predating `a0deac6`.
 - The caveat that still stands: `venus_implicit_fencing` only switches the guest's assumption
   about the kernel driver. Here the server and the Android driver are also in play, and the
   virtio-gpu kernel driver treats everything as one fence context ("no synchronization needed").
@@ -927,7 +932,14 @@ renderer reports no implicit fencing, which is this guest. That drain was 89% of
 (17.6 ms of 19.8 ms), so 0021 skips it by default and the guest no longer waits for the frame's GPU
 work to finish before handing the buffer to the server. When that ordering is wrong for a title,
 the server can read the swapchain image while the GPU is still writing it, and the player sees a
-white or garbled frame. `DROIDDECK_VN_SYNC_PRESENT=1` puts the drain back.
+white or garbled frame.
+
+What `=1` does now is not the drain. `a0deac6` made it wait on the present's own ring seqno (and
+fall back to `vn_QueueWaitIdle` only when the submit has no valid seqno), which orders the present
+after its submit without parking the CPU until the GPU idles. The ordering is the same guarantee
+the drain gave; the cost is not. So `=1` is the cheap ordering and the *unset* default is "no
+ordering at all" -- the fast path. That also means this is not a drain/no-drain A/B any more: to
+put the old full drain back you need a build predating `a0deac6`.
 
 This is the honest reading of the evidence: the drain's removal was a deliberate speed choice whose
 comment says the ordering it relies on "is the design intent, not something this change proves",
@@ -944,15 +956,22 @@ plausibly a read of an image the GPU has not finished writing, which is the drai
 ## The venus session now sets `DROIDDECK_VN_SYNC_PRESENT=1` itself
 
 `SessionService.addClientEnvironment` adds `DROIDDECK_VN_SYNC_PRESENT=1` on the same branch that
-adds `BL_VENUS` and `VN_DEBUG`, so a venus session gets the present drain back without any file on
-the device. `extraEnv()` runs after that branch, so a line in the user's `droiddeck-env` file still
-wins: `DROIDDECK_VN_SYNC_PRESENT=0` returns to the fast path without another APK, and no line at all
-now means "drain on" rather than "drain off".
+adds `BL_VENUS` and `VN_DEBUG`, so a venus session gets the present ordering back without any file
+on the device. `extraEnv()` runs after that branch, so a line in the user's `droiddeck-env` file
+still wins: `DROIDDECK_VN_SYNC_PRESENT=0` returns to the fast path without another APK, and no line
+at all now means "seqno wait" rather than "no wait".
+
+Note what `=1` means changed underneath this setting. When the session started forcing it, `=1` was
+the full `vn_QueueWaitIdle` drain, so the build the user was testing had the drain on and the
+`=0`/unset control was the fast path. `a0deac6` then redefined `=1` as a wait on the present's own
+ring seqno with the drain only as a no-seqno fallback. The session still forces `=1`, so the
+default is still "on", but "on" is now the cheap ordering and the control `=0` is "no ordering".
+The env var is still the only thing that decides it, so the A/B is unchanged -- only what the two
+sides mean moved.
 
 This flips the default that guest patch 0021 chose. 0021 turned the drain off to win the frame time
 and left `DROIDDECK_VN_SYNC_PRESENT` as the way back; the white/garbled frames are the symptom that
-switch exists for, so the build the user is testing has it on. The env var is still the only thing
-that decides it, so the A/B is unchanged -- only the default moved.
+switch exists for, so the build the user is testing has the setting on.
 
 The APK is built by `workflow_dispatch` on the branch (`gh workflow run build.yml --ref
 venus-bridge`), which the `changes` gate lets through unconditionally and which skips the
@@ -1461,8 +1480,88 @@ the CPU is no longer parked until the GPU is idle, so the frame can go back to m
 instead of cpu + gpu. That the seqno wait is *sufficient* for the white-frame case is reasoning
 from the implicit-fencing path in the same function, not something this bundle measured: the
 white-frame regression itself was never captured, so the fix is not yet confirmed against it.
-`DROIDDECK_VN_SYNC_PRESENT=0` remains the fast-path control and `=1` the drain control, so the
-next bundle can A/B the three (unset, =0, =1) without a rebuild.
+`DROIDDECK_VN_SYNC_PRESENT=0` remains the fast-path control and `=1` the ordered-present control
+(see the `a0deac6` note above: `=1` is a seqno wait now, not the drain), so the next bundle can A/B
+the three (unset, =0, =1) without a rebuild.
+
+## The 2026-10-29-04 bundle: the limiter is gone, the plateau is gone, and the stutter tracks the decode
+
+This is the first bundle from a build with the frame limiter removed (`55fa3d8`), and it is the
+first that can answer the limiter section above. It is *not* a build with the per-build driver
+identity (`1076a5a`, 14:16Z): the session ran 12:22:50Z-12:28:38Z, so `device.txt` still reads the
+build-invariant `DroidDeck-venus-bridge mesa-25.2.5 mesa-25.2.5 84c1064e` and there is no `Commit`
+line. It does carry `a0deac6`/`7f3415a` (the seqno present) and `55fa3d8`, and its launch log
+confirms the limiter is gone:
+
+    prefix bundle   Found config env: dxvk.maxFrameRate = 60; dxvk.enableGraphicsPipelineLibrary = False
+    this bundle     Found config env: dxvk.enableGraphicsPipelineLibrary = False
+
+**The limiter was the plateau, and removing it removed the plateau.** The 29.9-30.0 fps / ~33.4 ms
+signature appears **1 of 6** game windows here against **26 of 150** in the bundle that still had the
+limiter. The window that does sit there is the first one (29.7 fps), which is the level load before
+the decode starts, not a steady state. So `55fa3d8` is confirmed against the report it was written
+for.
+
+**What is left is a collapse, and the decode tracks it.** The game runs 29.7 fps at 14:23:44,
+11.9 at 14:24:03, and then 5-7 fps from 14:24:16 to the end of the run. The decode windows line up
+with it:
+
+| window | decode ms | share of window | fps after |
+|---|---|---|---|
+| 14:24:02 | 0 (1 upload) | 0% | 11.9 |
+| 14:24:12 | 1757 | 17.4% | 5.0 |
+| 14:24:23 | 1964 | 19.3% | 7.3 |
+| 14:24:33 | 2470 | 24.7% | 5.5 |
+| 14:24:43 | 1364 | 13.6% | 6.1 |
+
+`corr(decode share, fps) = -0.873` over those five windows, the same sign and a similar strength to
+the -0.737 recorded for `2026-10-27-09`. The decode is running on the GPU (4220 of 4369 uploads in
+the worst window) with zero fallback copies and zero "uploads from memory the driver cannot read",
+so this is the *fixed* GPU path. But the magnitude does not add up: a 13-25% share cannot by itself
+cost the 6x between 33.7 ms and 180 ms/frame, so the decode is a marker for the collapse rather than
+its whole price -- exactly the tension the memory-bandwidth section records. `DROIDDECK_VN_EMULATE_BC=0`
+is still the one-setting test that separates "the BC path is the collapse" from "the frame's own
+traffic is", it is reachable from the `droiddeck-env` file with no rebuild, and it has still not been
+run in any bundle.
+
+**The stutter the report is about is the guest waiting on its own submits, and it grows with the
+decode.** The guest's wait report totals 15.1% of wall time in the first game window and 75.8% in
+the last, and the buckets are ordered `semaphore` then `ring seqno` then `fence`:
+
+    over  10s: semaphore 889 ms, ring seqno 594 ms, fence 30 ms      (14:23:39, 15.1% total)
+    over  10s: semaphore 5533 ms, ring seqno 1581 ms, ring space 420 ms, fence 49 ms  (14:24:52, 75.8%)
+
+`semaphore` is 72% of the last window's wait. `vkWaitSemaphores`/`vkQueueSubmit2` are also the top
+host cost in the same windows (899x 186 ms and 1087x 182 ms in one 10 s window), so the wait is real
+on both sides, not a guest-side accounting artifact. This is what a frame that misses its budget by
+a little looks like when the present is ordered on the ring seqno: the CPU is not parked until the
+GPU idles any more, but every frame that needs the previous frame's semaphore now waits for it.
+
+**The frame times are quantized to the vblank, so the cost and the pacing are separable here too.**
+Every game window's ms/frame is within 0.1-2.7% of an integer multiple of 16.667 ms:
+
+    33.71 = 2.02 vblanks   83.82 = 5.03   199.55 = 11.97   136.87 = 8.21   183.09 = 10.99   164.78 = 9.89
+
+The same holds in the prefix bundle, so this is not new. It means the frame is presenting at the next
+vblank after its work finishes, which is what you want; the collapse is the work, not the pacing.
+It also means a frame's cost is being rounded up to a vblank boundary, so a decode cost just over
+one vblank budget costs two.
+
+**The descriptor storm is unchanged and still not the frame rate.** The host refuses
+`vkAllocateDescriptorSets` 10806 times and the per-10s guest count reaches 237,610, against 290,288
+in the prefix bundle -- the same behaviour, in a session with a completely different frame curve.
+That is the third independent confirmation of the section above: the storm is a bug worth fixing and
+it is not the collapse.
+
+**The drain is gone, as designed.** The present GPU wait is 0.79-7.89 ms (2.5-5.8% of the frame),
+against the 17.6 ms / 89% drain the 0021 work was written for. So `a0deac6`'s seqno wait is doing
+what it claims: the present is ordered without the CPU parking until the GPU is idle. What it does
+not do is fix the collapse, which was never the drain.
+
+**The display flap storm is fixed.** `perf: display` appears 3 times, all `60 Hz`, against 2242
+alternating lines in the bundle that found it. `app.log` also shows `fps limit 0` and the session
+report shows `Session refresh 60.00 Hz` / `Panel refresh modes 120 Hz, 60 Hz`, so the nested refresh
+is still capped at 60 and `BL_MALI_REFRESH=120` remains the untried lever for the pacing half.
 
 ## The 30 fps plateau is a stale DXVK frame limiter, and the app republished it forever
 
@@ -1529,3 +1628,9 @@ bundles as two data points. This session ran 21:21:42Z to 21:28:55Z on 2026-10-2
 `device.txt` prints the same instant as `23:21:42 GMT+02:00`), ending about 2.5 h before `a0deac6`
 (23:52Z) and `7f3415a` (23:58Z), so it does not carry the seqno-present change and the plateau it
 shows is the drain, as the section above establishes.
+
+The `2026-10-29-04-steam` bundle repeats the pattern: its `steam/droiddeck_vulkan.txt` carries the
+whole `2026-10-29-02-steam` file as a byte-prefix (byte-identical over the first 3,281,184 bytes,
+md5 `8abaa3698a9134bbe5c6054890ffd0a0`), and only the last 1,505 lines are the new session
+(12:22:50Z-12:28:38Z). So the file's 221 frame windows are 215 from the earlier session and 6 from
+this one -- read the tail, not the file, and count 6 windows, not 221.
