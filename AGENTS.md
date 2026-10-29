@@ -1439,7 +1439,11 @@ drain is a full `vkQueueWaitIdle`. The ordering it exists for -- the server must
 swapchain image the frame is still writing -- is already available more cheaply: the ring seqno of
 the present's own submit, which is exactly what the implicit-fencing path in the same function
 waits on. Patch 0021 now waits on that seqno when `DROIDDECK_VN_SYNC_PRESENT=1` and falls back to
-`vn_QueueWaitIdle` only when there is no seqno to wait on. The white-frame ordering is preserved
-(the wait still covers the submit that hands the buffer to the server) but the CPU is no longer
-parked until the GPU is idle, so the frame can go back to max(cpu, gpu) instead of cpu + gpu.
-`DROIDDECK_VN_SYNC_PRESENT=0` remains the fast-path control and `=1` the drain control.
+`vn_QueueWaitIdle` only when there is no seqno to wait on. The wait still covers the submit that
+hands the buffer to the server, so the ordering the drain existed for is kept by construction, but
+the CPU is no longer parked until the GPU is idle, so the frame can go back to max(cpu, gpu)
+instead of cpu + gpu. That the seqno wait is *sufficient* for the white-frame case is reasoning
+from the implicit-fencing path in the same function, not something this bundle measured: the
+white-frame regression itself was never captured, so the fix is not yet confirmed against it.
+`DROIDDECK_VN_SYNC_PRESENT=0` remains the fast-path control and `=1` the drain control, so the
+next bundle can A/B the three (unset, =0, =1) without a rebuild.
