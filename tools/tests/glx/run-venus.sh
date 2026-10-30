@@ -217,6 +217,8 @@ bc_native_case() {  # name, client env...
   grep "allocations in" $OUT/server-$name.log | tail -1
   NATIVE=$(grep "allocations in" $OUT/server-$name.log | sed 's/.*native device-local [0-9]* ([0-9.]* MiB, total \([0-9]*\).*/\1/' | sort -n | tail -1)
   echo "== $name: native allocations ${NATIVE:-0}"
+  # its own annotation: the report chunks run out before this section
+  printf '::notice title=bc native %s::%s\n' "$name" "$( { tail -n +$((before + 1)) $L | grep " vkbc" | tail -8; grep -E "memory type|allocations in|rror" $OUT/server-$name.log | sort | uniq -c | sort -rn | head -12; } | sed 's/%/%25/g' | cut -c1-250 | awk 'BEGIN{ORS="%0A"}{print}')" >&3
 }
 echo "---- BC decode buffers with the phone's memory types (expect native memory)"
 bc_native_case bcnative
