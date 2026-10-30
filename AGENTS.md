@@ -1740,3 +1740,84 @@ must be one the guest actually reads (a typo is otherwise silent -- the guest `g
 nothing defines), values must be `0`/`1`/a number (`debug_get_bool_option` falls back to its
 default for anything else, so `=on` reads as the default), no duplicate names, and the build must
 both ship the file and fail if it is empty.
+
+## The 2026-10-30-02 bundle: the fix ran, the stutter is unchanged, and the GPU BC decode is cleared
+
+The report is "Didn't help to fix stuttering" against the `82bcf65` build. `device.txt` reads
+`Build remote clean · pr4 at 82bcf65` and `Linux driver ... dd.82bcf651`, so this bundle is the
+first one that carries the precedence fix -- the user's `droiddeck-env` can override a driver knob
+again. It does not help, and the reason is the one recorded two sections up: `82bcf65` restored the
+escape hatch, it never claimed to be the stutter fix. The stutter is the pre-existing collapse.
+
+**Retrieving this bundle needs a browser User-Agent.** The share is `is_anon: false`, so the
+anonymous token alone is not enough: `fs17.fex.net/download/<id>/<code>` answers `410` to
+`curl -H "Authorization: Bearer $token"` with no UA and `200` with `-A "Mozilla/5.0 ... Chrome/120"`.
+The 410 is the gate, not a dead link -- do not conclude the share expired.
+
+**The collapse is not the GPU BC decode.** This is the natural experiment the earlier notes wanted:
+sessions before 10-29 ran the CPU decode (`0019`/`0022`, no "decoding on the GPU" line), sessions
+from 10-29 on ran the GPU decode (`0024`). The collapse rate is the same:
+
+| bundle | decode | frame windows | fps p50 | share <15 fps |
+|---|---|---|---|---|
+| 10-26-21 | CPU | 22 | 45.1 | 27% |
+| 10-27-04 | CPU | 48 | 20.6 | 44% |
+| 10-27-09 | CPU | 106 | 17.3 | 48% |
+| 10-29-02 | GPU | 221 | 17.3 | 46% |
+| 10-29-07 | GPU | 268 | 15.7 | 48% |
+| 10-30-02 | GPU | 11 | 26.7 | 45% |
+
+Every session starts at 46-52 fps and ends in the 3-8 fps band; the GPU decode moved the decode
+cost (2.9 -> 1.9 ms/upload) and left the collapse where it was. So `DROIDDECK_VN_EMULATE_BC=0` is
+not the discriminator it was recorded as being, and the decode share (13-25% of a window) cannot
+pay for a 6x frame-time change either. The decode is a marker, not the price.
+
+**The one signature that does track the GPU decode is the 30.0 fps half-rate plateau**, and it is
+worth its own test rather than being folded into the collapse: it appears in 25 windows in each of
+the two GPU-decode bundles and in **0** windows of all five CPU-decode bundles. `55fa3d8` removed
+the DXVK frame limiter and `2026-10-29-04` showed the plateau gone, so a plateau that returns only
+with the GPU decode is either a present that lands on every second vblank or a limiter the decode's
+own submits re-introduce. Not established; recorded as the next thing to measure.
+
+**The compositor blocks on its own ring in every session, and that is not the collapse either.**
+`gamescope --backend` reports `tls ring seqno` waits of ~9.9 s in a 10 s window at startup and
+~7.1 s in the next window, in the CPU-decode bundles and the GPU ones alike (`10-27-09` 11:48:02
+and `10-30-02` 12:38:01 are the same numbers to a tenth of a percent). It is a fixed startup cost
+in the first two windows, not a state the session degrades into, and it is the same mechanism the
+`VN_RELAX_REASON_TLS_RING_SEQNO` note describes.
+
+**The decode's chunk pool is shared and sized for the wrong path, but it is not the collapse.**
+`bc_chunk_pool` is `BC_CHUNK_POOL_MAX 4` entries, added for the CPU path where a chunk is one
+buffer. A GPU chunk is three (dst + src + params) and `bc_chunk_gpu_new` only reuses a pooled entry
+when it is at least `BC_GPU_CHUNK_MIN` (8 MiB) in **both** dst and src plus `BC_GPU_PARAMS_MIN`
+(512 KiB) of params, so a 4-entry pool cannot serve the ~6 chunks a frame needs and the buffers are
+re-allocated per command buffer. The host accounting looks dramatic -- `dma-heap` 628 allocations /
+6311 MiB in one 10 s window, 15.0 GiB cumulative over a session, `vkAllocateMemory` 616 calls /
+1567 ms with a 149 ms worst call -- but **that is the level load, not the collapse**. Read
+`vkAllocateMemory` per game-ring window across `10-30-02`: 250x/737 ms, 616x/1567 ms, 200x/512 ms in
+windows 4-6, then **0x for eleven straight windows** (11-25) while the game sits at 3-8 fps. The
+churn stops and the collapse continues, so the pool is a load-time cost and not the sustained one.
+Widening it is still worth doing for load time, but it will not fix the stutter.
+
+**What the host spends its time on during the collapse is descriptor churn.** Per 10 s game-ring
+window in `10-30-02`, from window 8 on: `vkAllocateDescriptorSets` 130k-178k calls / 445-552 ms and
+`vkUpdateDescriptorSets` 97k-138k calls / 431-546 ms -- about **1 s of every 10 s window**, the two
+largest sustained entries, ahead of `vkExecuteCommandStreamsMESA` (540-880 calls / 700-1320 ms) and
+`vkWaitSemaphores` (780-1280 / 85-142 ms). This is not specific to the GPU decode: `10-27-09` (CPU
+decode) has a 147k-call window too. It is DXVK re-creating descriptor sets per frame, and it is the
+same population the 0023 fallback exists for -- that fallback does fire (0 lines in the three
+earliest bundles, 3/11/15/1 in the later ones), so the guest's shadow accounting is genuinely
+falling out of sync and every set from then on is a synchronous round trip.
+
+**The honest summary.** The collapse is a guest that spends most of each window blocked on its own
+submits (`semaphore` 2-5 s of every 10 s, per the guest's own wait report) while the host churns
+descriptor sets for ~10% of the window. The BC decode tracks it but does not cause it: the same
+collapse is present at the same rate with the decode on the CPU. Three things are worth separating
+next, in this order, because the first two need no rebuild:
+1. `DROIDDECK_VN_EMULATE_BC=0` from the game card's **Environment > Edit variables** field (which
+   `droiddeck-game-env`'s `apply_config` applies over the inherited environment, so it beats the
+   driver's `env`). This is the one test that settles decode-or-not, and it has still never been run.
+2. The descriptor churn: the next driver change to try is making the 0023 deferral sticky for the
+   whole pool (or fixing the accounting) so the host is not handed 130k sets a window.
+3. The 30.0 fps plateau, which *is* GPU-decode-specific and is the one thing that would explain a
+   report of framepacing rather than throughput.
