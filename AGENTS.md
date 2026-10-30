@@ -2054,3 +2054,27 @@ CI: `vkstats` prints an optimal and a linear image's allowed types; under the ph
 the optimal one must have no host-visible type and the linear one must keep them, and
 `DROIDDECK_VN_IMAGE_NATIVE=0` must bring them back. `mali-order` sets it too (it checks Zink's
 own order, which 0028 would otherwise decide for it).
+
+## The 2026-10-31-01 bundle (0028 on the device), and 0029: a 4 MiB ring
+
+User: "Still stutters but rarely". `dd.caf49ca3`.
+
+- **0028 landed:** `images: ... types 0x10`; the server's allocations are now native
+  (`native total 400, 7554 MiB` against `dma-heap 94, 1000 MiB`). Hitches are rarer.
+- **GPU time did not fall.** Steady state is still 8-14 fps with `gpu over 10 s: busy` 52-87%,
+  ~60 ms of GPU per frame -- the same as with dma-heap images. So the coherent dma-heap memory was
+  not the GPU's cost. The game renders at 1602x720 (`unity-settings.reg`), so ~60 ms is far more
+  than the resolution explains; the remaining suspects for the GPU are the BC substitutes (RGBA8 at
+  4-8x the bytes of the BC data the game was built for) and DXVK's render-pass structure on a tiler.
+- **What the rare stutters are.** The frame thread's (`dxvk-cs`) only real bridge wait is
+  `ring space`: 400-550 waits per 10 s, up to 61 ms each. The ring is 128 KiB, ~30 ms of Lake's
+  commands (~26k descriptor allocations/updates a second), and the server stalls longer than
+  that now and then: a native 256 MiB `vkAllocateMemory` (DXVK growing its heap) takes 60-95 ms,
+  and one `vkExecuteCommandStreamsMESA` took 155 ms. While the server is stuck, the ring fills and
+  the game's command thread stops.
+
+**0029.** The ring is 4 MiB (`DROIDDECK_VN_RING_KB`, a power of two from 128 to 16384; the
+server's `VKR_RING_BUFFER_MAX_SIZE` is 16 MiB). That holds over a second of Lake's commands, so a
+server stall of a few hundred ms no longer stops the game thread. The size is logged
+(`ring: 4096 KiB`). Expected on the device: `ring space` waits near zero, and the stalls that are
+left are the server's own (they still delay the frame's GPU work, but recording keeps going).

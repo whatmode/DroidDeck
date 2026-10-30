@@ -70,3 +70,7 @@ DROIDDECK_VN_BC_GPU=1
 # Games' textures and render targets in the server's native device-local memory (0028), instead of
 # the host-visible dma-heap type DXVK takes first. =0 offers the host-visible types again.
 #DROIDDECK_VN_IMAGE_NATIVE=0
+#
+# The command ring the game writes into, in KiB (0029; default 4096, was 128). A bigger ring lets the
+# game keep recording while the server is stuck on a slow call. 128 restores the old size.
+#DROIDDECK_VN_RING_KB=128

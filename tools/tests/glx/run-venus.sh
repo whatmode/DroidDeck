@@ -132,6 +132,7 @@ grep -q "descriptor pools over .*s: [1-9][0-9]* allocations refused by the guest
   && echo "PASS a full pool costs no round trip" || echo "FAIL a full pool costs no round trip"
 grep -q "gpu over .*as the union of [1-9][0-9]* timed" $OUT/statslog-default.txt && echo "PASS GPU busy measured by timestamps" \
   || { echo "FAIL GPU busy measured by timestamps"; grep "gpu" $OUT/statslog-default.txt | head -3; }
+grep -q "ring: 4096 KiB" $OUT/statslog-default.txt && echo "PASS the 4 MiB command ring" || { echo "FAIL the 4 MiB command ring"; grep "ring:" $OUT/statslog-default.txt | head -2; }
 grep -q "cpu over .*this program" $OUT/statslog-default.txt && echo "PASS this program's CPU use by thread" || echo "FAIL this program's CPU use by thread"
 grep "wait stack" $OUT/statslog-default.txt | grep -q "in thread 'vkstats'.* vn_[A-Za-z_]*+0x" \
   && echo "PASS wait stacks name the thread and the driver's functions" \
