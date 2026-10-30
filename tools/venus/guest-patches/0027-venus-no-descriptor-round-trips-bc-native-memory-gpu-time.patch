@@ -323,7 +323,7 @@ diff -ruN a/src/virtio/vulkan/vn_device.c b/src/virtio/vulkan/vn_device.c
     }
 diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck_bc.c
 --- a/src/virtio/vulkan/vn_droiddeck_bc.c	2026-10-30 19:31:04.000000000 +0000
-+++ b/src/virtio/vulkan/vn_droiddeck_bc.c	2026-10-30 20:18:03.137005156 +0000
++++ b/src/virtio/vulkan/vn_droiddeck_bc.c	2026-10-30 20:42:09.906421782 +0000
 @@ -154,6 +154,9 @@
  bc_decode_task(void *job, void *gdata, int thread_index);
  
@@ -479,7 +479,19 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck
        if (!(req.memoryRequirements.memoryTypeBits & (1u << i)))
           continue;
        if ((mp->memoryTypes[i].propertyFlags & want) == want) {
-@@ -985,8 +1065,8 @@
+@@ -541,6 +621,11 @@
+    }
+    if (type == UINT32_MAX)
+       goto fail_buffer;
++   static int logged[2];
++   if (!p_atomic_xchg(&logged[host_visible ? 1 : 0], 1))
++      vn_droiddeck_log("BC decode buffers (%s): memory type %u of %u, flags 0x%x, allowed 0x%x",
++                       host_visible ? "host-visible" : "device-local", type, mp->memoryTypeCount,
++                       mp->memoryTypes[type].propertyFlags, req.memoryRequirements.memoryTypeBits);
+    const VkMemoryAllocateInfo mai = {
+       .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+       .allocationSize = req.memoryRequirements.size,
+@@ -985,8 +1070,8 @@
        util_dynarray_append(&state->chunks, struct vn_dd_bc_chunk, pooled);
        return util_dynarray_top_ptr(&state->chunks, struct vn_dd_bc_chunk);
     }
@@ -490,7 +502,7 @@ diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck
     const VkDeviceSize params_alloc = bc_gpu_align_up(MAX2(params_size, BC_GPU_PARAMS_MIN), 64);
     struct vn_dd_bc_chunk chunk = {
        .gpu = true,
-@@ -1282,6 +1362,7 @@
+@@ -1282,6 +1367,7 @@
     unsigned kept = 0;
     for (unsigned i = 0; i < bc_chunk_pool.count; i++) {
        if (bc_chunk_pool.entries[i].device == device) {
