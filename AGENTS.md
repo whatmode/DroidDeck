@@ -953,25 +953,31 @@ accounting refused, and that refusal aborted the whole call with `pDescriptorSet
 saw a failed allocation and retried -- it never bound a half-written set. A garbled frame is more
 plausibly a read of an image the GPU has not finished writing, which is the drain.
 
-## The venus session now sets `DROIDDECK_VN_SYNC_PRESENT=1` itself
+## The driver's knobs are set by the driver, not by the APK
 
-`SessionService.addClientEnvironment` adds `DROIDDECK_VN_SYNC_PRESENT=1` on the same branch that
-adds `BL_VENUS` and `VN_DEBUG`, so a venus session gets the present ordering back without any file
-on the device. `extraEnv()` runs after that branch, so a line in the user's `droiddeck-env` file
-still wins: `DROIDDECK_VN_SYNC_PRESENT=0` returns to the fast path without another APK, and no line
-at all now means "seqno wait" rather than "no wait".
+`SessionService.addClientEnvironment` no longer states any knob the driver owns. It used to add
+`DROIDDECK_VN_SYNC_PRESENT=1` itself; that line is gone. The only place a driver knob is stated is
+the driver's own `env` file in its zip (`tools/venus/guest-env`), so changing one means shipping a
+driver and never an APK build. A knob the driver's `env` leaves commented is not in the environment
+the driver owns, so the user's `droiddeck-env` is still where that one is set.
+
+The environment the app *does* build is the session plumbing the guest cannot get from a static
+artifact -- `DROIDDECK_BWRAP_SOCKET`, `PULSE_SERVER`, `VK_ICD_FILENAMES`, `XDG_RUNTIME_DIR`,
+`BL_ANDROID_CLIPBOARD`, `FAKE_EVDEV_*`, `BL_WIDTH`/`BL_HEIGHT`, `BL_VENUS`, the CPU pins -- plus
+the non-driver Mesa/Steam knobs. Those name paths and values that exist only at run time on this
+device, so they cannot live in a zip downloaded from CI.
 
 Note what `=1` means changed underneath this setting. When the session started forcing it, `=1` was
 the full `vn_QueueWaitIdle` drain, so the build the user was testing had the drain on and the
 `=0`/unset control was the fast path. `a0deac6` then redefined `=1` as a wait on the present's own
-ring seqno with the drain only as a no-seqno fallback. The session still forces `=1`, so the
-default is still "on", but "on" is now the cheap ordering and the control `=0` is "no ordering".
-The env var is still the only thing that decides it, so the A/B is unchanged -- only what the two
-sides mean moved.
+ring seqno with the drain only as a no-seqno fallback. The driver's `env` now states `=1`, so the
+default is still "on", but "on" is the cheap ordering and the control `=0` is "no ordering". The
+env var is still the only thing that decides it, so the A/B is unchanged -- only what the two sides
+mean moved, and now the line that sets it ships with the driver.
 
 This flips the default that guest patch 0021 chose. 0021 turned the drain off to win the frame time
 and left `DROIDDECK_VN_SYNC_PRESENT` as the way back; the white/garbled frames are the symptom that
-switch exists for, so the build the user is testing has the setting on.
+switch exists for, so the driver's `env` states it on.
 
 The APK is built by `workflow_dispatch` on the branch (`gh workflow run build.yml --ref
 venus-bridge`), which the `changes` gate lets through unconditionally and which skips the
@@ -1654,21 +1660,24 @@ by `build-guest.sh`, and the app reads it when the driver is selected:
 - `driverEnvironment(id, current)` parses it with the same reader as the GL part's `gl/env`:
   one `NAME=value` per line, `#` comments, `KEY+=value` appends with `:`, `@GL@` is the driver
   directory. The syntax is shared, so there is one parser and one test for both.
-- `SessionService` adds it **before** the GL part's `gl/env`, and both before `extraEnv()`, so a
-  line in the GL part wins over the same line here and the user's own file still wins over both.
-  The order is the existing one plus the driver's env at the front; nothing that worked before
-  changes position relative to the user's file.
+- `applyDriverEnvironment(id, guest)` makes it the **final word**. It reads the root `env` and then
+  `gl/env`, drops any earlier entry of a name the driver states, and appends the driver's entries.
+  `SessionService` calls it **after** the app's own lines, after `extraEnv()` and after `AgentEnv`,
+  so the user's `droiddeck-env` and the agent cannot override a knob the driver states. The app
+  itself sets no driver knob: the `DROIDDECK_VN_SYNC_PRESENT=1` line it used to add is gone, so a
+  driver knob has exactly one home, the zip.
 
-The zip repeats the settings in `gl/env` as well, because that is the channel **every shipped APK**
-already reads (`glEnvironment`, in the release since `51c52f2`). The root file is the source of
-truth and needs the new APK; the `gl/env` copy makes the same zip work on an APK that predates it.
-It is appended only when the GL part built, which is why the root copy is not optional.
+The `gl/env` copy stays for the same reason it always did -- it is the channel **every shipped APK**
+reads (`glEnvironment`, in the release since `51c52f2`), and an APK that predates the root file
+applies it the old way, last-but-before the user's file. On a current APK the two files are read in
+one pass, root then GL part, so a line in `gl/env` wins over the same line in the root file and a
+`+=` line there appends to what the root file produced.
 
 What ships baked in, and why these two:
 
-- `DROIDDECK_VN_SYNC_PRESENT=1` -- the ordered present. The app already set this line itself
-  (`SessionService.kt:580`); stating it in the driver is what makes it the driver's decision rather
-  than the APK's, and the app's line stays as the fallback for a driver with no `env`.
+- `DROIDDECK_VN_SYNC_PRESENT=1` -- the ordered present. The app used to set this line itself
+  (`SessionService.kt`); it no longer does, so the driver's `env` is now the only place it is
+  stated. That is what makes it the driver's decision rather than the APK's.
 - `DROIDDECK_VN_BC_GPU=1` -- the GPU BC decode, which is already the default. Stated so the zip
   records which decode it carries, since the artifact is what a tester installs.
 

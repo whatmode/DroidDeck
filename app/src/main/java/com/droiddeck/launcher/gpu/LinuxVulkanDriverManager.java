@@ -129,6 +129,44 @@ public class LinuxVulkanDriverManager {
     }
 
     /**
+     * Make the driver's own settings the final word in {@code guest}. The driver is the only part
+     * that knows what it was built around, so a knob it states must not be overridable by the app,
+     * the user's droiddeck-env, or the agent: any earlier entry of the same name is dropped, and
+     * the driver's entries are appended. {@code /usr/bin/env} keeps the last value of a repeated
+     * name, so appending alone would already win -- dropping the earlier entry keeps the
+     * environment unambiguous rather than leaving two lines that disagree.
+     *
+     * <p>The driver's two env files are read in order: the root {@code env}, then {@code gl/env}
+     * (Zink and Mesa's GLX/EGL from the same build), so a line in the GL part wins over the same
+     * line in the root file. A {@code NAME+=value} line in the GL part appends to what the root
+     * file produced, so both survive instead of the later one replacing the earlier.
+     *
+     * @return the entries added, for the session log.
+     */
+    public List<String> applyDriverEnvironment(String id, List<String> guest) {
+        List<String> root = driverEnvironment(id, guest);
+        List<String> withRoot = new ArrayList<>(guest);
+        withRoot.addAll(root);
+        List<String> gl = glEnvironment(id, withRoot);
+        List<String> all = new ArrayList<>(root.size() + gl.size());
+        all.addAll(root);
+        all.addAll(gl);
+        return applyEnvironment(all, guest);
+    }
+
+    static List<String> applyEnvironment(List<String> entries, List<String> guest) {
+        if (entries.isEmpty()) return entries;
+        for (String entry : entries) {
+            int eq = entry.indexOf('=');
+            if (eq <= 0) continue;
+            String name = entry.substring(0, eq);
+            guest.removeIf(existing -> existing != null && existing.startsWith(name + "="));
+        }
+        guest.addAll(entries);
+        return entries;
+    }
+
+    /**
      * A GL part's env file: one KEY=VALUE per line ("#" starts a comment), KEY+=VALUE to append
      * to the variable with ":" (LD_LIBRARY_PATH), "@GL@" for the GL part's folder. Returns
      * KEY=VALUE entries to add after {@code current} (later entries win).

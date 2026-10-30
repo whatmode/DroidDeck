@@ -105,4 +105,72 @@ class DriverGlEnvTest {
         val (manager, id) = installDriverZip(null)
         assertTrue(manager.driverEnvironment(id, listOf("HOME=/root")).isEmpty())
     }
+
+    @Test fun theDriverOverridesWhatTheAppSet() {
+        // The driver is the only part that knows what it was built around, so a knob it states
+        // replaces an earlier line of the same name rather than losing to it. /usr/bin/env keeps
+        // the last value of a repeated name, so the earlier entry has to be gone for this to hold.
+        val (manager, id) = installDriverZip("DROIDDECK_VN_SYNC_PRESENT=0\n")
+        val guest = mutableListOf("/usr/bin/env", "-i", "HOME=/root", "DROIDDECK_VN_SYNC_PRESENT=1")
+        assertEquals(listOf("DROIDDECK_VN_SYNC_PRESENT=0"),
+            manager.applyDriverEnvironment(id, guest))
+        assertEquals(listOf("/usr/bin/env", "-i", "HOME=/root", "DROIDDECK_VN_SYNC_PRESENT=0"), guest)
+    }
+
+    @Test fun theDriverOverridesTheUsersOwnFile() {
+        // The user's droiddeck-env is added before the driver's env, so the driver wins there too;
+        // a knob the driver leaves out is still the user's to set.
+        val (manager, id) = installDriverZip("DROIDDECK_VN_BC_GPU=1\n")
+        val guest = mutableListOf(
+            "HOME=/root",
+            "DROIDDECK_VN_BC_GPU=0", "BL_MALI_REFRESH=120",
+        )
+        manager.applyDriverEnvironment(id, guest)
+        assertEquals(listOf("HOME=/root", "BL_MALI_REFRESH=120", "DROIDDECK_VN_BC_GPU=1"), guest)
+    }
+
+    @Test fun aDriverWithoutOneOverridesNothing() {
+        val (manager, id) = installDriverZip(null)
+        val guest = mutableListOf("HOME=/root", "DROIDDECK_VN_SYNC_PRESENT=1")
+        assertTrue(manager.applyDriverEnvironment(id, guest).isEmpty())
+        assertEquals(listOf("HOME=/root", "DROIDDECK_VN_SYNC_PRESENT=1"), guest)
+    }
+
+    @Test fun theGlPartIsAppliedAfterTheRootFile() {
+        // Both are the driver's, so both beat anything the app set; a line in gl/env still wins
+        // over the same line in the root env file, which is the order the manager reads them in.
+        val (manager, id) = installDriverZip("BL_MALI_REFRESH=120\n")
+        val gl = File(manager.getDriverDir(id), LinuxVulkanDriverManager.GL_DIR)
+        gl.mkdirs()
+        File(gl, LinuxVulkanDriverManager.GL_MARKER).writeText("{}")
+        File(gl, LinuxVulkanDriverManager.GL_ENV).writeText("BL_MALI_REFRESH=60\n")
+        val guest = mutableListOf("HOME=/root", "BL_MALI_REFRESH=90")
+        assertEquals(listOf("BL_MALI_REFRESH=120", "BL_MALI_REFRESH=60"),
+            manager.applyDriverEnvironment(id, guest))
+        assertEquals(listOf("HOME=/root", "BL_MALI_REFRESH=120", "BL_MALI_REFRESH=60"), guest)
+    }
+
+    @Test fun theGlPartAppendsToWhatTheRootFileProduced() {
+        // LD_LIBRARY_PATH is the one key a driver env file appends to. gl/env's += must extend the
+        // root file's value, not replace it, or the driver's own libraries drop off the path.
+        val (manager, id) = installDriverZip("LD_LIBRARY_PATH+=/d/venus\n")
+        val gl = File(manager.getDriverDir(id), LinuxVulkanDriverManager.GL_DIR)
+        gl.mkdirs()
+        File(gl, LinuxVulkanDriverManager.GL_MARKER).writeText("{}")
+        File(gl, LinuxVulkanDriverManager.GL_ENV).writeText("LD_LIBRARY_PATH+=@GL@\n")
+        val guest = mutableListOf("HOME=/root", "LD_LIBRARY_PATH=/app")
+        manager.applyDriverEnvironment(id, guest)
+        assertEquals(listOf("HOME=/root", "LD_LIBRARY_PATH=/app:/d/venus",
+                            "LD_LIBRARY_PATH=/app:/d/venus:" + gl.absolutePath), guest)
+    }
+
+    @Test fun anAppendResolvesAgainstTheAppsOwnEnvironment() {
+        // NAME+=value appends to what the app built, not to the user's file: the driver's env is
+        // read against the environment as the app built it, before the driver's own lines.
+        val (manager, id) = installDriverZip("LD_LIBRARY_PATH+=/d/venus\n")
+        val guest = mutableListOf("HOME=/root", "LD_LIBRARY_PATH=/app")
+        assertEquals(listOf("LD_LIBRARY_PATH=/app:/d/venus"),
+            manager.applyDriverEnvironment(id, guest))
+        assertEquals(listOf("HOME=/root", "LD_LIBRARY_PATH=/app:/d/venus"), guest)
+    }
 }

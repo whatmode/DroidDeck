@@ -104,5 +104,62 @@ class BuildShipsTheEnvFileTest(unittest.TestCase):
         self.assertIn('grep -vE \'^[[:space:]]*(#|$)\' "$HERE/guest-env"', self.script)
 
 
+class TheDriverIsTheFinalWordTest(unittest.TestCase):
+    """The driver's settings live in the driver's zip and nowhere else.
+
+    A knob that belongs to the driver is stated in the zip's env file, so it changes by shipping a
+    driver rather than by an APK build. The app must not set one at all -- a line in the APK is
+    what made the old A/Bs untrustworthy -- and when it applies the driver's env it does so last,
+    so neither the user's droiddeck-env nor the agent can override a knob the driver states.
+    """
+
+    SERVICE = Path(__file__).resolve().parents[2] / (
+        "app/src/main/java/com/droiddeck/launcher/session/SessionService.kt")
+    MANAGER = Path(__file__).resolve().parents[2] / (
+        "app/src/main/java/com/droiddeck/launcher/gpu/LinuxVulkanDriverManager.java")
+
+    def body(self):
+        source = self.SERVICE.read_text()
+        return source.split("private fun addClientEnvironment(", 1)[1]
+
+    def test_the_app_sets_no_driver_knob(self):
+        # ALLOWED is the set the driver's own env file may set. The app must not name any of them:
+        # a knob set here would shadow or contradict the driver's zip.
+        body = self.body()
+        for name in sorted(ALLOWED):
+            self.assertNotIn('"%s=' % name, body,
+                             "%s is the driver's to state, not the app's" % name)
+
+    def test_the_driver_is_applied_after_the_users_file_and_the_agent(self):
+        body = self.body()
+        user = body.index("extraEnv().forEach")
+        agent = body.index("AgentEnv.beginSession(this)")
+        driver = body.index("applyDriverEnvironment(")
+        self.assertLess(user, driver, "the user's droiddeck-env would override the driver")
+        self.assertLess(agent, driver, "the agent's environment would override the driver")
+
+    def test_the_driver_is_applied_after_the_apps_own_lines(self):
+        body = self.body()
+        last_app_line = body.index('guest.add("BANNER_AUDIO_DIRECT_DECAY=0")')
+        driver = body.index("applyDriverEnvironment(")
+        self.assertLess(last_app_line, driver, "an app line would override the driver")
+
+    def test_the_gl_part_is_read_after_the_root_file(self):
+        # The driver has two env files and both must be read in one authoritative pass, root first
+        # then gl/, so a line in gl/env wins over the same line in the root file and a += line in
+        # gl/env appends to what the root file produced.
+        manager = self.MANAGER.read_text()
+        apply = manager.split("public List<String> applyDriverEnvironment(", 1)[1].split("\n    }", 1)[0]
+        self.assertLess(apply.index("driverEnvironment("), apply.index("glEnvironment("),
+                        "gl/env would lose to the root env file")
+        self.assertIn("applyEnvironment(", apply)
+
+    def test_an_earlier_entry_of_the_same_name_is_dropped(self):
+        manager = self.MANAGER.read_text()
+        apply = manager.split("static List<String> applyEnvironment(", 1)[1].split("\n    }", 1)[0]
+        self.assertIn("removeIf", apply, "appending alone lets the earlier line win")
+        self.assertIn('startsWith(name + "=")', apply)
+
+
 if __name__ == "__main__":
     unittest.main()

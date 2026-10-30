@@ -571,13 +571,6 @@ class SessionService : Service() {
             Log.i(TAG, "venus bridge: server " + if (up) "up" else "NOT running")
             guest.add("VN_DEBUG=vtest,init,result")
             guest.add("BL_VENUS=" + if (up) "1" else "0")
-            // Guest patch 0021 skips the queue drain that used to run before every present. That
-            // is where the 24->60 gain came from, but it also lets the server read a swapchain
-            // image the GPU is still writing, which reads to the player as a white or garbled
-            // frame. Put the ordered present back. The driver's own env file states this now (it
-            // is added below and wins), so this line is the fallback for a driver that ships
-            // without one; the user's environment file is added last and still wins over both.
-            guest.add("DROIDDECK_VN_SYNC_PRESENT=1")
         }
         tuDebug(linuxDriverId)?.let { guest.add("TU_DEBUG=$it") }
         com.droiddeck.launcher.gpu.TpUbwcHint.forThisDevice()?.let { guest.add("${com.droiddeck.launcher.gpu.TpUbwcHint.ENV}=$it") }
@@ -607,16 +600,6 @@ class SessionService : Service() {
         if (SessionState.mode == MODE_STEAM && SessionPrefs.zramCompression(this) &&
             com.droiddeck.launcher.core.ZramSupport.supported()) guest.add("BL_ZRAM=1")
         guest.add("BANNER_AUDIO_DIRECT_DECAY=0")
-        // The selected driver's own settings and then its GL part (Zink and GLX/EGL built with
-        // it); the user's own extra variables still come after and win. The driver's env comes
-        // first so a line in the GL part's env file can override one here.
-        val driverEnv = LinuxVulkanDriverManager(this).driverEnvironment(linuxDriverId, guest)
-        if (driverEnv.isNotEmpty()) Log.i(TAG, "driver environment: " + driverEnv.joinToString(" "))
-        guest.addAll(driverEnv)
-        LinuxVulkanDriverManager(this).glEnvironment(linuxDriverId, guest).let { env ->
-            if (env.isNotEmpty()) Log.i(TAG, "driver GL part: " + env.joinToString(" "))
-            guest.addAll(env)
-        }
         extraEnv().forEach { guest.add(it) }
         com.droiddeck.launcher.agent.AgentEnv.beginSession(this).forEach { guest.add(it) }
         val clientPinned = steamHere && SessionPrefs.clientCpusOverride(this)
@@ -625,6 +608,15 @@ class SessionService : Service() {
         }
         CpuCores.gameLaunchList(SessionPrefs.gameCpus(this), clientPinned)
             .takeIf { it.isNotEmpty() }?.let { guest.add("BL_GAME_CPUS=$it") }
+
+        // The driver's own settings come from the driver's zip -- its root env file, then the GL
+        // part's -- and not from this APK. A knob that belongs to the driver is stated there and
+        // nowhere else, so it changes by shipping a driver rather than by an APK build. Applied
+        // last, so a knob the driver states cannot be overridden by the user's droiddeck-env or
+        // the agent.
+        LinuxVulkanDriverManager(this).applyDriverEnvironment(linuxDriverId, guest).let { env ->
+            if (env.isNotEmpty()) Log.i(TAG, "driver environment: " + env.joinToString(" "))
+        }
     }
 
     private fun noSteamGame(): Boolean =

@@ -1,11 +1,15 @@
 # DroidDeck venus-bridge guest driver: the environment this driver needs.
 #
-# The app reads this when the driver is selected and adds it to the session after its own
-# defaults and before the user's droiddeck-env, so a line here is the driver's own setting and
-# nothing on the phone has to be edited to change it. One NAME=value per line; "#" starts a
-# comment. This file is what makes the driver zip self-contained: the settings below used to
-# live in the APK or in droiddeck-env, where changing one meant an APK build or a file on the
-# device.
+# The app reads this when the driver is selected and applies it LAST, so a line here is the
+# driver's own setting and the final word: the app's own defaults, the user's droiddeck-env and
+# the agent cannot override it. One NAME=value per line; "#" starts a comment.
+#
+# This file is the ONLY place a driver knob is stated. The APK sets no driver knob of its own --
+# it used to add DROIDDECK_VN_SYNC_PRESENT itself, and that line is gone -- so changing one of the
+# settings below means shipping a driver, never an APK build or a file on the phone.
+#
+# Only what this file states is protected. A knob left commented below is not in the environment
+# the driver owns, so the user's own file is still where that one is set.
 #
 # Present ordering (guest-patches/0021). The queue drain before every present is skipped and the
 # present is ordered by this submit's ring seqno instead: a wait for the host to execute through
