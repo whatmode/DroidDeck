@@ -217,16 +217,19 @@ bc_native_case() {  # name, client env...
   grep "allocations in" $OUT/server-$name.log | tail -1
   NATIVE=$(grep "allocations in" $OUT/server-$name.log | sed 's/.*native device-local [0-9]* ([0-9.]* MiB, total \([0-9]*\).*/\1/' | sort -n | tail -1)
   echo "== $name: native allocations ${NATIVE:-0}"
+  # the server's stats line only comes with a later allocation, which a run this short may not
+  # make; the driver's own line says which type the decode took (0x1: device-local only)
+  BCTYPE=$(tail -n +$((before + 1)) $L | grep " vkbc" | grep "BC decode buffers (device-local)" | sed 's/.*flags \(0x[0-9a-f]*\).*/\1/' | tail -1)
   # its own annotation: the report chunks run out before this section
   printf '::notice title=bc native %s::%s\n' "$name" "$( { tail -n +$((before + 1)) $L | grep " vkbc" | tail -8; grep -E "memory type|allocations in|rror" $OUT/server-$name.log | sort | uniq -c | sort -rn | head -12; } | sed 's/%/%25/g' | cut -c1-250 | awk 'BEGIN{ORS="%0A"}{print}')" >&3
 }
 echo "---- BC decode buffers with the phone's memory types (expect native memory)"
 bc_native_case bcnative
-[ $BCRC = 0 ] && [ "${NATIVE:-0}" -gt 0 ] && echo "PASS BC decode buffers in native memory (native ${NATIVE:-0})" \
-  || { echo "FAIL BC decode buffers in native memory (rc $BCRC, native ${NATIVE:-0})"; tail -6 $OUT/bc-bcnative.txt; }
+[ $BCRC = 0 ] && [ "$BCTYPE" = 0x1 ] && echo "PASS BC decode buffers in native memory (flags $BCTYPE, server native ${NATIVE:-0})" \
+  || { echo "FAIL BC decode buffers in native memory (rc $BCRC, flags ${BCTYPE:-none})"; tail -6 $OUT/bc-bcnative.txt; }
 bc_native_case bcheap DROIDDECK_VN_BC_NATIVE=0
-[ $BCRC = 0 ] && [ "${NATIVE:-0}" = 0 ] && echo "PASS the check notices decode buffers outside the native type" \
-  || echo "FAIL BC decode with DROIDDECK_VN_BC_NATIVE=0 (rc $BCRC, native ${NATIVE:-0})"
+[ $BCRC = 0 ] && [ -n "$BCTYPE" ] && [ "$BCTYPE" != 0x1 ] && echo "PASS the check notices decode buffers outside the native type (flags $BCTYPE)" \
+  || echo "FAIL BC decode with DROIDDECK_VN_BC_NATIVE=0 (rc $BCRC, flags ${BCTYPE:-none})"
 echo "---- an older app (no native type): GL still right"
 glmem_case mali-old VKR_NATIVE_MEMORY=0 --
 [ $GLRC = 0 ] && echo "PASS GL textures with an older app's server" || echo "FAIL GL textures with an older app's server (rc $GLRC)"
