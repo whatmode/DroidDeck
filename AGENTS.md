@@ -1641,6 +1641,50 @@ md5 `8abaa3698a9134bbe5c6054890ffd0a0`), and only the last 1,505 lines are the n
 (12:22:50Z-12:28:38Z). So the file's 221 frame windows are 215 from the earlier session and 6 from
 this one -- read the tail, not the file, and count 6 windows, not 221.
 
+## Getting the log bundle out of fex.net, and the 2026-10-30-01 regression report
+
+The user's bundles arrive as a fex.net share, and the download URL in the API metadata
+(`GET https://api.fex.net/api/v1/file/share/<code>`) answers `307 -> /403` to a bare `curl` and
+`401 {"error":"Unauthorized","source":"storaged"}` to the SPA's own JWT cookie. Neither is the way
+in. The share page fetches an **anonymous** token and sends it as a bearer:
+
+    curl -s https://api.fex.net/api/v1/anonymous/upload-token          # -> {"token":"eyJ..."}
+    curl -sSL -H "Authorization: Bearer $token" https://fs19.fex.net/download/<id>/<code> -o bundle.zip
+
+That is `Share.refreshAnonToken` in the SPA bundle; the token is a normal (unauthenticated) user
+token, so no login and no browser session is needed. Check the result with `python3 -c
+'import zipfile;zipfile.ZipFile("bundle.zip")'` before trusting it -- the 403 page is HTML.
+
+The `2026-10-30-01-steam` bundle is the report **"Stuttering still exist. And it became worse"**. It
+runs `Build remote clean · pr4 at 18d030e` (`device.txt`), so it is the first bundle from the commit
+that moved the driver's knobs into the driver's zip. Three things are worth recording.
+
+**The driver binary did not change between `0b68348` and `18d030e`, so no frame result can.** The
+two zips' `libvulkan_panvk.so` are the same file
+(`sha256 198c18f1b5d45acdcea84eaf6cfa117e05e78ad9563b590ee364dbca7019c468`, 2,912,968 bytes), the
+`gl/env` files are byte-identical, and the only diff in the whole zip is comment text in the root
+`env`. `18d030e` touched no patch and no guest source, so the "worse" is not the driver.
+
+**The applied environment is identical too.** Both bundles log the same entries
+(`driver environment: DROIDDECK_VN_SYNC_PRESENT=1 DROIDDECK_VN_BC_GPU=1 __GLX_... BL_MALI_CEF=gl
+DROIDDECK_KOPPER_* ...`), because the knob values did not change -- only who states them. So the
+regression is not a changed variable.
+
+**What `18d030e` really changed is that the user can no longer set one.** It applied the driver's env
+last and deleted any earlier entry of a name the driver stated, so `DROIDDECK_VN_SYNC_PRESENT=0` (or
+any other A/B line) in `droiddeck-env` was silently discarded. The fix restores the precedence the
+project depends on: the driver's entries go in after the app's own lines, the user's file and the
+agent go in after the driver.
+
+Read the frame line from the bundle's tail, not the file. `droiddeck_vulkan.txt` is a rolling log
+that survives sessions: the 10-30 bundle's first line is byte-identical to the 10-29 bundle's
+(`23:41:01.132 [4789 steamsysinfo -steamid]`), so a whole-file scan counts other sessions' windows.
+Filter to the session's own `HH:MM:SS` range first. On that basis the 10-30 session is not worse than
+the 10-29 one -- both collapse to 3-8 fps within seconds of the first frame
+(`11:06:31` 227 fps -> `11:07:29` 2.0 fps; `08:24:11` 51.7 -> `08:25:03` 5.8), and the collapse
+windows are the same shape. The "worse" is the pre-existing collapse plus the loss of the escape
+hatch, not a new mechanism.
+
 ## The driver owns its environment now (`tools/venus/guest-env`, `env` in the zip)
 
 Every knob this file recommends setting was unreachable on the device. The app spawns the guest
@@ -1660,12 +1704,20 @@ by `build-guest.sh`, and the app reads it when the driver is selected:
 - `driverEnvironment(id, current)` parses it with the same reader as the GL part's `gl/env`:
   one `NAME=value` per line, `#` comments, `KEY+=value` appends with `:`, `@GL@` is the driver
   directory. The syntax is shared, so there is one parser and one test for both.
-- `applyDriverEnvironment(id, guest)` makes it the **final word**. It reads the root `env` and then
-  `gl/env`, drops any earlier entry of a name the driver states, and appends the driver's entries.
-  `SessionService` calls it **after** the app's own lines, after `extraEnv()` and after `AgentEnv`,
-  so the user's `droiddeck-env` and the agent cannot override a knob the driver states. The app
-  itself sets no driver knob: the `DROIDDECK_VN_SYNC_PRESENT=1` line it used to add is gone, so a
-  driver knob has exactly one home, the zip.
+- `applyDriverEnvironment(id, guest)` adds the driver's entries after the app's own lines. It reads
+  the root `env` and then `gl/env` in one pass, and `SessionService` calls it **before**
+  `extraEnv()` and before `AgentEnv`, so a line in the user's `droiddeck-env` still wins over a knob
+  the driver states. The app itself sets no driver knob: the `DROIDDECK_VN_SYNC_PRESENT=1` line it
+  used to add is gone, so a driver knob has exactly one home, the zip.
+
+The user's file staying last is deliberate and is the thing `18d030e` got wrong. That commit also
+applied the driver last and **deleted** any earlier entry of a name the driver stated
+(`applyEnvironment`, `guest.removeIf(startsWith(name + "="))`), which made every driver knob
+unoverridable from the device. Every on-device A/B in this project is an edit to `droiddeck-env`
+(`DROIDDECK_VN_SYNC_PRESENT=0` for the fast path, `DROIDDECK_VN_EMULATE_BC=0` to test the decode),
+so the commit removed the only escape hatch that does not need another driver build -- and it did
+so in the same release the user was told to test with. The next commit restores the precedence:
+driver after the app's lines, user and agent after the driver.
 
 The `gl/env` copy stays for the same reason it always did -- it is the channel **every shipped APK**
 reads (`glEnvironment`, in the release since `51c52f2`), and an APK that predates the root file

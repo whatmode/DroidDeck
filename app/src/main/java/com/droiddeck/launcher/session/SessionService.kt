@@ -600,6 +600,17 @@ class SessionService : Service() {
         if (SessionState.mode == MODE_STEAM && SessionPrefs.zramCompression(this) &&
             com.droiddeck.launcher.core.ZramSupport.supported()) guest.add("BL_ZRAM=1")
         guest.add("BANNER_AUDIO_DIRECT_DECAY=0")
+
+        // The driver's own settings come from the driver's zip -- its root env file, then the GL
+        // part's -- and not from this APK. A knob that belongs to the driver is stated there and
+        // nowhere else, so it changes by shipping a driver rather than by an APK build. Applied
+        // after the app's own lines, so a driver line replaces an app default of the same name,
+        // but before the user's droiddeck-env and the agent, which stay the way to A/B a driver
+        // knob on the device without building another driver.
+        LinuxVulkanDriverManager(this).applyDriverEnvironment(linuxDriverId, guest).let { env ->
+            if (env.isNotEmpty()) Log.i(TAG, "driver environment: " + env.joinToString(" "))
+        }
+
         extraEnv().forEach { guest.add(it) }
         com.droiddeck.launcher.agent.AgentEnv.beginSession(this).forEach { guest.add(it) }
         val clientPinned = steamHere && SessionPrefs.clientCpusOverride(this)
@@ -608,15 +619,6 @@ class SessionService : Service() {
         }
         CpuCores.gameLaunchList(SessionPrefs.gameCpus(this), clientPinned)
             .takeIf { it.isNotEmpty() }?.let { guest.add("BL_GAME_CPUS=$it") }
-
-        // The driver's own settings come from the driver's zip -- its root env file, then the GL
-        // part's -- and not from this APK. A knob that belongs to the driver is stated there and
-        // nowhere else, so it changes by shipping a driver rather than by an APK build. Applied
-        // last, so a knob the driver states cannot be overridden by the user's droiddeck-env or
-        // the agent.
-        LinuxVulkanDriverManager(this).applyDriverEnvironment(linuxDriverId, guest).let { env ->
-            if (env.isNotEmpty()) Log.i(TAG, "driver environment: " + env.joinToString(" "))
-        }
     }
 
     private fun noSteamGame(): Boolean =

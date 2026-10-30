@@ -129,17 +129,19 @@ public class LinuxVulkanDriverManager {
     }
 
     /**
-     * Make the driver's own settings the final word in {@code guest}. The driver is the only part
-     * that knows what it was built around, so a knob it states must not be overridable by the app,
-     * the user's droiddeck-env, or the agent: any earlier entry of the same name is dropped, and
-     * the driver's entries are appended. {@code /usr/bin/env} keeps the last value of a repeated
-     * name, so appending alone would already win -- dropping the earlier entry keeps the
-     * environment unambiguous rather than leaving two lines that disagree.
+     * Add the driver's own settings to {@code guest}. The driver is the part that knows what it
+     * was built around, so its line replaces an earlier one of the same name that the app set.
      *
      * <p>The driver's two env files are read in order: the root {@code env}, then {@code gl/env}
      * (Zink and Mesa's GLX/EGL from the same build), so a line in the GL part wins over the same
      * line in the root file. A {@code NAME+=value} line in the GL part appends to what the root
      * file produced, so both survive instead of the later one replacing the earlier.
+     *
+     * <p>The session applies these after the app's own lines and before the user's
+     * {@code droiddeck-env} and the agent, so a line in the user's file still overrides a knob the
+     * driver states. That is deliberate: every A/B this project runs on the device is an edit to
+     * that file, and a driver knob that nothing can override would leave shipping another driver
+     * as the only way to test it.
      *
      * @return the entries added, for the session log.
      */
@@ -151,19 +153,8 @@ public class LinuxVulkanDriverManager {
         List<String> all = new ArrayList<>(root.size() + gl.size());
         all.addAll(root);
         all.addAll(gl);
-        return applyEnvironment(all, guest);
-    }
-
-    static List<String> applyEnvironment(List<String> entries, List<String> guest) {
-        if (entries.isEmpty()) return entries;
-        for (String entry : entries) {
-            int eq = entry.indexOf('=');
-            if (eq <= 0) continue;
-            String name = entry.substring(0, eq);
-            guest.removeIf(existing -> existing != null && existing.startsWith(name + "="));
-        }
-        guest.addAll(entries);
-        return entries;
+        guest.addAll(all);
+        return all;
     }
 
     /**
