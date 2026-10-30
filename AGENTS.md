@@ -1821,3 +1821,22 @@ next, in this order, because the first two need no rebuild:
    whole pool (or fixing the accounting) so the host is not handed 130k sets a window.
 3. The 30.0 fps plateau, which *is* GPU-decode-specific and is the one thing that would explain a
    report of framepacing rather than throughput.
+
+### The wait report had no owner for its biggest number (0025)
+
+`0017` attributes call stacks to waits, but its gate took only `VN_RELAX_REASON_FENCE` and
+`VN_RELAX_REASON_RING_SEQNO`. Summed over every bundle's Lake windows, **semaphore leads in all six
+sessions (49-72% of the wait total)** and was the one reason that could never reach the stack list.
+So the report showed `semaphore` as the largest line in its per-reason totals while its "wait stack
+N" lines were all fence and ring, and the biggest number in the report read as if it had no owner --
+or worse, as if the attributed stacks were the whole story. `ring space` and `tls ring seqno` were
+excluded the same way. `0025` replaces the two-reason test with `VN_DD_REASON_ATTRIBUTED()` over
+fence, ring seqno, TLS ring seqno, ring space and semaphore, and gives each its own label through
+`vn_dd_reason_str()` instead of the fence-else-ring binary. The totals already prove the waits are
+real; the point of the change is that the *stacks* for them were never collected, and a stack is
+what says whether the semaphore time is presentation pacing (gamescope WSI) or the guest's own
+submit pipeline -- the distinction the next fix depends on.
+
+Note when reading those totals: the same window line is duplicated across the `steam` and `server`
+logs of one bundle, so per-bundle sums double-count. Compare per-session, and only across
+`Lake.exe] waits over` lines.
