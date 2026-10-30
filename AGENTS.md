@@ -2107,3 +2107,29 @@ carries another UUID is ignored. Log lines: `pipeline cache: <path>, N bytes loa
 off. Expected: the first session after install still compiles (and still hitches) where it goes;
 later sessions through the same places should not. CI runs a compute pipeline in two processes
 and checks the second loads what the first saved.
+
+## 0031: the pipeline cache lives where Steam's shader pre-caching can fill it
+
+Steam already does on this device what it does on a Steam Deck. `shader_log.txt`: the fossilize
+layer records Lake's pipelines (`SteamSwarm / G7:VulkanPipelinesV6_...: 1985 shaders`), and Steam
+runs `fossilize_replay` over them (last on 10-27: `Still replaying 1118240 (57%, 1713/2960)`,
+done 13 s after it started). It also sets `MESA_GLSL_CACHE_DIR=.../steamapps/shadercache/1118240`
+for the game. On a Deck the replay fills Mesa's disk cache in that dir and the game reads it. Here
+it filled nothing: Mali keeps no Vulkan disk cache, and 0030's file was per program
+(`fossilize_replay-<uuid>.bin` would never be read by `Lake.exe`). 3000 pipelines in 13 s is also
+too fast to have been compiled on Mali through the bridge; whether the replay compiles at all is
+not known yet -- the next replay's `pipeline cache:` lines in `droiddeck_vulkan.txt` (tagged
+`fossilize_replay`) will say.
+
+0031: when `MESA_SHADER_CACHE_DIR` or `MESA_GLSL_CACHE_DIR` is set, the cache is
+`<dir>/droiddeck-venus/<pipelineCacheUUID>.bin`, one per GPU and shared by every program of the
+game; otherwise the 0030 per-program path. Before a save, a file another process wrote since
+this one last read it is merged in (`vkMergePipelineCaches`), since fossilize_replay runs several
+processes at once. A cache the program creates itself is merged into the device's when the
+program destroys it (fossilize_replay may bring its own). CI: a copy of `vkstats` named
+`fossilize_replay` saves into a fake `shadercache/1118240`, and `vkstats` under
+`MESA_GLSL_CACHE_DIR` loads exactly what it saved.
+
+The 0030 CI check failed on its first run, and not on the driver: lavapipe's cache data for a
+compute pipeline is its 20-byte header only, so "loaded > 64 bytes" could never hold there. The
+check is now the round trip -- the second process loads exactly the bytes the first saved.

@@ -143,17 +143,30 @@ grep "wait stack" $OUT/statslog-default.txt | grep -q "in thread 'vkstats'.* vn_
 printf '#version 450\nlayout(local_size_x = 64) in;\nlayout(std430, binding = 0) buffer B { uint v[]; };\nvoid main() { }\n' > $OUT/pc.comp
 glslangValidator -V $OUT/pc.comp -o $OUT/pc.spv >/dev/null || exit 1
 rm -rf /tmp/pcache-home; mkdir -p /tmp/pcache-home
-for run in 1 2; do
-  before=$(wc -l < $L)
-  HOME=/tmp/pcache-home XDG_CACHE_HOME= timeout 60 $OUT/vkstats 0.1 $OUT/pc.spv > $OUT/pc-$run.txt 2>&1
-  tail -n +$((before + 1)) $L | grep " vkstats" | grep "pipeline cache" | cut -c1-240 | tee $OUT/pclog-$run.txt
-  grep "compute pipeline" $OUT/pc-$run.txt
-done
-ls -la /tmp/pcache-home/.cache/droiddeck-venus/ 2>&1 | tail -2
-PCLOADED=$(sed -n 's/.*, \([0-9]*\) bytes loaded.*/\1/p' $OUT/pclog-2.txt | tail -1)
-grep -q "pipeline cache: saved" $OUT/pclog-1.txt && [ "${PCLOADED:-0}" -gt 64 ] \
-  && echo "PASS the pipeline cache is saved and loaded across runs" \
-  || { echo "FAIL the pipeline cache across runs"; cat $OUT/pclog-1.txt $OUT/pclog-2.txt | head -6; }
+pc_run() {  # name, binary, env...: one process that makes the pipeline; its cache lines in pclog-<name>
+  local name=$1 bin=$2; shift 2
+  local before=$(wc -l < $L)
+  env HOME=/tmp/pcache-home XDG_CACHE_HOME= MESA_SHADER_CACHE_DIR= MESA_GLSL_CACHE_DIR= "$@" timeout 60 $bin 0.1 $OUT/pc.spv > $OUT/pc-$name.txt 2>&1
+  tail -n +$((before + 1)) $L | grep "pipeline cache" | cut -c1-240 | tee $OUT/pclog-$name.txt
+}
+pc_saved() { sed -n 's/.*pipeline cache: saved \([0-9]*\) bytes.*/\1/p' $OUT/pclog-$1.txt | tail -1; }
+pc_loaded() { sed -n 's/.*, \([0-9]*\) bytes loaded.*/\1/p' $OUT/pclog-$1.txt | tail -1; }
+pc_run first $OUT/vkstats
+pc_run second $OUT/vkstats
+# lavapipe keeps no pipelines in its cache data (only its header), so the check is the round trip:
+# what the first process saved, the second loads, through venus' header
+S1=$(pc_saved first); L2=$(pc_loaded second)
+[ -n "$S1" ] && [ "$S1" -gt 32 ] && [ "$L2" = "$S1" ] && echo "PASS the pipeline cache is saved and loaded across runs ($S1 bytes)" \
+  || { echo "FAIL the pipeline cache across runs (saved ${S1:-none}, loaded ${L2:-none})"; cat $OUT/pclog-first.txt $OUT/pclog-second.txt | head -6; }
+# Steam's per-game shader cache dir: shared by every program of the game (fossilize_replay first,
+# the game after), whatever the program's name
+cp $OUT/vkstats $OUT/fossilize_replay
+pc_run replay $OUT/fossilize_replay MESA_SHADER_CACHE_DIR=/tmp/pcache-home/shadercache/1118240
+pc_run game $OUT/vkstats MESA_GLSL_CACHE_DIR=/tmp/pcache-home/shadercache/1118240
+S1=$(pc_saved replay); L2=$(pc_loaded game)
+grep -q "shadercache/1118240/droiddeck-venus/" $OUT/pclog-game.txt && [ -n "$S1" ] && [ "$L2" = "$S1" ] \
+  && echo "PASS the game loads what Steam's replay compiled into the game's shader cache dir" \
+  || { echo "FAIL the shared shader cache dir (replay saved ${S1:-none}, game loaded ${L2:-none})"; cat $OUT/pclog-replay.txt $OUT/pclog-game.txt | head -6; }
 stats_case defer DROIDDECK_VN_POOL_DEFER=1
 grep -q "descriptor pools over .* [1-9][0-9]* sent synchronously to the real pool" $OUT/statslog-defer.txt \
   && echo "PASS DROIDDECK_VN_POOL_DEFER=1 still asks the real pool" || echo "FAIL DROIDDECK_VN_POOL_DEFER=1 (rc $SRC)"

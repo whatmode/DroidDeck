@@ -1,0 +1,243 @@
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_pcache.c b/src/virtio/vulkan/vn_droiddeck_pcache.c
+--- a/src/virtio/vulkan/vn_droiddeck_pcache.c	2026-10-30 22:57:32.989796126 +0000
++++ b/src/virtio/vulkan/vn_droiddeck_pcache.c	2026-10-30 22:57:04.879118630 +0000
+@@ -30,6 +30,11 @@
+    uint64_t total;      /* ... in this session */
+    size_t loaded_bytes;
+    size_t saved_bytes;  /* the cache's size at the last save: a hit adds nothing to save */
++   /* the file as this process last read or wrote it: another process (a second instance, or
++    * Steam's fossilize_replay filling the cache before the game runs) may have saved since */
++   struct timespec file_mtime;
++   off_t file_size;
++   VkPipelineCache tmp; /* a cache made from the file to merge it; not absorbed when destroyed */
+    mtx_t lock;
+    cnd_t cond;
+    bool stop;
+@@ -80,9 +85,27 @@
+       snprintf(out, size, "program");
+ }
+ 
++/* Steam points MESA_SHADER_CACHE_DIR / MESA_GLSL_CACHE_DIR at steamapps/shadercache/<appid> for
++ * the game and for its fossilize_replay runs (shader pre-caching); a cache kept there, one per
++ * GPU, is shared by the two, so what the replay compiles is what the game loads. */
++static const char *
++pcache_steam_dir(void)
++{
++   const char *d = getenv("MESA_SHADER_CACHE_DIR");
++   if (!d || !*d)
++      d = getenv("MESA_GLSL_CACHE_DIR");
++   return d && *d ? d : NULL;
++}
++
+ static bool
+ pcache_dir(char *out, size_t size)
+ {
++   const char *steam = pcache_steam_dir();
++   if (steam) {
++      snprintf(out, size, "%s/droiddeck-venus", steam);
++      mkdir(steam, 0755);
++      return mkdir(out, 0755) == 0 || errno == EEXIST;
++   }
+    const char *xdg = getenv("XDG_CACHE_HOME");
+    const char *home = getenv("HOME");
+    if (xdg && *xdg)
+@@ -141,6 +164,72 @@
+    return true;
+ }
+ 
++static bool
++pcache_file_changed(const struct vn_dd_pcache *pc, struct stat *st)
++{
++   if (stat(pc->path, st) != 0)
++      return false;
++   return st->st_size != pc->file_size || st->st_mtim.tv_sec != pc->file_mtime.tv_sec ||
++          st->st_mtim.tv_nsec != pc->file_mtime.tv_nsec;
++}
++
++/* the file's data if it is this driver's (the header vn_GetPipelineCacheData wrote: data from
++ * another GPU or driver is dropped), and the file's stamp remembered */
++static void *
++pcache_load(struct vn_device *dev, struct vn_dd_pcache *pc, size_t *size, bool log)
++{
++   struct stat st;
++   const bool have = stat(pc->path, &st) == 0;
++   void *data = pcache_read(pc->path, size);
++   if (have) {
++      pc->file_mtime = st.st_mtim;
++      pc->file_size = st.st_size;
++   }
++   if (!data)
++      return NULL;
++   const uint8_t *uuid = dev->physical_device->base.vk.properties.pipelineCacheUUID;
++   const struct vk_pipeline_cache_header *h = data;
++   if (h->header_size < sizeof(*h) || h->header_size > *size ||
++       h->header_version != VK_PIPELINE_CACHE_HEADER_VERSION_ONE ||
++       memcmp(h->uuid, uuid, VK_UUID_SIZE)) {
++      if (log)
++         vn_droiddeck_log("pipeline cache: %s is for another driver; starting empty", pc->path);
++      free(data);
++      *size = 0;
++      return NULL;
++   }
++   return data;
++}
++
++/* what another process saved since this one last looked, merged in before this one saves over it */
++static bool
++pcache_merge_file(struct vn_device *dev, struct vn_dd_pcache *pc)
++{
++   struct stat st;
++   if (!pcache_file_changed(pc, &st))
++      return false;
++   size_t size = 0;
++   void *data = pcache_load(dev, pc, &size, false);
++   if (!data)
++      return false;
++   VkDevice device = vn_device_to_handle(dev);
++   const VkPipelineCacheCreateInfo ci = {
++      .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
++      .initialDataSize = size,
++      .pInitialData = data,
++   };
++   bool merged = false;
++   if (vn_CreatePipelineCache(device, &ci, NULL, &pc->tmp) == VK_SUCCESS) {
++      merged = vn_MergePipelineCaches(device, pc->cache, 1, &pc->tmp) == VK_SUCCESS;
++      vn_DestroyPipelineCache(device, pc->tmp, NULL);
++      pc->tmp = VK_NULL_HANDLE;
++   }
++   free(data);
++   if (merged)
++      vn_droiddeck_log("pipeline cache: merged %zu bytes another process saved", size);
++   return merged;
++}
++
+ static void
+ pcache_save(struct vn_device *dev, struct vn_dd_pcache *pc, const char *why)
+ {
+@@ -149,6 +238,8 @@
+       return;
+    VkDevice device = vn_device_to_handle(dev);
+    const int64_t t0 = os_time_get_nano();
++   if (pcache_merge_file(dev, pc))
++      pc->saved_bytes = 0;
+    size_t size = 0;
+    if (vn_GetPipelineCacheData(device, pc->cache, &size, NULL) != VK_SUCCESS || !size ||
+        size > PCACHE_MAX_BYTES || size == pc->saved_bytes)
+@@ -157,13 +248,19 @@
+    if (!data)
+       return;
+    VkResult r = vn_GetPipelineCacheData(device, pc->cache, &size, data);
+-   if (r == VK_SUCCESS && pcache_write(pc->path, data, size) && (pc->saved_bytes = size))
++   struct stat st;
++   if (r == VK_SUCCESS && pcache_write(pc->path, data, size) && (pc->saved_bytes = size)) {
++      if (stat(pc->path, &st) == 0) {
++         pc->file_mtime = st.st_mtim;
++         pc->file_size = st.st_size;
++      }
+       vn_droiddeck_log("pipeline cache: saved %zu bytes (%u new pipelines, %" PRIu64
+                        " this session; %s) in %.0f ms",
+                        size, created, pc->total, why,
+                        (os_time_get_nano() - t0) / 1e6);
+-   else
++   } else {
+       vn_droiddeck_log("pipeline cache: saving to %s failed (%d)", pc->path, r);
++   }
+    free(data);
+ }
+ 
+@@ -204,27 +301,19 @@
+       free(pc);
+       return;
+    }
+-   pcache_program(prog, sizeof(prog));
+    const uint8_t *uuid = dev->physical_device->base.vk.properties.pipelineCacheUUID;
+    char uuid_hex[2 * VK_UUID_SIZE + 1];
+    for (int i = 0; i < VK_UUID_SIZE; i++)
+       snprintf(uuid_hex + 2 * i, 3, "%02x", uuid[i]);
+-   snprintf(pc->path, sizeof(pc->path), "%s/%s-%s.bin", dir, prog, uuid_hex);
++   if (pcache_steam_dir()) {
++      snprintf(pc->path, sizeof(pc->path), "%s/%s.bin", dir, uuid_hex);
++   } else {
++      pcache_program(prog, sizeof(prog));
++      snprintf(pc->path, sizeof(pc->path), "%s/%s-%s.bin", dir, prog, uuid_hex);
++   }
+ 
+    size_t size = 0;
+-   void *data = pcache_read(pc->path, &size);
+-   if (data) {
+-      /* the header vn_GetPipelineCacheData wrote: data from another GPU or driver is dropped */
+-      const struct vk_pipeline_cache_header *h = data;
+-      if (h->header_size < sizeof(*h) || h->header_size > size ||
+-          h->header_version != VK_PIPELINE_CACHE_HEADER_VERSION_ONE ||
+-          memcmp(h->uuid, uuid, VK_UUID_SIZE)) {
+-         vn_droiddeck_log("pipeline cache: %s is for another driver; starting empty", pc->path);
+-         free(data);
+-         data = NULL;
+-         size = 0;
+-      }
+-   }
++   void *data = pcache_load(dev, pc, &size, true);
+    const VkPipelineCacheCreateInfo ci = {
+       .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
+       .initialDataSize = data ? size : 0,
+@@ -267,6 +356,16 @@
+    dev->dd_pcache = NULL;
+ }
+ 
++void
++vn_dd_pcache_absorb(struct vn_device *dev, VkPipelineCache app_cache)
++{
++   struct vn_dd_pcache *pc = dev->dd_pcache;
++   if (!pc || app_cache == VK_NULL_HANDLE || app_cache == pc->cache || app_cache == pc->tmp)
++      return;
++   if (vn_MergePipelineCaches(vn_device_to_handle(dev), pc->cache, 1, &app_cache) == VK_SUCCESS)
++      p_atomic_inc(&pc->created);
++}
++
+ VkPipelineCache
+ vn_dd_pcache_for(struct vn_device *dev, VkPipelineCache app_cache, uint32_t count)
+ {
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_pcache.h b/src/virtio/vulkan/vn_droiddeck_pcache.h
+--- a/src/virtio/vulkan/vn_droiddeck_pcache.h	2026-10-30 22:57:32.989808571 +0000
++++ b/src/virtio/vulkan/vn_droiddeck_pcache.h	2026-10-30 22:57:04.879854209 +0000
+@@ -7,9 +7,15 @@
+  * vkCreateGraphicsPipelines taking up to 230 ms there, which every later command of the game
+  * (the frame, the present) waited behind -- the stutters left after 0027-0029.
+  *
+- * Each device gets one VkPipelineCache, loaded from
++ * Each device gets one VkPipelineCache, used for every pipeline the program creates without a
++ * cache of its own, and kept in
++ *   $MESA_SHADER_CACHE_DIR (or $MESA_GLSL_CACHE_DIR)/droiddeck-venus/<pipelineCacheUUID>.bin
++ * when Steam set one -- steamapps/shadercache/<appid>, for the game and for the fossilize_replay
++ * runs of Steam's shader pre-caching alike, so pipelines the replay compiles before the game
++ * starts are the game's -- and otherwise in
+  *   $XDG_CACHE_HOME (or $HOME/.cache)/droiddeck-venus/<program>-<pipelineCacheUUID>.bin
+- * and used for every pipeline the program creates without a cache of its own. A thread saves it
++ * A cache the program makes itself is merged in when it destroys it (fossilize_replay can bring
++ * its own). Before saving, a file another process saved meanwhile is merged in first. A thread saves it
+  * when new pipelines were made (every DROIDDECK_VN_PIPELINE_CACHE_SAVE_S, default 20 s) and at
+  * vkDestroyDevice, so a game that is killed keeps what it compiled up to the last save. The next
+  * session's pipelines come from the cache instead of the compiler.
+@@ -29,6 +35,10 @@
+ void
+ vn_dd_pcache_fini(struct vn_device *dev);
+ 
++/* a program's own cache, merged into the device's before it is destroyed */
++void
++vn_dd_pcache_absorb(struct vn_device *dev, VkPipelineCache app_cache);
++
+ /* the cache a pipeline create should use: the program's own, or the device's */
+ VkPipelineCache
+ vn_dd_pcache_for(struct vn_device *dev, VkPipelineCache app_cache, uint32_t count);
+diff -ruN a/src/virtio/vulkan/vn_pipeline.c b/src/virtio/vulkan/vn_pipeline.c
+--- a/src/virtio/vulkan/vn_pipeline.c	2026-10-30 22:57:32.989815889 +0000
++++ b/src/virtio/vulkan/vn_pipeline.c	2026-10-30 22:57:04.880599560 +0000
+@@ -465,6 +465,8 @@
+    if (!cache)
+       return;
+ 
++   vn_dd_pcache_absorb(dev, pipelineCache);
++
+    vn_async_vkDestroyPipelineCache(dev->primary_ring, device, pipelineCache,
+                                    NULL);
+ 
