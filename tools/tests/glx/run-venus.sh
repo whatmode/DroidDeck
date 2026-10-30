@@ -138,6 +138,22 @@ grep "wait stack" $OUT/statslog-default.txt | grep -q "in thread 'vkstats'.* vn_
   && echo "PASS wait stacks name the thread and the driver's functions" \
   || { echo "FAIL wait stacks name the thread and the driver's functions"; grep "wait stack" $OUT/statslog-default.txt | head -2 | cut -c1-300; }
 # lavapipe does not hold a pool to its maxSets, so here the real pool says yes (vkstats rc 2)
+# the driver's on-disk pipeline cache (0030): the first run saves what it compiled at
+# vkDestroyDevice, the second loads it
+printf '#version 450\nlayout(local_size_x = 64) in;\nlayout(std430, binding = 0) buffer B { uint v[]; };\nvoid main() { }\n' > $OUT/pc.comp
+glslangValidator -V $OUT/pc.comp -o $OUT/pc.spv >/dev/null || exit 1
+rm -rf /tmp/pcache-home; mkdir -p /tmp/pcache-home
+for run in 1 2; do
+  before=$(wc -l < $L)
+  HOME=/tmp/pcache-home XDG_CACHE_HOME= timeout 60 $OUT/vkstats 0.1 $OUT/pc.spv > $OUT/pc-$run.txt 2>&1
+  tail -n +$((before + 1)) $L | grep " vkstats" | grep "pipeline cache" | cut -c1-240 | tee $OUT/pclog-$run.txt
+  grep "compute pipeline" $OUT/pc-$run.txt
+done
+ls -la /tmp/pcache-home/.cache/droiddeck-venus/ 2>&1 | tail -2
+PCLOADED=$(sed -n 's/.*, \([0-9]*\) bytes loaded.*/\1/p' $OUT/pclog-2.txt | tail -1)
+grep -q "pipeline cache: saved" $OUT/pclog-1.txt && [ "${PCLOADED:-0}" -gt 64 ] \
+  && echo "PASS the pipeline cache is saved and loaded across runs" \
+  || { echo "FAIL the pipeline cache across runs"; cat $OUT/pclog-1.txt $OUT/pclog-2.txt | head -6; }
 stats_case defer DROIDDECK_VN_POOL_DEFER=1
 grep -q "descriptor pools over .* [1-9][0-9]* sent synchronously to the real pool" $OUT/statslog-defer.txt \
   && echo "PASS DROIDDECK_VN_POOL_DEFER=1 still asks the real pool" || echo "FAIL DROIDDECK_VN_POOL_DEFER=1 (rc $SRC)"

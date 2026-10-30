@@ -90,6 +90,40 @@ main(int argc, char **argv)
       }
    }
 
+   /* a compute pipeline with no cache of the program's own (as DXVK makes them): the driver's
+    * on-disk cache (0030) takes it */
+   if (argc > 2) {
+      FILE *f = fopen(argv[2], "rb");
+      if (!f) {
+         printf("vkstats: no shader %s\n", argv[2]);
+         return 1;
+      }
+      static uint32_t code[16384];
+      const size_t bytes = fread(code, 1, sizeof(code), f);
+      fclose(f);
+      const VkShaderModuleCreateInfo smci = {
+         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = bytes, .pCode = code,
+      };
+      VkShaderModule sm;
+      CHECK(vkCreateShaderModule(dev, &smci, NULL, &sm));
+      const VkPipelineLayoutCreateInfo plci = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+      VkPipelineLayout pl;
+      CHECK(vkCreatePipelineLayout(dev, &plci, NULL, &pl));
+      const VkComputePipelineCreateInfo cpci2 = {
+         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+         .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                    .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm, .pName = "main" },
+         .layout = pl,
+      };
+      VkPipeline pipe;
+      const double t0 = now_ms();
+      CHECK(vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpci2, NULL, &pipe));
+      printf("vkstats: compute pipeline made in %.1f ms\n", now_ms() - t0);
+      vkDestroyPipeline(dev, pipe, NULL);
+      vkDestroyPipelineLayout(dev, pl, NULL);
+      vkDestroyShaderModule(dev, sm, NULL);
+   }
+
    /* the pool: room for 4 sets of one uniform buffer each, no FREE_DESCRIPTOR_SET (DXVK's) */
    const VkDescriptorSetLayoutBinding binding = {
       .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1,

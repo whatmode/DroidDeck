@@ -2078,3 +2078,32 @@ server's `VKR_RING_BUFFER_MAX_SIZE` is 16 MiB). That holds over a second of Lake
 server stall of a few hundred ms no longer stops the game thread. The size is logged
 (`ring: 4096 KiB`). Expected on the device: `ring space` waits near zero, and the stalls that are
 left are the server's own (they still delay the frame's GPU work, but recording keeps going).
+
+## The 2026-10-31-02 bundle (0029 on the device), and 0030: a pipeline cache on disk
+
+User: "Similar results". `dd.786c3df0`, `ring: 4096 KiB`.
+
+- **0029 landed: `ring space` is gone** from every Lake window (it was 400-550 waits per 10 s).
+- **The game is GPU-bound now.** `gpu over 10 s: busy` 60-95%, and the GPU time per frame rises
+  through the session: ~59 ms at 00:35:37 (15 fps, 88% busy), ~95 ms at 00:37:27 (9 fps, 88%
+  busy). Same work, slower GPU -- consistent with thermal throttling; not measured (no clock
+  line yet).
+- **The remaining hitches are pipeline compiles on the server's main ring.** The frame threads'
+  only notable bridge wait is the present's ring-seqno wait (`dxvk-submit`, ~4-6 ms a frame), with
+  spikes of 112-264 ms. In the same windows the main ring's slowest calls are
+  `vkCreateGraphicsPipelines`, 44-230 ms each (and the occasional `vkAllocateMemory`, 55-131 ms).
+  `dxvk-cs` creates command and descriptor pools, which marks it `async_pipeline_create`, so the
+  pipelines it compiles at draw time (DXVK without GPL) are sent asynchronously on the primary
+  ring and compiled there synchronously: everything queued after them, the present included,
+  waits for the compiler. DXVK passes `VK_NULL_HANDLE` for every cache (it relies on the driver's
+  own disk cache), and Mali's Vulkan driver keeps none, so every session compiles everything again.
+
+**0030.** Each device gets a `VkPipelineCache` loaded from
+`~/.cache/droiddeck-venus/<program>-<pipelineCacheUUID>.bin` (XDG_CACHE_HOME honoured), used for
+every pipeline created without a cache. A thread saves it every 20 s when its size changed, and
+at `vkDestroyDevice`; the file is written to a temporary and renamed. A file whose venus header
+carries another UUID is ignored. Log lines: `pipeline cache: <path>, N bytes loaded` and
+`pipeline cache: saved N bytes (M new pipelines ...)`. `DROIDDECK_VN_PIPELINE_CACHE=0` turns it
+off. Expected: the first session after install still compiles (and still hitches) where it goes;
+later sessions through the same places should not. CI runs a compute pipeline in two processes
+and checks the second loads what the first saved.

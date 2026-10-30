@@ -74,3 +74,8 @@ DROIDDECK_VN_BC_GPU=1
 # The command ring the game writes into, in KiB (0029; default 4096, was 128). A bigger ring lets the
 # game keep recording while the server is stuck on a slow call. 128 restores the old size.
 #DROIDDECK_VN_RING_KB=128
+#
+# The driver's own pipeline cache, kept on disk per game (0030): a pipeline compiled once is loaded
+# from ~/.cache/droiddeck-venus next time instead of compiled on the server's main ring. =0 turns
+# it off.
+#DROIDDECK_VN_PIPELINE_CACHE=0
