@@ -1840,3 +1840,67 @@ submit pipeline -- the distinction the next fix depends on.
 Note when reading those totals: the same window line is duplicated across the `steam` and `server`
 logs of one bundle, so per-bundle sums double-count. Compare per-session, and only across
 `Lake.exe] waits over` lines.
+
+## The 2026-10-30-04 bundle: 0025 landed, and the wait now has an owner
+
+`dd08fc6f87` ran and the stutter is unchanged (15 of 28 Lake windows under 10 fps, 54% -- the same
+43-54% band as every bundle since 10-26, so the collapse predates all of 0021-0025). What changed is
+the report: `0025` produced **25 semaphore wait stacks** where there were none, and 8 of them are the
+game's own.
+
+**The dominant sustained cost is now attributed and it is not the decode.** In the game process the
+waits are 50-73% of wall in collapsed windows, and semaphore is the largest bucket in every one:
+
+```
+20:03:21  waits=1091  7316 ms of 10 s (73% wall)  semaphore=5436 ring seqno=1534 ring space=325
+20:02:21  waits=10962 6552 ms of 10 s (66% wall)  semaphore=5058 ring seqno=1272
+12:40:00  waits=700   6727 ms of 10 s (67% wall)  semaphore=4572 ring seqno=1647
+```
+
+Every game semaphore stack is the **same stack**, symbolized against the exact `dd08fc6f87`
+`libvulkan_panvk.so` (whose SONAME is `libvulkan_virtio.so` -- `libvulkan_freedreno.so` is just the
+file name it is installed under, which is why the frames read `freedreno`):
+
+```
+libvulkan_freedreno.so+0x9b1a0 -> vn_WaitSemaphores +592
+win32u.so+0x139b00 -> winevulkan.so+0x1fe38 -> ntdll.so+0x428e4 -> ...
+```
+
+`win32u` is Wine's present path, so this is DXVK's present/frame-latency throttle sitting in
+`vkWaitSemaphores`, not a game logic wait. The same symbol table resolves the other stacks:
+`vn_ring_wait_seqno` under `wsi_common_queue_present`, and `vn_WaitForFences`.
+
+**The GPU is not the bottleneck.** The host ring is busy only **2.2-2.9 s of every 10 s** while the
+game waits 73% of wall. A semaphore that takes 80 ms/frame to signal, on a queue that is three
+quarters idle, is a *feedback/pacing* problem, not a throughput one -- the guest is waiting for a
+signal the host is not late in producing. The knobs for that path already exist
+(`no_semaphore_feedback`, `no_fence_feedback`, `no_event_feedback`).
+
+**What the collapse looks like on the host**, from the same ring, healthy vs collapsed windows:
+
+| op | healthy (/window) | collapsed (/window) |
+|---|---|---|
+| `vkAllocateDescriptorSets` | 7,807 | **69,034** |
+| `vkUpdateDescriptorSets` | 4,497 | **49,755** |
+| `vkCmdUpdateBuffer` | 0 | **10,244** |
+| `vkCmdBeginRendering` | 300 | **0** |
+
+So in the collapse the game stops drawing and starts churning -- ~4,000 descriptor sets allocated
+*per draw*, plus 10k buffer updates a window. `corr(ring busy, vkAllocateDescriptorSets) = +0.79`.
+`vkCmdUpdateBuffer` and `vkResetDescriptorPool` appear *only* in collapsed windows.
+
+**A real bug alongside it: a descriptor retry storm.** The guest logs **1,480
+`VK_ERROR_OUT_OF_POOL_MEMORY`** from `vn_AllocateDescriptorSets` in this one bundle (9,630 in
+10-29-07), and `0023` fired to defer to the real pool 3 times. DXVK retries a pool-full answer, so
+each false one is a reset/recreate loop. This is not the collapse -- it is present in 10-26-12 with
+2,501 errors and `0023` not yet written -- but it is a real defect on its own.
+
+**Do not read the BC decode as cleared.** `462a7d1` said to clear it; the new bundle has the game
+decoding **up to 2.5 GB per 10 s window, 4,396 decodes on the GPU, at 6.6 fps**. It is real load.
+But it is not the collapse either: in `10-29-02` the decode line is *constant* at 106 images /
+255 ms while fps swings 50 -> 3 within the same session. Decode is a load the collapse makes worse;
+it is not what starts it.
+
+**Reading the totals.** The same window line is duplicated across the `steam` and `server` logs of
+one bundle, so per-bundle sums double-count. Compare per-session, and only across `Lake.exe] waits
+over` lines.
