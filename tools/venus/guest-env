@@ -42,3 +42,10 @@ DROIDDECK_VN_BC_GPU=1
 # BC7 on the GPU. Off by default: BC7 is 1.4% of the compressed bytes, so it cannot move the
 # frame rate, and the black-texture reports came after it shipped on.
 #DROIDDECK_VN_BC7_GPU=1
+#
+# The A/B for the frame collapse (guest-patches/0026). The BC decode's two dispatches are ordered
+# with scopes that name only the stages that touch the buffers (host/transfer -> compute, compute
+# -> transfer). =1 puts back the ALL_COMMANDS -> ALL_COMMANDS barrier it used to record, which on a
+# tile-based GPU flushes the tiler per upload. Back to ~50 fps with this unset and 2-10 fps with it
+# set means the tiler flush was the collapse.
+#DROIDDECK_VN_BC_COARSE_BARRIER=1

@@ -1904,3 +1904,52 @@ it is not what starts it.
 **Reading the totals.** The same window line is duplicated across the `steam` and `server` logs of
 one bundle, so per-bundle sums double-count. Compare per-session, and only across `Lake.exe] waits
 over` lines.
+
+## 0026: the BC decode flushed the tiler twice per upload
+
+The wait is attributed (0025) and it is the game's own present path, but the cost it waits on is
+the GPU, not the host: the ring is idle three quarters of the time while the frame waits. The one
+thing in this driver that puts heavy, texture-shaped work on the GPU is the BC decode (0024), and
+the per-format line 0024 added says where it lands:
+
+```
+BC textures by format: BC1 205/234M, BC3 88/130M, BC7 7/4M
+BC textures by format: BC1 217/224M, BC3 205/178M, BC7 16/14M
+```
+
+BC1 and BC3 are the whole decode; BC7 is ~2%.  Both are S3TC, so they take the GPU path
+(`bc_gpu_kind` returns 0-3) and BC7 does not by default.
+
+**The defect.** `bc_gpu_copy` ordered its dispatches with
+`VK_PIPELINE_STAGE_ALL_COMMANDS_BIT -> ALL_COMMANDS`, twice per upload, with
+`VK_ACCESS_MEMORY_WRITE|HOST_WRITE -> MEMORY_READ|MEMORY_WRITE`. On a tile-based GPU a dependency
+whose *source* scope includes the vertex/tiling stages forces the tiler to finish and flush before
+the dependency is satisfied. The decode touches only three buffers -- the compressed source and
+parameters, written by host and transfer and read by the shader; the decoded destination, written
+by the shader and read by the caller's transfer -- so none of that scope was needed. 1,000-4,500
+uploads in a single 10 s window, two barriers each.
+
+**The fix.** `bc_gpu_barrier_before_dispatch` is TRANSFER|HOST -> COMPUTE_SHADER with
+TRANSFER_WRITE|HOST_WRITE -> SHADER_READ; `bc_gpu_barrier_after_dispatch` is COMPUTE_SHADER ->
+TRANSFER with SHADER_WRITE -> TRANSFER_READ. `DROIDDECK_VN_BC_COARSE_BARRIER=1` restores the old
+barrier so the change can be A/B'd on a device -- a fix that cannot be turned off cannot be shown
+to be the cause.
+
+**Also checked and rejected, so the next session does not redo it.** The host driver has no native
+BC (`android-vulkan.txt` reports `BC1=0x0 BC3=0x0 BC5=0x0 BC7=0x0`), so the decode cannot be
+removed by advertising the formats. The 1,480 `VK_ERROR_OUT_OF_POOL_MEMORY` are **not** 0023's
+false positives: they occur *after* 0023 flips the pool to synchronous real-driver mode, so they
+are genuine exhaustion, and `vkResetDescriptorPool` appears only in collapsed windows -- a real
+bug, but `corr(fps, allocDescriptorSets) = +0.08`, so not this collapse. Descriptor churn is a
+consequence of the stall, not the cause.
+
+**Corrections to earlier notes.** `462a7d1` said the BC decode was cleared: it is not. My first
+pass in the previous entry said decode is *constant* while fps swings -- that came from pairing
+each fps line with the nearest preceding BC line, which repeats one BC line across several fps
+readings. Aligned properly against the host ring in `app.log`, `corr(fps, bcDecodeMs) = -0.69` and
+`corr(fps, allocDescriptorSets) = +0.08`. Decode is the cost; descriptor churn is not.
+
+**Do not read `vkCmdBeginRendering: 0` in a collapsed window as "the game stopped drawing."** The
+guest batches command buffers, so whole batches of rendering are absent from the host's per-window
+count; `vkExecuteCommandStreamsMESA` keeps climbing (300 -> 893) while `vkCmdBeginRendering` reads
+zero. Counts of draw-level commands are only comparable within the same batching behaviour.
