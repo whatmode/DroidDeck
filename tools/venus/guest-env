@@ -49,3 +49,20 @@ DROIDDECK_VN_BC_GPU=1
 # tile-based GPU flushes the tiler per upload. Back to ~50 fps with this unset and 2-10 fps with it
 # set means the tiler flush was the collapse.
 #DROIDDECK_VN_BC_COARSE_BARRIER=1
+#
+# The A/B for the descriptor-pool round trips (guest-patches/0027). A pool the guest's accounting
+# calls full is refused on the spot, as upstream venus does; =1 puts back 0023's synchronous
+# allocation from the real pool, which the real pool refused too, ~60 times a frame in Lake, each
+# one a wait for the server to run everything queued before it.
+#DROIDDECK_VN_POOL_DEFER=1
+#
+# The BC decode's buffers in the server's native device-local memory (0027). =0 puts them back in
+# the first device-local type, which is host-visible dma-heap memory the server allocates and maps.
+#DROIDDECK_VN_BC_NATIVE=0
+#
+# How much the BC decode keeps pooled for reuse, in MiB (0027; default 384).
+#DROIDDECK_VN_BC_POOL_MB=384
+#
+# The game-session reports (0027): GPU busy from timestamps around each submission, this
+# program's threads' CPU use, and the descriptor-pool outcomes, every 10 s. =0 turns them off.
+#DROIDDECK_VN_STATS=0

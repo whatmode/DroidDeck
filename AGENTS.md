@@ -1953,3 +1953,65 @@ readings. Aligned properly against the host ring in `app.log`, `corr(fps, bcDeco
 guest batches command buffers, so whole batches of rendering are absent from the host's per-window
 count; `vkExecuteCommandStreamsMESA` keeps climbing (300 -> 893) while `vkCmdBeginRendering` reads
 zero. Counts of draw-level commands are only comparable within the same batching behaviour.
+
+## 0027: the 2026-10-30-04 bundle re-read -- round trips, not the GPU and not the semaphore
+
+The previous entry read this bundle as "the game waits 73% of wall on semaphores, so the cost is
+the GPU". Three things in the same bundle say otherwise, and they are what 0027 acts on.
+
+**The semaphore bucket is DXVK's background thread, not the frame.** The healthy menu window
+(20:02:21, 53 fps on screen) has `semaphore 5451x 5057.5 ms` -- more than any collapsed window.
+Every semaphore stack is the same single call from winevulkan (`vn_WaitSemaphores`), i.e. DXVK's
+submission-finisher thread, which spends its life waiting for the GPU by design. Summed wait time
+across threads is not frame time. 0027 puts the thread name in every wait stack
+(`in thread '...'`) so the frame's own thread can be told from the finisher.
+
+**The steady state was never in the guest's log.** `droiddeck_vulkan.txt` stops at 600 lines per
+process, and 492 of Lake's were one `vn_AllocateDescriptorSets: VK_ERROR_OUT_OF_POOL_MEMORY` line
+per pool DXVK filled, so the file ends at 20:03:21, 80 s into the game. Everything after it --
+the 20:03:30-20:05:40 steady state at 8-13 fps -- is only in the server's ring lines in `app.log`.
+0027 drops the pool-full lines from the file (they are counted instead) and raises the cap to 4000.
+
+**What the server shows in that steady state** (ring `206160587136`, per 10 s, 20:03:30-20:05:40):
+`vkAllocateDescriptorSets` 150-215k, `vkUpdateDescriptorSets` 115-165k, `vkResetDescriptorPool`
+440-660, and **430-690 `vkAllocateDescriptorSets failed` warnings** -- one per reset, ~55 a frame.
+That is 0023 at work: when the guest's accounting says a pool is full, 0023 makes the allocation a
+*synchronous* call to the real pool, the real pool refuses it too (the warnings), and only then
+does DXVK move on. A synchronous call returns only after the server has run everything queued
+before it, so each of the ~55 per frame parks the recording thread until the server catches up:
+guest and server CPU work in series instead of overlapped. The load-time stacks show the cost
+directly: `vn_AllocateDescriptorSets -> vn_call -> ring wait`, 8x 267 ms with a 215 ms worst.
+The guest's accounting was right every time the real pool was asked, so upstream's answer --
+refuse on the spot -- is correct. 0027 restores it; `DROIDDECK_VN_POOL_DEFER=1` brings 0023 back
+for an A/B, and the new `descriptor pools over 10 s:` line counts both outcomes.
+
+**The GPU is not shown to be saturated, either.** The compositor's own composite in the steady
+state waits 0.45-0.9 ms on its fence (`fence wait 0.45/1.74` at 20:04:11), which it would not if
+the game kept the Mali busy for 100 ms a frame. That is not proof (Mali time-slices contexts), so
+0027 measures it: timestamps around every submission, reported as `gpu over 10 s: busy X ms (Y%)`
+(the union of the spans, so overlapping submissions are not double-counted), plus a
+`cpu over 10 s:` line naming this program's busiest threads. Next bundle: if `gpu busy` is well
+under the frame time and one game thread is near 100%, the remaining cost is CPU (DXVK under FEX
+or the driver's encoding); if `gpu busy` is near 100%, it is the GPU.
+
+**The BC decode's "device-local" buffers were dma-heap memory.** `bc_buffer_new` took the first
+device-local type, and on this device that is type 0 (`DEVICE_LOCAL | HOST_VISIBLE | COHERENT |
+CACHED`), which the server allocates from the dma-heap, zeroes and maps. With a 4-entry pool and
+exact per-copy sizes most chunks were new, so a level load allocated 6.5 GB of dma-heap in 10 s
+(`vkAllocateMemory 617x 1683.8 ms (max 85.8)`, every call blocking the ring the game's commands
+queue behind). 0027 takes a device-local type that is not host-visible, searched from the last
+type (the server's native alias, 0009), rounds GPU chunk sizes to a power of two, and pools up to
+32 chunks within `DROIDDECK_VN_BC_POOL_MB` (384). A `BC staging chunks:` line reports reused /
+allocated / freed. `DROIDDECK_VN_BC_NATIVE=0` restores the old type for an A/B. Lake's own texture
+memory is DXVK's choice (type 0 as well) and cannot be moved from the guest without a server change.
+
+**Wait stacks are symbolized in-process now.** The library keeps `.symtab`; 0027 reads it once and
+prints `function+offset` for the driver's own frames, so a stack no longer needs the exact CI
+artifact to read (the artifacts are not downloadable from these sessions, and the release asset is
+overwritten by the next build -- offsets symbolized against a later build are wrong).
+
+CI (`run-venus.sh`): `vkstats` fills a 4-set pool 50 times and checks every fifth allocation is
+refused with no round trip (and that `DROIDDECK_VN_POOL_DEFER=1` still asks the real pool), that
+GPU busy is measured, that this program's threads are reported, and that wait stacks name the
+thread and the driver's functions; `bc_native_case` runs `vkbc` against the phone's memory types
+and checks the decode allocates native memory (and that `DROIDDECK_VN_BC_NATIVE=0` does not).

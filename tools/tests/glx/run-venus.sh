@@ -112,6 +112,33 @@ timeout 120 $OUT/vkmem 1 > $OUT/mem1.txt 2>&1; rc=$?
 grep "vkmem:" $OUT/mem1.txt
 [ $rc = 0 ] || { echo "FAIL vkmem with the alias (rc $rc)"; tail -8 $OUT/mem1.txt; }
 grep -E "memory type|native device-local|allocations in" $OUT/server-1.log | head -12
+# The game-session reports (0027): a full descriptor pool refused without a round trip (DXVK fills
+# dozens a frame), GPU busy from timestamps around submissions, wait stacks named by function
+# and thread. The 10 s windows are shortened so a 2 s run has several.
+echo "---- the game-session reports (descriptor pools, GPU busy, named wait stacks)"
+gcc -O2 -Wall -o $OUT/vkstats tools/tests/glx/vkemu/vkstats.c -lvulkan || exit 1
+L=/tmp/steamroot/logs/droiddeck_vulkan.txt
+stats_case() {  # name, env...
+  local name=$1; shift
+  local before=$(wc -l < $L 2>/dev/null || echo 0)
+  env DROIDDECK_VN_STATS_MS=400 DROIDDECK_VN_WAIT_STACKS_MS=400 "$@" timeout 120 $OUT/vkstats 2 > $OUT/stats-$name.txt 2>&1; SRC=$?
+  tail -n +$((before + 1)) $L | grep "vkstats\]" > $OUT/statslog-$name.txt
+  grep "vkstats:" $OUT/stats-$name.txt
+  grep -E "gpu over|descriptor pools over|cpu over|wait stack 1 " $OUT/statslog-$name.txt | tail -4 | cut -c1-330
+}
+stats_case default
+[ $SRC = 0 ] && echo "PASS a full descriptor pool is refused" || { echo "FAIL a full descriptor pool is refused (rc $SRC)"; tail -5 $OUT/stats-default.txt; }
+grep -q "descriptor pools over .*s: [1-9][0-9]* allocations refused by the guest's accounting (no round trip); 0 sent" $OUT/statslog-default.txt \
+  && echo "PASS a full pool costs no round trip" || echo "FAIL a full pool costs no round trip"
+grep -q "gpu over .*as the union of [1-9][0-9]* timed" $OUT/statslog-default.txt && echo "PASS GPU busy measured by timestamps" \
+  || { echo "FAIL GPU busy measured by timestamps"; grep "gpu" $OUT/statslog-default.txt | head -3; }
+grep -q "cpu over .*this program" $OUT/statslog-default.txt && echo "PASS this program's CPU use by thread" || echo "FAIL this program's CPU use by thread"
+grep "wait stack" $OUT/statslog-default.txt | grep -q "in thread 'vkstats'.* vn_[A-Za-z_]*+0x" \
+  && echo "PASS wait stacks name the thread and the driver's functions" \
+  || { echo "FAIL wait stacks name the thread and the driver's functions"; grep "wait stack" $OUT/statslog-default.txt | head -2 | cut -c1-300; }
+stats_case defer DROIDDECK_VN_POOL_DEFER=1
+grep -q "descriptor pools over .* [1-9][0-9]* sent synchronously to the real pool, [1-9][0-9]* of them refused there" $OUT/statslog-defer.txt && [ $SRC = 0 ] \
+  && echo "PASS DROIDDECK_VN_POOL_DEFER=1 still asks the real pool" || echo "FAIL DROIDDECK_VN_POOL_DEFER=1 (rc $SRC)"
 echo "== server log:"; grep -v "^$" $OUT/server-1.log | grep -v "memory type" | tail -25
 kill $SERVER 2>/dev/null; wait $SERVER 2>/dev/null
 # The phone's memory types (Mali: no device-local type without host-visible; a cached type the
@@ -162,13 +189,39 @@ if grep "droiddeck zink \[" $OUT/glmem-mali.txt | grep -qv " 0 timed" && grep "d
   echo "PASS the driver's frame stats (GPU time measured)"; else echo "FAIL the driver's frame stats"; fi
 # who waits (call stacks of fence and server-reply waits, in droiddeck_vulkan.txt)
 grep "wait stack" /tmp/steamroot/logs/droiddeck_vulkan.txt | grep glmem | tail -3 | cut -c1-400
-grep "wait stack" /tmp/steamroot/logs/droiddeck_vulkan.txt | grep glmem | grep -q "libvulkan_panvk.so+0x" && echo "PASS wait stacks with library offsets" || echo "FAIL wait stacks"
+grep "wait stack" /tmp/steamroot/logs/droiddeck_vulkan.txt | grep glmem | grep -qE "libvulkan_panvk.so\+0x| vn_[A-Za-z_]*\+0x" && echo "PASS wait stacks with library offsets or names" || echo "FAIL wait stacks"
 grep "droiddeck cpu over" $OUT/glmem-mali.txt | tail -1 | cut -c1-300
 grep -q "droiddeck cpu over .*glmem" $OUT/glmem-mali.txt && echo "PASS the session's CPU use by thread" || echo "FAIL the session's CPU use by thread"
 echo "---- the same with the driver keeping the GPU's order (DROIDDECK_ZINK_PREFER_UNMAPPABLE=0: expect none)"
 glmem_case mali-order VKR_NATIVE_MEMORY=1 -- DROIDDECK_ZINK_PREFER_UNMAPPABLE=0
 [ $GLRC = 0 ] && [ "${NATIVE:-0}" = 0 ] && echo "PASS the check notices memory not taken from the native type" \
   || echo "FAIL GPU order case (rc $GLRC, native ${NATIVE:-0})"
+# BC decode buffers (0027): nothing maps them, so they belong in the server's native type, not in
+# dma-heap memory. vkbc's own memory is all host-visible, so a native allocation here is the
+# decode's.
+bc_native_case() {  # name, client env...
+  local name=$1; shift
+  kill $SERVER 2>/dev/null; wait $SERVER 2>/dev/null; rm -f /tmp/.virgl_test
+  env VK_DRIVER_FILES=$HOST_ICD LD_LIBRARY_PATH=$HOST_LIBS VKR_MEMORY_STATS_MS=200 VKR_NATIVE_MEMORY=1 \
+    VK_ADD_LAYER_PATH=$OUT/layers VK_INSTANCE_LAYERS=VK_LAYER_DROIDDECK_malimem:VK_LAYER_DROIDDECK_gputype \
+    $SERVER_BIN --venus --no-virgl --multi-clients > $OUT/server-$name.log 2>&1 &
+  SERVER=$!
+  for i in $(seq 1 50); do [ -S /tmp/.virgl_test ] && break; sleep 0.2; done
+  local before=$(wc -l < $L 2>/dev/null || echo 0)
+  env DROIDDECK_VN_EMULATE=mali "$@" timeout 120 $OUT/vkbc > $OUT/bc-$name.txt 2>&1; BCRC=$?
+  sleep 0.5
+  grep "vkbc: done" $OUT/bc-$name.txt
+  tail -n +$((before + 1)) $L | grep "vkbc\]" | grep -E "BC staging|on the GPU" | tail -2 | cut -c1-260
+  NATIVE=$(grep "allocations in" $OUT/server-$name.log | sed 's/.*native device-local [0-9]* ([0-9.]* MiB, total \([0-9]*\).*/\1/' | sort -n | tail -1)
+  echo "== $name: native allocations ${NATIVE:-0}"
+}
+echo "---- BC decode buffers with the phone's memory types (expect native memory)"
+bc_native_case bcnative
+[ $BCRC = 0 ] && [ "${NATIVE:-0}" -gt 0 ] && echo "PASS BC decode buffers in native memory (native ${NATIVE:-0})" \
+  || { echo "FAIL BC decode buffers in native memory (rc $BCRC, native ${NATIVE:-0})"; tail -6 $OUT/bc-bcnative.txt; }
+bc_native_case bcheap DROIDDECK_VN_BC_NATIVE=0
+[ $BCRC = 0 ] && [ "${NATIVE:-0}" = 0 ] && echo "PASS the check notices decode buffers outside the native type" \
+  || echo "FAIL BC decode with DROIDDECK_VN_BC_NATIVE=0 (rc $BCRC, native ${NATIVE:-0})"
 echo "---- an older app (no native type): GL still right"
 glmem_case mali-old VKR_NATIVE_MEMORY=0 --
 [ $GLRC = 0 ] && echo "PASS GL textures with an older app's server" || echo "FAIL GL textures with an older app's server (rc $GLRC)"
