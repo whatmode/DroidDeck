@@ -2015,3 +2015,42 @@ refused with no round trip (and that `DROIDDECK_VN_POOL_DEFER=1` still asks the 
 GPU busy is measured, that this program's threads are reported, and that wait stacks name the
 thread and the driver's functions; `bc_native_case` runs `vkbc` against the phone's memory types
 and checks the decode allocates native memory (and that `DROIDDECK_VN_BC_NATIVE=0` does not).
+
+## The 2026-10-30-05 bundle (0027 on the device), and 0028: images in native memory
+
+First bundle with the GPU-time and thread-CPU lines (`dd.72eed715`). Lake's steady state, 23:23:20
+to 23:25:35, every window alike:
+
+    gpu over 10 s: busy 5.0-6.6 s (50-66%) ... ~1000 submissions, ~0.3 s in vkQueueSubmit
+    cpu over 10 s: this program ~200%; Lake.exe (Unity main) 67-69%, UnityGfxDeviceW 20%, dxvk-cs 14%
+    frames: 8-11 fps (95-128 ms/frame)
+
+- **0027 did what it was for.** `descriptor pools over 10 s: N refused by the guest's accounting
+  (no round trip); 0 sent synchronously`. The frame threads' own waits on the bridge are now small:
+  `dxvk-cs` ring space ~0.25 s per 10 s, `dxvk-submit` present seqno ~0.2 s. The 6 s of semaphore
+  is `dxvk-queue`, DXVK's finisher, as predicted. The BC pool reuses (`125 reused, 2 allocated`)
+  and the decode buffers are type 4, the native alias.
+- **What is left is the GPU and the game's main thread.** ~64 ms of GPU per frame at ~10 fps, and
+  the Unity main thread (x86 under FEX) at ~67% of a core. Neither is saturated, so the frame is
+  those two partly in series (frame latency). No driver wait explains the remaining time.
+- **The 1.3 fps window at 23:24:24 is not a stutter.** The app went to the background
+  (`screen surface gone: presenting paused`, SIGSTOP); the 16.9 s semaphore wait is the paused GPU.
+- The user's video (driving): 11-15 fps with 150-550 ms hitches.
+
+**0028.** The GPU's 64 ms is the number a driver can still move. DXVK takes the first device-local
+type for an image, which on this device is type 0 -- host-visible, cached, coherent, so the server
+allocates every texture and render target from the dma-heap and imports it into the Mali driver.
+Allocations: `dma-heap total 258, 7248 MiB` against `native 68, 584 MiB` (the native ones are the
+BC decode). 0028 drops the host-visible types from an optimal-tiling image's `memoryTypeBits`
+when the server offers native ones (`dd_native_types`: device-local-only on the server's side, not
+a type venus hides host-visible from). Linear, external-memory, DRM-modifier, sparse and protected
+images are left alone; nothing maps an optimal image (DXVK maps only linear images and buffers).
+`DROIDDECK_VN_IMAGE_NATIVE=0` restores the old bits. Expected on the device: `gpu over 10 s: busy`
+per frame falls, and the level-load `vkAllocateMemory` time falls with it. If GPU time does not
+fall, the coherent memory was not the cost and the next suspect is the BC substitute itself
+(RGBA8 sampled where the game expects BC1, 8x the texture bandwidth).
+
+CI: `vkstats` prints an optimal and a linear image's allowed types; under the phone's memory types
+the optimal one must have no host-visible type and the linear one must keep them, and
+`DROIDDECK_VN_IMAGE_NATIVE=0` must bring them back. `mali-order` sets it too (it checks Zink's
+own order, which 0028 would otherwise decide for it).

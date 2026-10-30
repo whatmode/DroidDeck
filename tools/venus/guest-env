@@ -66,3 +66,7 @@ DROIDDECK_VN_BC_GPU=1
 # The game-session reports (0027): GPU busy from timestamps around each submission, this
 # program's threads' CPU use, and the descriptor-pool outcomes, every 10 s. =0 turns them off.
 #DROIDDECK_VN_STATS=0
+#
+# Games' textures and render targets in the server's native device-local memory (0028), instead of
+# the host-visible dma-heap type DXVK takes first. =0 offers the host-visible types again.
+#DROIDDECK_VN_IMAGE_NATIVE=0

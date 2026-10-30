@@ -63,6 +63,33 @@ main(int argc, char **argv)
    VkQueue queue;
    vkGetDeviceQueue(dev, 0, 0, &queue);
 
+   /* which memory types an optimal-tiling texture may use, and a linear one (0028: the optimal one
+    * must not be offered host-visible types when the server has native ones) */
+   {
+      VkPhysicalDeviceMemoryProperties mp0;
+      vkGetPhysicalDeviceMemoryProperties(pd, &mp0);
+      for (int linear = 0; linear < 2; linear++) {
+         const VkImageCreateInfo ici2 = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+            .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = { 256, 256, 1 }, .mipLevels = 1, .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = linear ? VK_IMAGE_TILING_LINEAR : VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+         };
+         VkImage img;
+         CHECK(vkCreateImage(dev, &ici2, NULL, &img));
+         VkMemoryRequirements r;
+         vkGetImageMemoryRequirements(dev, img, &r);
+         uint32_t hv = 0;
+         for (uint32_t i = 0; i < mp0.memoryTypeCount; i++)
+            if ((r.memoryTypeBits & (1u << i)) && (mp0.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
+               hv |= 1u << i;
+         printf("vkstats: %s image memory types 0x%x, host-visible among them 0x%x\n", linear ? "linear" : "optimal",
+                r.memoryTypeBits, hv);
+         vkDestroyImage(dev, img, NULL);
+      }
+   }
+
    /* the pool: room for 4 sets of one uniform buffer each, no FREE_DESCRIPTOR_SET (DXVK's) */
    const VkDescriptorSetLayoutBinding binding = {
       .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1,

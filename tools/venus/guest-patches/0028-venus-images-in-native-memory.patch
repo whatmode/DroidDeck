@@ -1,0 +1,139 @@
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck_bc.c
+--- a/src/virtio/vulkan/vn_droiddeck_bc.c	2026-10-30 21:33:54.696370243 +0000
++++ b/src/virtio/vulkan/vn_droiddeck_bc.c	2026-10-30 21:32:59.783329553 +0000
+@@ -591,16 +591,12 @@
+    if (native < 0)
+       native = debug_get_bool_option("DROIDDECK_VN_BC_NATIVE", true);
+    if (!host_visible && native) {
+-      for (uint32_t i = mp->memoryTypeCount; i-- > 0;) {
+-         const VkMemoryPropertyFlags flags = mp->memoryTypes[i].propertyFlags;
+-         if ((req.memoryRequirements.memoryTypeBits & (1u << i)) &&
+-             (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) &&
+-             !(flags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT |
+-                        VK_MEMORY_PROPERTY_PROTECTED_BIT))) {
+-            type = i;
+-            break;
+-         }
+-      }
++      /* dd_native_types: device-local only on the server too, not a type venus hides
++       * host-visible from */
++      const uint32_t native =
++         req.memoryRequirements.memoryTypeBits & dev->physical_device->dd_native_types;
++      if (native)
++         type = util_last_bit(native) - 1;
+    }
+    for (uint32_t i = 0; type == UINT32_MAX && i < mp->memoryTypeCount; i++) {
+       if (!(req.memoryRequirements.memoryTypeBits & (1u << i)))
+diff -ruN a/src/virtio/vulkan/vn_image.c b/src/virtio/vulkan/vn_image.c
+--- a/src/virtio/vulkan/vn_image.c	2026-10-30 21:33:54.443084365 +0000
++++ b/src/virtio/vulkan/vn_image.c	2026-10-30 21:32:59.670062162 +0000
+@@ -10,6 +10,7 @@
+ 
+ #include "vn_image.h"
+ #include "vn_droiddeck_bc.h"
++#include "util/u_debug.h"
+ 
+ #include "venus-protocol/vn_protocol_driver_image.h"
+ #include "venus-protocol/vn_protocol_driver_image_view.h"
+@@ -770,6 +771,46 @@
+    vk_image_destroy(&dev->base.vk, alloc, &img->base.vk);
+ }
+ 
++/* droiddeck (0028): optimal-tiling images in the server's native device-local memory. DXVK takes
++ * the first device-local type for an image, and here that type is host-visible, so every texture
++ * and render target of a game was dma-heap memory the server allocates, zeroes and imports into
++ * the GPU driver -- cached and coherent, which the GPU reaches through the coherency
++ * interconnect, and not the memory the GPU driver lays its own images out in. Lake's GPU time
++ * was 50-65 ms a frame with it. Nothing maps an optimal-tiling image, so when the server offers
++ * native types (dd_native_types), the image's allowed types drop the host-visible ones; images
++ * that cross a process (external memory, DRM modifiers) and linear ones are left alone.
++ * DROIDDECK_VN_IMAGE_NATIVE=0 turns it off. */
++static void
++vn_dd_image_native_bits(const struct vn_physical_device *physical_dev,
++                        VkImageTiling tiling,
++                        VkImageCreateFlags flags,
++                        VkExternalMemoryHandleTypeFlags external,
++                        uint32_t *bits)
++{
++   static int on = -1;
++   if (on < 0) {
++      on = debug_get_bool_option("DROIDDECK_VN_IMAGE_NATIVE", true);
++      if (on)
++         vn_droiddeck_log("images: optimal-tiling images in native device-local memory "
++                          "(types 0x%x; DROIDDECK_VN_IMAGE_NATIVE=0 turns it off)",
++                          physical_dev->dd_native_types);
++   }
++   if (!on || tiling != VK_IMAGE_TILING_OPTIMAL || external ||
++       (flags & (VK_IMAGE_CREATE_SPARSE_BINDING_BIT | VK_IMAGE_CREATE_PROTECTED_BIT)))
++      return;
++   const uint32_t native = *bits & physical_dev->dd_native_types;
++   if (!native)
++      return;
++   const VkPhysicalDeviceMemoryProperties *mp = &physical_dev->memory_properties;
++   uint32_t keep = native;
++   for (uint32_t i = 0; i < mp->memoryTypeCount; i++) {
++      if ((*bits & (1u << i)) &&
++          (mp->memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT))
++         keep |= 1u << i;
++   }
++   *bits &= keep;
++}
++
+ void
+ vn_GetImageMemoryRequirements2(VkDevice device,
+                                const VkImageMemoryRequirementsInfo2 *pInfo,
+@@ -785,6 +826,10 @@
+       plane = vn_image_get_plane(plane_info->planeAspect);
+ 
+    vn_image_fill_reqs(&img->requirements[plane], pMemoryRequirements);
++   struct vn_device *dev = vn_device_from_handle(device);
++   vn_dd_image_native_bits(dev->physical_device, img->base.vk.tiling, img->base.vk.create_flags,
++                           img->base.vk.external_handle_types,
++                           &pMemoryRequirements->memoryRequirements.memoryTypeBits);
+ }
+ 
+ void
+@@ -1147,6 +1192,11 @@
+       pInfo = &dd_info;
+    }
+    vn_dd_get_device_image_reqs(dev, device, pInfo, pMemoryRequirements);
++   const VkExternalMemoryImageCreateInfo *ext =
++      vk_find_struct_const(pInfo->pCreateInfo->pNext, EXTERNAL_MEMORY_IMAGE_CREATE_INFO);
++   vn_dd_image_native_bits(dev->physical_device, pInfo->pCreateInfo->tiling,
++                           pInfo->pCreateInfo->flags, ext ? ext->handleTypes : 0,
++                           &pMemoryRequirements->memoryRequirements.memoryTypeBits);
+    vn_dd_bc_info_end(&dd_fix);
+ }
+ 
+diff -ruN a/src/virtio/vulkan/vn_physical_device.c b/src/virtio/vulkan/vn_physical_device.c
+--- a/src/virtio/vulkan/vn_physical_device.c	2026-10-30 21:33:54.442220154 +0000
++++ b/src/virtio/vulkan/vn_physical_device.c	2026-10-30 21:32:49.645394368 +0000
+@@ -960,6 +960,15 @@
+ 
+    physical_dev->memory_properties = props2.memoryProperties;
+ 
++   physical_dev->dd_native_types = 0;
++   for (uint32_t i = 0; i < props2.memoryProperties.memoryTypeCount; i++) {
++      const VkMemoryPropertyFlags f = props2.memoryProperties.memoryTypes[i].propertyFlags;
++      if ((f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) &&
++          !(f & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT |
++                 VK_MEMORY_PROPERTY_PROTECTED_BIT)))
++         physical_dev->dd_native_types |= 1u << i;
++   }
++
+    /* Kernel makes every mapping coherent. If a memory type is truly
+     * incoherent, it's better to remove the host-visible flag than silently
+     * making it coherent. However, for app compatibility purpose, when
+diff -ruN a/src/virtio/vulkan/vn_physical_device.h b/src/virtio/vulkan/vn_physical_device.h
+--- a/src/virtio/vulkan/vn_physical_device.h	2026-10-30 21:33:54.444106960 +0000
++++ b/src/virtio/vulkan/vn_physical_device.h	2026-10-30 21:32:49.640604527 +0000
+@@ -113,6 +113,9 @@
+    int emulate_second_queue;
+ 
+    VkPhysicalDeviceMemoryProperties memory_properties;
++   /* droiddeck: memory types that are device-local only on the server too (its native alias
++    * types, patch 0009), as opposed to types venus hides host-visible from in the guest */
++   uint32_t dd_native_types;
+ 
+    struct {
+       VkExternalMemoryHandleTypeFlagBits renderer_handle_type;

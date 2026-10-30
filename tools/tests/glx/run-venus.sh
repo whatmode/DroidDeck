@@ -194,7 +194,7 @@ grep "wait stack" /tmp/steamroot/logs/droiddeck_vulkan.txt | grep glmem | grep -
 grep "droiddeck cpu over" $OUT/glmem-mali.txt | tail -1 | cut -c1-300
 grep -q "droiddeck cpu over .*glmem" $OUT/glmem-mali.txt && echo "PASS the session's CPU use by thread" || echo "FAIL the session's CPU use by thread"
 echo "---- the same with the driver keeping the GPU's order (DROIDDECK_ZINK_PREFER_UNMAPPABLE=0: expect none)"
-glmem_case mali-order VKR_NATIVE_MEMORY=1 -- DROIDDECK_ZINK_PREFER_UNMAPPABLE=0
+glmem_case mali-order VKR_NATIVE_MEMORY=1 -- DROIDDECK_ZINK_PREFER_UNMAPPABLE=0 DROIDDECK_VN_IMAGE_NATIVE=0
 [ $GLRC = 0 ] && [ "${NATIVE:-0}" = 0 ] && echo "PASS the check notices memory not taken from the native type" \
   || echo "FAIL GPU order case (rc $GLRC, native ${NATIVE:-0})"
 # BC decode buffers (0027): nothing maps them, so they belong in the server's native type, not in
@@ -209,6 +209,10 @@ bc_native_case() {  # name, client env...
   SERVER=$!
   for i in $(seq 1 50); do [ -S /tmp/.virgl_test ] && break; sleep 0.2; done
   local before=$(wc -l < $L 2>/dev/null || echo 0)
+  env "$@" timeout 60 $OUT/vkstats 0.2 > $OUT/img-$name.txt 2>&1
+  grep "image memory types" $OUT/img-$name.txt
+  IMGHV=$(grep "vkstats: optimal image" $OUT/img-$name.txt | sed 's/.*host-visible among them //')
+  LINHV=$(grep "vkstats: linear image" $OUT/img-$name.txt | sed 's/.*host-visible among them //')
   env DROIDDECK_VN_EMULATE=mali "$@" timeout 120 $OUT/vkbc > $OUT/bc-$name.txt 2>&1; BCRC=$?
   sleep 0.5
   grep "vkbc: done" $OUT/bc-$name.txt
@@ -227,7 +231,11 @@ echo "---- BC decode buffers with the phone's memory types (expect native memory
 bc_native_case bcnative
 [ $BCRC = 0 ] && [ "$BCTYPE" = 0x1 ] && echo "PASS BC decode buffers in native memory (flags $BCTYPE, server native ${NATIVE:-0})" \
   || { echo "FAIL BC decode buffers in native memory (rc $BCRC, flags ${BCTYPE:-none})"; tail -6 $OUT/bc-bcnative.txt; }
-bc_native_case bcheap DROIDDECK_VN_BC_NATIVE=0
+[ "$IMGHV" = 0x0 ] && [ -n "$LINHV" ] && [ "$LINHV" != 0x0 ] && echo "PASS optimal images offered native memory only, linear ones host-visible" \
+  || echo "FAIL image memory types (optimal host-visible ${IMGHV:-none}, linear ${LINHV:-none})"
+bc_native_case bcheap DROIDDECK_VN_BC_NATIVE=0 DROIDDECK_VN_IMAGE_NATIVE=0
+[ -n "$IMGHV" ] && [ "$IMGHV" != 0x0 ] && echo "PASS DROIDDECK_VN_IMAGE_NATIVE=0 offers the host-visible types again" \
+  || echo "FAIL DROIDDECK_VN_IMAGE_NATIVE=0 (optimal host-visible ${IMGHV:-none})"
 [ $BCRC = 0 ] && [ -n "$BCTYPE" ] && [ "$BCTYPE" != 0x1 ] && echo "PASS the check notices decode buffers outside the native type (flags $BCTYPE)" \
   || echo "FAIL BC decode with DROIDDECK_VN_BC_NATIVE=0 (rc $BCRC, flags ${BCTYPE:-none})"
 echo "---- an older app (no native type): GL still right"
