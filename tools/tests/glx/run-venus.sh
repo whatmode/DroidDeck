@@ -167,6 +167,28 @@ S1=$(pc_saved replay); L2=$(pc_loaded game)
 grep -q "shadercache/1118240/droiddeck-venus/" $OUT/pclog-game.txt && [ -n "$S1" ] && [ "$L2" = "$S1" ] \
   && echo "PASS the game loads what Steam's replay compiled into the game's shader cache dir" \
   || { echo "FAIL the shared shader cache dir (replay saved ${S1:-none}, game loaded ${L2:-none})"; cat $OUT/pclog-replay.txt $OUT/pclog-game.txt | head -6; }
+# the driver's own precompile (0032): a game with Steam's recorded pipelines starts fossilize_replay
+# on its cache; a stand-in replay (the same vkstats, making its pipeline) checks the spawn, the
+# environment it gets, the shared cache, and that a finished run is not repeated
+SD=/tmp/pcache-home/shadercache/1118240
+mkdir -p $SD/fozpipelinesv6/steamapprun_pipeline_cache.0/ $STEAM_COMPAT_CLIENT_INSTALL_PATH/steamrtarm64
+echo fake > $SD/fozpipelinesv6/steamapprun_pipeline_cache.0/steamapp_pipeline_cache.foz
+cat > $STEAM_COMPAT_CLIENT_INSTALL_PATH/steamrtarm64/fossilize_replay <<EOS
+#!/bin/sh
+echo "stand-in replay: \$* child=\$DROIDDECK_VN_PRECOMPILE_CHILD as_dxvk=\$DROIDDECK_VN_EMULATE_AS_DXVK dir=\$MESA_SHADER_CACHE_DIR"
+exec $OUT/vkstats 0.1 $OUT/pc.spv
+EOS
+chmod +x $STEAM_COMPAT_CLIENT_INSTALL_PATH/steamrtarm64/fossilize_replay
+rm -rf $SD/droiddeck-venus
+pc_run pre1 $OUT/vkstats MESA_GLSL_CACHE_DIR=$SD
+for i in $(seq 1 40); do ls $SD/droiddeck-venus/precompile-*.done >/dev/null 2>&1 && break; sleep 0.5; done
+cat $SD/droiddeck-venus/precompile.log 2>/dev/null | head -4
+pc_run pre2 $OUT/vkstats MESA_GLSL_CACHE_DIR=$SD
+grep "precompile" $L | tail -3 | cut -c1-240
+grep -q "precompile: fossilize_replay started" $L && ls $SD/droiddeck-venus/precompile-*.done >/dev/null 2>&1 \
+  && grep -q "child=1 as_dxvk=1 dir=$SD" $SD/droiddeck-venus/precompile.log && grep -q "precompile: done for these databases" $L \
+  && echo "PASS the driver precompiles Steam's recorded pipelines once" \
+  || { echo "FAIL the driver's precompile"; grep "precompile" $L | tail -5 | cut -c1-240; cat $SD/droiddeck-venus/precompile.log 2>/dev/null | head -5; }
 stats_case defer DROIDDECK_VN_POOL_DEFER=1
 grep -q "descriptor pools over .* [1-9][0-9]* sent synchronously to the real pool" $OUT/statslog-defer.txt \
   && echo "PASS DROIDDECK_VN_POOL_DEFER=1 still asks the real pool" || echo "FAIL DROIDDECK_VN_POOL_DEFER=1 (rc $SRC)"

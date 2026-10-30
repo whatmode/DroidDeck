@@ -2133,3 +2133,29 @@ program destroys it (fossilize_replay may bring its own). CI: a copy of `vkstats
 The 0030 CI check failed on its first run, and not on the driver: lavapipe's cache data for a
 compute pipeline is its 20-byte header only, so "loaded > 64 bytes" could never hold there. The
 check is now the round trip -- the second process loads exactly the bytes the first saved.
+
+## The 2026-10-31-04 bundle (0031 on the device), and 0032: the driver runs the replay itself
+
+User: "Shaders won't compile before launch, but actually if I drive the same location then it is
+smoother." The cache works: Lake loaded 570 KB from `steamapps/shadercache/1118240/droiddeck-venus/`
+and saved its way up to 2.5 MB over the session (272 new pipelines).
+
+Why nothing compiled before launch: Steam replays a game's fossilize databases only after it
+downloads a new set from the shader swarm (`Starting Shader Swarm download job` ->
+`Starting processing job` -> `Starting replay`, 10-27) -- not after local play. Since 10-27 no new
+set came, so no replay ran. On a Deck that is enough, because the replay of the downloaded set
+fills Mesa's disk cache and the game's own pipelines land there as it plays.
+
+0032: when a game's device starts with Steam's shader cache dir set and Steam has recorded
+pipelines for it (`fozpipelinesv6/*/steamapp_pipeline_cache.foz`, `steam_pipeline_cache.foz`),
+the driver starts `steamrtarm64/fossilize_replay --num-threads 2 <dbs>` in the background under
+`nice -n 10` with `MESA_SHADER_CACHE_DIR` set to that dir, `DROIDDECK_VN_PRECOMPILE_CHILD=1` (no
+recursion) and `DROIDDECK_VN_EMULATE_AS_DXVK=1` (the replay must rewrite shaders exactly as the
+game does, or the cache keys differ). Its pipelines are saved every 20 s; the game merges the file
+whenever it changed (0032 also merges when the game made nothing new itself). A run that exits 0
+writes `precompile-<uuid>.done` with the databases' sizes and mtimes, and is not repeated until
+they change. A run that died (Steam's reaper kills the game's tree on exit) is retried at the next
+launch; its log tail is printed (`precompile: last run: ...`). `DROIDDECK_VN_PRECOMPILE=0` turns it
+off. Open question this build answers: whether fossilize_replay through the bridge compiles at all
+(Steam's own replays did 3000 pipelines in 13 s, which is too fast) -- the replay's own
+`pipeline cache: saved ... (N new pipelines)` lines and `precompile.log` will say.

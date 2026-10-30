@@ -79,3 +79,8 @@ DROIDDECK_VN_BC_GPU=1
 # from ~/.cache/droiddeck-venus next time instead of compiled on the server's main ring. =0 turns
 # it off.
 #DROIDDECK_VN_PIPELINE_CACHE=0
+#
+# Compile the game's pipelines Steam has recorded before the game meets them (0032): the first
+# launch after the recordings change runs fossilize_replay in the background into the game's
+# pipeline cache. =0 turns it off.
+#DROIDDECK_VN_PRECOMPILE=0
