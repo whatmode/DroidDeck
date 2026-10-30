@@ -66,6 +66,10 @@ jobs:
             libxcb-present-dev libxcb-sync-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-xfixes0-dev libxshmfence-dev \
             libxrandr-dev libxxf86vm-dev zip libglvnd-dev libxcb-glx0-dev libxcb-dri2-0-dev libwayland-egl-backend-dev patchelf >/dev/null
           pip install --break-system-packages -q 'meson>=1.4'
+      - name: Check the driver's own environment file
+        # tools/venus/guest-env ships in the zip; driver-only pushes skip the APK build, which is
+        # where the unit tests otherwise run.
+        run: python3 -m unittest tools.tests.test_venus_guest_env
       - name: Build the venus ICD for the Linux side
         run: |
           set -o pipefail

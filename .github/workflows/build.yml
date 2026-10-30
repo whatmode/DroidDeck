@@ -89,7 +89,9 @@ jobs:
           # mali-gl/patches feed the driver builds, tools/panvk and tools/comet build the Mali
           # drivers, tools/ea is the EA launcher shim, docs and .github are documentation and CI.
           # mali-gl/release.env is deliberately not here - the APK downloads that runtime.
-          if grep -qvE '^(tools/(venus|panvk|comet|ea)/|mali-gl/patches/|docs/|\.github/|.*\.md$)' <<<"$changed"; then
+          # tools/tests/glx is the bridge's end-to-end check (Venus GLX check runs it), and
+          # test_venus_guest_env.py checks tools/venus/guest-env (Venus bridge build runs it).
+          if grep -qvE '^(tools/(venus|panvk|comet|ea)/|tools/tests/glx/|tools/tests/test_venus_guest_env\.py$|mali-gl/patches/|docs/|\.github/|.*\.md$)' <<<"$changed"; then
             echo "apk=true" >> "$GITHUB_OUTPUT"
             echo "Files the APK is built from changed; building it." >> "$GITHUB_STEP_SUMMARY"
           else
