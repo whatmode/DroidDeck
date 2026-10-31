@@ -93,3 +93,8 @@ DROIDDECK_VN_BC_GPU=1
 # How long of every 10 s report the GPU time is measured render pass by render pass (0035), in ms
 # (default 2000). 0 turns it off.
 #DROIDDECK_VN_PASS_STATS_MS=0
+#
+# Big GPU memory blocks (this many MiB and more, default 32) made ahead on a side ring after the
+# first of their kind (0036), so DXVK growing a heap does not stall the game for 60-100 ms. 0 turns
+# it off.
+#DROIDDECK_VN_SPARE_MB=0

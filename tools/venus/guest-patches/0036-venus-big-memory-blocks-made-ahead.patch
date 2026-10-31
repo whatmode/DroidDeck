@@ -1,0 +1,454 @@
+diff -ruN a/src/virtio/vulkan/meson.build b/src/virtio/vulkan/meson.build
+--- a/src/virtio/vulkan/meson.build	2026-10-31 08:28:40.635098880 +0000
++++ b/src/virtio/vulkan/meson.build	2026-10-31 08:31:17.524147515 +0000
+@@ -65,6 +65,7 @@
+   'vn_droiddeck_emu.c',
+   'vn_droiddeck_pcache.c',
+   'vn_droiddeck_prof.c',
++  'vn_droiddeck_spare.c',
+   'vn_droiddeck_stats.c',
+   'vn_feedback.c',
+   'vn_host_copy.c',
+diff -ruN a/src/virtio/vulkan/vn_device.c b/src/virtio/vulkan/vn_device.c
+--- a/src/virtio/vulkan/vn_device.c	2026-10-31 08:28:40.633530446 +0000
++++ b/src/virtio/vulkan/vn_device.c	2026-10-31 08:31:17.525591751 +0000
+@@ -12,6 +12,7 @@
+ #include "vn_droiddeck_stats.h"
+ #include "vn_droiddeck_pcache.h"
+ #include "vn_droiddeck_prof.h"
++#include "vn_droiddeck_spare.h"
+ 
+ #include <string.h>
+ 
+@@ -679,6 +680,7 @@
+    if (!dev)
+       return;
+ 
++   vn_dd_spare_fini(dev);
+    vn_dd_prof_device_fini(dev);
+    vn_dd_pcache_fini(dev);
+ 
+diff -ruN a/src/virtio/vulkan/vn_device.h b/src/virtio/vulkan/vn_device.h
+--- a/src/virtio/vulkan/vn_device.h	2026-10-31 08:28:40.633704283 +0000
++++ b/src/virtio/vulkan/vn_device.h	2026-10-31 08:31:17.526852959 +0000
+@@ -50,6 +50,9 @@
+ 
+    /* DroidDeck: timestamp pools for the render-pass profile (vn_droiddeck_prof.c) */
+    struct vn_dd_prof_dev *dd_prof;
++
++   /* DroidDeck: big memory blocks made ahead on a side ring (vn_droiddeck_spare.c) */
++   struct vn_dd_spare *dd_spare;
+ };
+ VK_DEFINE_HANDLE_CASTS(vn_device,
+                        base.vk.base,
+diff -ruN a/src/virtio/vulkan/vn_device_memory.c b/src/virtio/vulkan/vn_device_memory.c
+--- a/src/virtio/vulkan/vn_device_memory.c	2026-10-31 08:28:40.632837697 +0000
++++ b/src/virtio/vulkan/vn_device_memory.c	2026-10-31 08:31:17.528177304 +0000
+@@ -17,6 +17,7 @@
+ #include "vn_android.h"
+ #include "vn_buffer.h"
+ #include "vn_device.h"
++#include "vn_droiddeck_spare.h"
+ #include "vn_image.h"
+ #include "vn_physical_device.h"
+ #include "vn_renderer.h"
+@@ -376,6 +377,14 @@
+       }
+    }
+ 
++   /* droiddeck: a block of this kind made ahead on a side ring (vn_droiddeck_spare.h) */
++   struct vn_device_memory *spare = vn_dd_spare_take(dev, pAllocateInfo, pAllocator);
++   if (spare) {
++      vn_device_memory_emit_report(dev, spare, /* is_alloc */ true, VK_SUCCESS);
++      *pMemory = vn_device_memory_to_handle(spare);
++      return VK_SUCCESS;
++   }
++
+    struct vn_device_memory *mem = vk_device_memory_create(
+       &dev->base.vk, pAllocateInfo, pAllocator, sizeof(*mem));
+    if (!mem)
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_spare.c b/src/virtio/vulkan/vn_droiddeck_spare.c
+--- a/src/virtio/vulkan/vn_droiddeck_spare.c	1970-01-01 00:00:00.000000000 +0000
++++ b/src/virtio/vulkan/vn_droiddeck_spare.c	2026-10-31 08:31:17.530001900 +0000
+@@ -0,0 +1,343 @@
++/*
++ * DroidDeck: big GPU memory blocks made ahead of time (see the header).
++ * SPDX-License-Identifier: MIT
++ */
++
++#include "vn_droiddeck_spare.h"
++
++#include <inttypes.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "c11/threads.h"
++#include "util/os_time.h"
++#include "util/simple_mtx.h"
++#include "util/u_debug.h"
++#include "venus-protocol/vn_protocol_driver_device_memory.h"
++
++#include "vn_device.h"
++#include "vn_device_memory.h"
++#include "vn_instance.h"
++#include "vn_physical_device.h"
++
++#define DD_KINDS 4
++#define DD_HELD_MAX_BYTES (768ull << 20)
++
++struct dd_key {
++   uint32_t type;
++   VkDeviceSize size;
++   VkMemoryAllocateFlags flags;
++   bool has_priority;
++   float priority;
++};
++
++struct dd_kind {
++   bool used;
++   struct dd_key key;
++   struct vn_device_memory *ready;
++   bool want, making, failed;
++   int64_t last_use;
++};
++
++struct vn_dd_spare {
++   struct vn_device *dev;
++   mtx_t lock;
++   cnd_t cond;
++   thrd_t thread;
++   bool thread_started, stop;
++   struct dd_kind kinds[DD_KINDS];
++   /* for the report */
++   unsigned served, missed, made, failed;
++   double make_ms_max, make_ms_sum;
++   int64_t last_report;
++   unsigned reports;
++};
++
++static simple_mtx_t dd_create_lock = SIMPLE_MTX_INITIALIZER;
++
++static uint64_t
++dd_min_bytes(void)
++{
++   static int64_t v = -1;
++   if (v < 0)
++      v = debug_get_num_option("DROIDDECK_VN_SPARE_MB", 32);
++   return (uint64_t)v << 20;
++}
++
++/* the request's kind, when a spare could stand in for it */
++static bool
++dd_key_for(struct vn_device *dev,
++           const VkMemoryAllocateInfo *info,
++           const VkAllocationCallbacks *alloc,
++           struct dd_key *key)
++{
++   const uint64_t min = dd_min_bytes();
++   if (!min || alloc || info->allocationSize < min)
++      return false;
++   const VkPhysicalDeviceMemoryProperties *props = &dev->physical_device->memory_properties;
++   if (info->memoryTypeIndex >= props->memoryTypeCount)
++      return false;
++   const VkMemoryPropertyFlags f = props->memoryTypes[info->memoryTypeIndex].propertyFlags;
++   if (!(f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ||
++       (f & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_PROTECTED_BIT |
++             VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT)))
++      return false;
++   memset(key, 0, sizeof(*key));
++   key->type = info->memoryTypeIndex;
++   key->size = info->allocationSize;
++   vk_foreach_struct_const(s, info->pNext) {
++      switch (s->sType) {
++      case VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO: {
++         const VkMemoryAllocateFlagsInfo *fi = (const void *)s;
++         if (fi->flags & ~VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT)
++            return false;
++         key->flags = fi->flags;
++         break;
++      }
++      case VK_STRUCTURE_TYPE_MEMORY_PRIORITY_ALLOCATE_INFO_EXT:
++         key->has_priority = true;
++         key->priority = ((const VkMemoryPriorityAllocateInfoEXT *)s)->priority;
++         break;
++      default:
++         /* dedicated, import, export, opaque addresses...: not a plain block */
++         return false;
++      }
++   }
++   return true;
++}
++
++static bool
++dd_key_eq(const struct dd_key *a, const struct dd_key *b)
++{
++   return a->type == b->type && a->size == b->size && a->flags == b->flags &&
++          a->has_priority == b->has_priority && (!a->has_priority || a->priority == b->priority);
++}
++
++/* make one, on this thread's own ring */
++static struct vn_device_memory *
++dd_make(struct vn_device *dev, const struct dd_key *key)
++{
++   VkMemoryPriorityAllocateInfoEXT prio = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_PRIORITY_ALLOCATE_INFO_EXT,
++      .priority = key->priority,
++   };
++   VkMemoryAllocateFlagsInfo flags = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
++      .pNext = key->has_priority ? &prio : NULL,
++      .flags = key->flags,
++   };
++   const VkMemoryAllocateInfo info = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
++      .pNext = key->flags ? (const void *)&flags : key->has_priority ? (const void *)&prio : NULL,
++      .allocationSize = key->size,
++      .memoryTypeIndex = key->type,
++   };
++   struct vn_ring *ring = vn_tls_get_ring(dev->instance);
++   /* not the main ring: there it would be the stall this is here to avoid */
++   if (!ring || ring == dev->primary_ring || ring == dev->instance->ring.ring)
++      return NULL;
++   struct vn_device_memory *mem =
++      vk_device_memory_create(&dev->base.vk, &info, NULL, sizeof(*mem));
++   if (!mem)
++      return NULL;
++   vn_object_set_id(mem, vn_get_next_obj_id(), VK_OBJECT_TYPE_DEVICE_MEMORY);
++   VkDeviceMemory handle = vn_device_memory_to_handle(mem);
++   /* synchronous: the server has the object before any later command can name it */
++   const VkResult result =
++      vn_call_vkAllocateMemory(ring, vn_device_to_handle(dev), &info, NULL, &handle);
++   if (result != VK_SUCCESS) {
++      vk_device_memory_destroy(&dev->base.vk, NULL, &mem->base.vk);
++      return NULL;
++   }
++   return mem;
++}
++
++/* under s->lock */
++static void
++dd_report_locked(struct vn_dd_spare *s, bool force)
++{
++   const int64_t now = os_time_get_nano();
++   if (!force && now - s->last_report < 10000000000ll)
++      return;
++   if (s->reports >= 400)
++      return;
++   s->last_report = now;
++   s->reports++;
++   unsigned held = 0;
++   uint64_t bytes = 0;
++   for (unsigned i = 0; i < DD_KINDS; i++) {
++      if (s->kinds[i].ready) {
++         held++;
++         bytes += s->kinds[i].key.size;
++      }
++   }
++   vn_droiddeck_log("spare memory: %u served at once, %u missed (made on the main ring), %u made "
++                    "ahead on a side ring (avg %.1f ms, max %.1f ms), %u failed; %u held, "
++                    "%.0f MiB (DROIDDECK_VN_SPARE_MB)",
++                    s->served, s->missed, s->made, s->made ? s->make_ms_sum / s->made : 0.0,
++                    s->make_ms_max, s->failed, held, bytes / 1048576.0);
++}
++
++static int
++dd_thread(void *arg)
++{
++   struct vn_dd_spare *s = arg;
++   mtx_lock(&s->lock);
++   while (!s->stop) {
++      struct dd_kind *k = NULL;
++      uint64_t held = 0;
++      for (unsigned i = 0; i < DD_KINDS; i++) {
++         if (s->kinds[i].ready)
++            held += s->kinds[i].key.size;
++      }
++      for (unsigned i = 0; i < DD_KINDS && !k; i++) {
++         struct dd_kind *c = &s->kinds[i];
++         if (c->used && c->want && !c->ready && !c->failed &&
++             held + c->key.size <= DD_HELD_MAX_BYTES)
++            k = c;
++      }
++      if (!k) {
++         cnd_wait(&s->cond, &s->lock);
++         continue;
++      }
++      const struct dd_key key = k->key;
++      k->making = true;
++      mtx_unlock(&s->lock);
++      const int64_t t0 = os_time_get_nano();
++      struct vn_device_memory *mem = dd_make(s->dev, &key);
++      const double ms = (os_time_get_nano() - t0) / 1e6;
++      mtx_lock(&s->lock);
++      k->making = false;
++      if (!mem) {
++         k->failed = true;
++         s->failed++;
++         dd_report_locked(s, true);
++         continue;
++      }
++      if (s->stop || !dd_key_eq(&k->key, &key)) {
++         mtx_unlock(&s->lock);
++         vn_FreeMemory(vn_device_to_handle(s->dev), vn_device_memory_to_handle(mem), NULL);
++         mtx_lock(&s->lock);
++         continue;
++      }
++      k->ready = mem;
++      k->want = false;
++      s->made++;
++      s->make_ms_sum += ms;
++      if (ms > s->make_ms_max)
++         s->make_ms_max = ms;
++      dd_report_locked(s, false);
++   }
++   mtx_unlock(&s->lock);
++   return 0;
++}
++
++static struct vn_dd_spare *
++dd_get(struct vn_device *dev)
++{
++   simple_mtx_lock(&dd_create_lock);
++   struct vn_dd_spare *s = dev->dd_spare;
++   if (!s) {
++      s = calloc(1, sizeof(*s));
++      if (s) {
++         s->dev = dev;
++         mtx_init(&s->lock, mtx_plain);
++         cnd_init(&s->cond);
++         s->thread_started = thrd_create(&s->thread, dd_thread, s) == thrd_success;
++         if (!s->thread_started) {
++            cnd_destroy(&s->cond);
++            mtx_destroy(&s->lock);
++            free(s);
++            s = NULL;
++         } else {
++            vn_droiddeck_log("spare memory: device-local blocks of %" PRIu64 " MiB and more are "
++                             "made ahead on a side ring (DROIDDECK_VN_SPARE_MB=0 turns it off)",
++                             dd_min_bytes() >> 20);
++         }
++      }
++      dev->dd_spare = s;
++   }
++   simple_mtx_unlock(&dd_create_lock);
++   return s;
++}
++
++struct vn_device_memory *
++vn_dd_spare_take(struct vn_device *dev,
++                 const VkMemoryAllocateInfo *info,
++                 const VkAllocationCallbacks *alloc)
++{
++   struct dd_key key;
++   if (!dd_key_for(dev, info, alloc, &key))
++      return NULL;
++   struct vn_dd_spare *s = dd_get(dev);
++   if (!s)
++      return NULL;
++   struct vn_device_memory *mem = NULL;
++   mtx_lock(&s->lock);
++   struct dd_kind *k = NULL;
++   for (unsigned i = 0; i < DD_KINDS && !k; i++) {
++      if (s->kinds[i].used && dd_key_eq(&s->kinds[i].key, &key))
++         k = &s->kinds[i];
++   }
++   if (!k) {
++      /* a new kind: a free slot, or the one used longest ago that is not being made */
++      for (unsigned i = 0; i < DD_KINDS; i++) {
++         struct dd_kind *c = &s->kinds[i];
++         if (!c->used) {
++            k = c;
++            break;
++         }
++         if (!c->making && (!k || c->last_use < k->last_use))
++            k = c;
++      }
++      if (k) {
++         struct vn_device_memory *old = k->ready;
++         memset(k, 0, sizeof(*k));
++         k->used = true;
++         k->key = key;
++         if (old) {
++            mtx_unlock(&s->lock);
++            vn_FreeMemory(vn_device_to_handle(dev), vn_device_memory_to_handle(old), NULL);
++            mtx_lock(&s->lock);
++         }
++      }
++   }
++   if (k) {
++      k->last_use = os_time_get_nano();
++      if (k->ready) {
++         mem = k->ready;
++         k->ready = NULL;
++         s->served++;
++      } else {
++         s->missed++;
++      }
++      k->want = true;
++      cnd_signal(&s->cond);
++   }
++   dd_report_locked(s, false);
++   mtx_unlock(&s->lock);
++   return mem;
++}
++
++void
++vn_dd_spare_fini(struct vn_device *dev)
++{
++   struct vn_dd_spare *s = dev->dd_spare;
++   if (!s)
++      return;
++   mtx_lock(&s->lock);
++   s->stop = true;
++   cnd_broadcast(&s->cond);
++   dd_report_locked(s, true);
++   mtx_unlock(&s->lock);
++   thrd_join(s->thread, NULL);
++   for (unsigned i = 0; i < DD_KINDS; i++) {
++      if (s->kinds[i].ready)
++         vn_FreeMemory(vn_device_to_handle(dev), vn_device_memory_to_handle(s->kinds[i].ready),
++                       NULL);
++   }
++   cnd_destroy(&s->cond);
++   mtx_destroy(&s->lock);
++   free(s);
++   dev->dd_spare = NULL;
++}
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_spare.h b/src/virtio/vulkan/vn_droiddeck_spare.h
+--- a/src/virtio/vulkan/vn_droiddeck_spare.h	1970-01-01 00:00:00.000000000 +0000
++++ b/src/virtio/vulkan/vn_droiddeck_spare.h	2026-10-31 08:31:17.532658267 +0000
+@@ -0,0 +1,34 @@
++/*
++ * DroidDeck: big GPU memory blocks made ahead of time.
++ *
++ * DXVK grows its heaps in big blocks (up to 256 MiB). Mali takes 60-100 ms to allocate one, and
++ * vkAllocateMemory runs on the server's main ring, so everything the game sends after it waits
++ * that long; on 2026-10-31-06 a 74 ms allocation held Lake's render thread in
++ * vkGetBufferDeviceAddress behind it, a visible hitch.
++ *
++ * After a big device-local allocation (DROIDDECK_VN_SPARE_MB, default 32; 0 turns it off) a
++ * thread makes another of the same kind -- type, size, flags, priority -- on its own ring, which
++ * the server runs beside the main one. The next request of that kind gets the spare at once, and
++ * the thread makes the next one. At most one spare per kind, a few kinds; spares go at
++ * vkDestroyDevice. Only memory nothing maps, imports or exports, made with the default allocator.
++ * The 10 s report: "spare memory: N served at once, M made ahead ...".
++ */
++#ifndef VN_DROIDDECK_SPARE_H
++#define VN_DROIDDECK_SPARE_H
++
++#include "vn_common.h"
++
++struct vn_device;
++struct vn_device_memory;
++
++/* a spare made for this request, or NULL (and a spare of its kind is wanted from now on) */
++struct vn_device_memory *
++vn_dd_spare_take(struct vn_device *dev,
++                 const VkMemoryAllocateInfo *info,
++                 const VkAllocationCallbacks *alloc);
++
++/* vkDestroyDevice: the thread stops, the spares are freed */
++void
++vn_dd_spare_fini(struct vn_device *dev);
++
++#endif /* VN_DROIDDECK_SPARE_H */
