@@ -111,6 +111,13 @@ gcc -O2 -Wall -o $OUT/vkmem tools/tests/glx/vkemu/vkmem.c -lvulkan || exit 1
 timeout 120 $OUT/vkmem 1 > $OUT/mem1.txt 2>&1; rc=$?
 grep "vkmem:" $OUT/mem1.txt
 [ $rc = 0 ] || { echo "FAIL vkmem with the alias (rc $rc)"; tail -8 $OUT/mem1.txt; }
+# 0036: the second and third 64 MiB block of a kind come from blocks made ahead on a side ring
+SPARE=$(grep " vkmem" /tmp/steamroot/logs/droiddeck_vulkan.txt | grep "spare memory: [0-9]* served" | tail -1)
+echo "${SPARE:-no spare memory line}" | cut -c1-260
+SERVED=$(echo "$SPARE" | sed -n 's/.*spare memory: \([0-9]*\) served.*/\1/p')
+[ -n "$SERVED" ] && [ "$SERVED" -ge 2 ] && grep -q "PASS three 64 MiB blocks" $OUT/mem1.txt \
+  && echo "PASS big blocks made ahead on a side ring ($SERVED served at once) and usable" \
+  || echo "FAIL big blocks made ahead (served ${SERVED:-none})"
 grep -E "memory type|native device-local|allocations in" $OUT/server-1.log | head -12
 # The game-session reports (0027): a full descriptor pool refused without a round trip (DXVK fills
 # dozens a frame), GPU busy from timestamps around submissions, wait stacks named by function

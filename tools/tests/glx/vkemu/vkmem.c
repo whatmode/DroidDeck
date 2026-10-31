@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <vulkan/vulkan.h>
 
 #define CHECK(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { printf("vkmem: FAIL %s = %d\n", #x, r_); exit(1); } } while (0)
@@ -163,11 +164,54 @@ int main(int argc, char **argv) {
   }
   printf("vkmem: %s 200 image allocations and frees\n", churn_ok ? "PASS" : "FAIL");
 
+  /* big blocks as DXVK grows its heaps (0036: after the first, the driver makes the next of the
+   * same kind ahead on a side ring); the last one must work like any other */
+  int spare_bad = 0;
+  if (alias >= 0) {
+    VkDeviceMemory big[3] = {0};
+    int got = 0;
+    for (int i = 0; i < 3; i++) {
+      VkMemoryAllocateInfo m = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, 64ull << 20, (uint32_t)alias};
+      if (vkAllocateMemory(dev, &m, NULL, &big[i]) == VK_SUCCESS) got++;
+      usleep(500000);
+    }
+    VkImage im;
+    CHECK(vkCreateImage(dev, &imci, NULL, &im));
+    if (got == 3) CHECK(vkBindImageMemory(dev, im, big[2], 0));
+    CHECK(vkResetCommandPool(dev, pool, 0));
+    CHECK(vkBeginCommandBuffer(cb, &cbbi));
+    VkImageMemoryBarrier sb = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                               VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                               VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, im, range};
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &sb);
+    VkClearColorValue red = {.float32 = {1.0f, 0.0f, 0.0f, 1.0f}};
+    vkCmdClearColorImage(cb, im, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &red, 1, &range);
+    sb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    sb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    sb.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    sb.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &sb);
+    vkCmdCopyImageToBuffer(cb, im, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &bic);
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hb, 0, NULL, 0, NULL);
+    CHECK(vkEndCommandBuffer(cb));
+    CHECK(vkQueueSubmit(q, 1, &si, VK_NULL_HANDLE));
+    CHECK(vkQueueWaitIdle(q));
+    CHECK(vkMapMemory(dev, bmem, 0, VK_WHOLE_SIZE, 0, (void **)&px));
+    for (uint32_t i = 0; i < W * H; i++)
+      if (px[i] != 0xff0000ffu) spare_bad++;
+    printf("vkmem: %s three 64 MiB blocks (%d made), the last holds what the GPU wrote (%d of %u pixels wrong, first 0x%08x)\n",
+           got == 3 && !spare_bad ? "PASS" : "FAIL", got, spare_bad, W * H, px[0]);
+    vkUnmapMemory(dev, bmem);
+    if (got != 3) spare_bad = 1;
+    vkDestroyImage(dev, im, NULL);
+    for (int i = 0; i < 3; i++) if (big[i]) vkFreeMemory(dev, big[i], NULL);
+  }
+
   vkDestroyCommandPool(dev, pool, NULL);
   for (int i = 0; i < 2; i++) { vkDestroyImage(dev, img[i], NULL); vkFreeMemory(dev, imem[i], NULL); }
   vkDestroyBuffer(dev, buf, NULL);
   vkFreeMemory(dev, bmem, NULL);
   vkDestroyDevice(dev, NULL);
   vkDestroyInstance(inst, NULL);
-  return bad || !churn_ok;
+  return bad || !churn_ok || spare_bad;
 }

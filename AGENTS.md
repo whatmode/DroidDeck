@@ -2231,3 +2231,27 @@ fps), plus a 60-100 ms `vkAllocateMemory` on the primary ring about once a minut
   command buffer contents (as DXVK's tiler mode does) after a fill; the check wants the pass by
   size/format/ops and the fill as work between passes; `DROIDDECK_VN_DXVK_TILER=1` must give
   driver ID 9 and the default 22 on lavapipe.
+
+## The 2026-10-31-06 bundle (0034/0035 on the device), and 0036: big memory blocks made ahead
+
+DXVK's tiler mode (0034) took Lake from 8-10 to 13-17 fps (the in-game counter 18-20); GPU busy
+dropped from 96-99% to 46-92%. The pass profile (0035) of a gameplay frame, ~55-60 ms of GPU:
+the deferred G-buffer pass (1602x720, 4 colour targets + D32S8, ~300 draws) 12-13 ms; compute
+between passes 8.5-10 ms twice a frame plus 5-6 ms of dispatches/copies/fills; the 4096x2048 D16
+shadow map (~220 draws) 7.6-8.5 ms; five full-screen R8 passes 4.4-5 ms; the rest small. These are
+the game's own costs (lower in-game shadow/effects settings cut them); the driver's own overhead
+is not in the top kinds. Frame times: median 60-75 ms, 95th percentile 80-150, a few 200-650 ms
+frames per minute. One of those: a 74 ms vkAllocateMemory (DXVK growing a heap) on the primary
+ring held the render thread in vkGetBufferDeviceAddress behind it.
+
+0036 (`vn_droiddeck_spare.c`): after a device-local allocation of DROIDDECK_VN_SPARE_MB (32) or more
+that nothing maps, imports or exports (pNext only flags = device address, and priority; default
+allocator), a per-device thread makes another of the same kind (type, size, flags, priority) with
+a synchronous vkAllocateMemory on its own TLS ring -- the server runs TLS rings on their own
+threads, and the sync call means the object exists before any later command names it. The next
+request of that kind takes it at once (`vn_AllocateMemory` before `vk_device_memory_create`) and
+the thread makes the next. Four kinds at most (least recently used replaced), 768 MiB held at
+most, a kind whose allocation fails is not retried; spares are freed at vkDestroyDevice. Log:
+`spare memory: N served at once, M missed ..., K made ahead on a side ring (avg, max ms) ...`.
+CI: vkmem (alias server) allocates three 64 MiB device-local-only blocks 0.5 s apart and draws
+into the third; the check wants 2 served at once and the right pixels.
