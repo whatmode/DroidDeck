@@ -2270,3 +2270,15 @@ for the program's four busiest threads of the last report, the share of 20 Hz sa
 and on which core type, the allowed CPUs (sched_getaffinity), and per cluster the average clock
 and the lowest cap seen (scaling_max_freq below cpuinfo_max_freq = thermal or power cap).
 DROIDDECK_VN_CPU_PLACE=0 turns it off.
+
+## The 2026-10-31-08 bundle (0037): Tensor throttles; game thread hints on for Tensor (APK)
+
+0037 on the Pixel: Lake's main thread ran ~70% on the X4 and ~30% on the A720s (allowed 0-7,
+cpuset /top-app); DXVK's dxvk-cs 60-95% on the A520s. Within ~2 min the clocks were capped
+(X4 2.0-2.5 of 3.10 GHz, A720 1.8-2.1 of 2.60, A520 1.1-1.7 of 1.95) and averaged 1.5-1.8 GHz on
+the X4; fps fell from 10-11 to 7.5-8 in step. The GPU wait at present rose to 70 ms/frame.
+
+`GameThreadHints` (ADPF hint sessions for the game's busiest threads, Odin 3 only until now) is on
+for Google's Tensor too (`supported()`: SOC_MANUFACTURER Google or a Tensor model). A game at the
+app's own fps limit counts as holding pace (`holdsLimit`), so a capped game is not boosted into
+more heat. The "boosting" log line names the thermal status.
