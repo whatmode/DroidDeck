@@ -18,6 +18,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
   pull-requests: write
 
@@ -52,6 +53,8 @@ jobs:
 
       - name: Decide whether the APK has anything to build
         id: which
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # main and manual runs always build: a push to main publishes a signed release, and a
@@ -61,23 +64,35 @@ jobs:
             echo "apk=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # The base is the target's tip at event time, with a three-dot diff so only this
-          # branch's own commits count. The branch tip this push replaced is preferred when it is
-          # a real ancestor of HEAD, so a driver-only push inside a PR that also touches app/
-          # does not rebuild the APK; a rebase or force-push leaves it unusable and the whole-PR
-          # diff is used instead.
+          # The base is the newest commit of this branch whose APK actually built, so a change
+          # to app/ keeps asking for an APK until one is built from it. Diffing only the push
+          # (the old base) lost that: a newer push cancels the running build (concurrency below),
+          # and when the newer push touched only driver or test files its run skipped the APK,
+          # so the app change never got one. Runs of this workflow on the branch (pull request
+          # or manual) count when their "Build APK" job succeeded and their commit is an
+          # ancestor of HEAD; with none, the whole-PR diff against the target is used.
           base="${{ github.event.pull_request.base.sha }}"
           range="$base...HEAD"
-          before="${{ github.event.before }}"
-          case "$before" in
-            ''|0000000000000000000000000000000000000000) ;;
-            *)
-              if git merge-base --is-ancestor "$before" HEAD 2>/dev/null; then
-                base="$before"
-                range="$before..HEAD"
-              fi
-              ;;
-          esac
+          built=""
+          runs=$(gh api "repos/${{ github.repository }}/actions/workflows/build.yml/runs?branch=${{ github.head_ref }}&status=success&per_page=30" \
+                   --jq '.workflow_runs[] | "\(.id) \(.head_sha)"' 2>/dev/null || true)
+          while read -r run sha; do
+            [ -n "$run" ] || continue
+            git merge-base --is-ancestor "$sha" HEAD 2>/dev/null || continue
+            job=$(gh api "repos/${{ github.repository }}/actions/runs/$run/jobs" \
+                    --jq '.jobs[] | select(.name == "Build APK") | .conclusion' 2>/dev/null || true)
+            if [ "$job" = success ]; then
+              built="$sha"
+              break
+            fi
+          done <<<"$runs"
+          if [ -n "$built" ]; then
+            base="$built"
+            range="$built..HEAD"
+            echo "Last APK built from this branch: ${built:0:12}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No APK built from this branch yet; using the whole pull request" >> "$GITHUB_STEP_SUMMARY"
+          fi
           changed=$(git diff --name-only "$range")
           echo "Changed since $base:" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"

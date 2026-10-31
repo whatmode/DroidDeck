@@ -722,6 +722,14 @@ request and, if every changed path is driver-side (`tools/venus/`, `tools/panvk/
 do `sign`, `announce` and `catalog`. The gate is an allowlist of paths the APK does *not* read, so
 a new or unknown directory builds the APK rather than silently skipping it.
 
+**The base is the last commit an APK was built from (since 2026-10-31).** Diffing only the push
+lost app changes: `build.yml`'s concurrency cancels a PR's running build when a newer push comes,
+and a newer push that touched only driver or test files then skipped the APK, so the app change
+before it never got one (it happened three times in a row on the shader-precompile work). The
+`changes` job now looks up this workflow's successful runs on the branch, newest first, takes the
+first whose `Build APK` job succeeded and whose commit is an ancestor of HEAD, and diffs from there;
+with none it diffs the whole PR against the target. It needs `actions: read`.
+
 `paths-ignore` could not do this. On a `pull_request` event it evaluates the whole PR diff, so a PR
 that has ever touched `app/` rebuilds the APK on every later push no matter how small. The `changes`
 job diffs the push (`github.event.before..HEAD`, falling back to the target's tip when a force-push
