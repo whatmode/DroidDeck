@@ -223,6 +223,10 @@ else
   env HOME=/tmp/fzhome STEAM_COMPAT_CLIENT_INSTALL_PATH= MESA_SHADER_CACHE_DIR= MESA_GLSL_CACHE_DIR=$G DROIDDECK_VN_PRECOMPILE_DONE=1 \
     timeout 60 $OUT/vkstats 0.1 $OUT/pc.spv > $OUT/fz-game.txt 2>&1
   tail -n +$((before + 1)) $L | grep "vkstats" | grep -E "pipeline cache|precompile" | cut -c1-220 | tail -3
+  # its own annotation: the report chunks run out before this section
+  printf '::notice title=fossilize replay::%s\n' "$( { echo "rc=$FZRC"; ls -la /tmp/rec $G/droiddeck-venus 2>&1 | tail -8; tail -5 $OUT/fz-record.txt;
+    cat $OUT/fz-pre.txt | tail -4; grep -v "^$" $G/droiddeck-venus/precompile.log 2>/dev/null | tail -14;
+    tail -n +$((before + 1)) $L | grep -E "pipeline cache|precompile|emulated for|vkCreateDevice:" | tail -12; } | sed 's/%/%25/g' | cut -c1-250 | awk 'BEGIN{ORS="%0A"}{print}')" >&3
   if [ "$FZRC" = 0 ] && grep -q '"compute": {"done": 1, "total": 1, "skipped": 0' $G/droiddeck-venus/precompile.log \
      && tail -n +$((before + 1)) $L | grep -q "fossilize.*pipeline cache: saved" \
      && tail -n +$((before + 1)) $L | grep -q "precompile: compiled before the game started"; then
