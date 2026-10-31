@@ -102,3 +102,7 @@ DROIDDECK_VN_BC_GPU=1
 # Which cores the program's busiest threads run on and the CPU clocks and caps, every 10 s (0037).
 # =0 turns it off.
 #DROIDDECK_VN_CPU_PLACE=0
+#
+# Threads kept off the slowest cluster (0038), comma-separated; default dxvk-cs (DXVK's command
+# thread, which otherwise runs mostly on the A520s). 0 turns it off. Needs DROIDDECK_VN_CPU_PLACE.
+#DROIDDECK_VN_PIN_THREADS=0

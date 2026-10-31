@@ -2282,3 +2282,15 @@ the X4; fps fell from 10-11 to 7.5-8 in step. The GPU wait at present rose to 70
 for Google's Tensor too (`supported()`: SOC_MANUFACTURER Google or a Tensor model). A game at the
 app's own fps limit counts as holding pace (`holdsLimit`), so a capped game is not boosted into
 more heat. The "boosting" log line names the thermal status.
+
+## The 2026-10-31-09 bundle (hint sessions on Tensor), and 0038: dxvk-cs off the small cores
+
+The hint session ran (main thread and UnityGfxDeviceW boosted, thermal none/light) but changed
+little: the main thread is 55-75% busy and still split X4/A720, and the X4 averaged well under its
+cap. A cooled phone ran Lake at 13-19 fps with no caps, a hot one at 7-8: heat sets the frame rate.
+
+0038 (`dd_pin_threads` in vn_droiddeck_stats.c, run from the 0037 report): threads of this program
+named in DROIDDECK_VN_PIN_THREADS (default `dxvk-cs`) get an affinity of every CPU outside the
+slowest cluster (by cpuinfo_max_freq), once per thread. dxvk-cs was 20-40% busy and 60-95% on the
+A520s -- below the hint session's 60% entry. Nothing happens with one cluster (so CI cannot see it;
+checked with a stand-alone build forcing a two-cluster topology).

@@ -1,0 +1,103 @@
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_stats.c b/src/virtio/vulkan/vn_droiddeck_stats.c
+--- a/src/virtio/vulkan/vn_droiddeck_stats.c	2026-10-31 10:54:43.074873619 +0000
++++ b/src/virtio/vulkan/vn_droiddeck_stats.c	2026-10-31 10:55:11.439188049 +0000
+@@ -6,6 +6,7 @@
+ #include "vn_droiddeck_stats.h"
+ 
+ #include <dirent.h>
++#include <errno.h>
+ #include <sched.h>
+ #include <inttypes.h>
+ #include <stdio.h>
+@@ -344,6 +345,83 @@
+    }
+ }
+ 
++/* DXVK's command-stream thread off the small cores (0038).
++ *
++ * On the Pixel 9 Pro XL (2026-10-31) Lake's dxvk-cs, which turns every D3D11 call into Vulkan and is
++ * on each frame's path to the GPU, ran 60-95% of the time on the A520s at 1.1-1.7 GHz while busy
++ * 20-40%: too little for the scheduler (or the app's hint session) to move it up. The named threads
++ * of this program (DROIDDECK_VN_PIN_THREADS, comma-separated, default "dxvk-cs"; 0 turns it off)
++ * may use every CPU but those of the slowest cluster. Checked every report, since threads come and
++ * go; a thread is pinned once. Nothing happens on a CPU with one kind of core. */
++static void
++dd_pin_threads(void)
++{
++   static const char *names = NULL;
++   if (!names) {
++      names = os_get_option("DROIDDECK_VN_PIN_THREADS");
++      if (!names)
++         names = "dxvk-cs";
++   }
++   if (!strcmp(names, "0") || !names[0])
++      return;
++   unsigned slowest = ~0u, fastest = 0;
++   for (int c = 0; c < dd_topo.count; c++) {
++      slowest = MIN2(slowest, dd_topo.max_khz[c]);
++      fastest = MAX2(fastest, dd_topo.max_khz[c]);
++   }
++   if (!fastest || slowest == fastest)
++      return;
++   cpu_set_t set;
++   CPU_ZERO(&set);
++   char cpus[64] = "";
++   int len = 0;
++   for (int c = 0; c < dd_topo.count; c++) {
++      if (dd_topo.max_khz[c] > slowest) {
++         CPU_SET(c, &set);
++         len += snprintf(cpus + len, sizeof(cpus) - len, "%s%d", len ? "," : "", c);
++      }
++   }
++   static int pinned[32];
++   static int pinned_count;
++   DIR *d = opendir("/proc/self/task");
++   if (!d)
++      return;
++   struct dirent *e;
++   while ((e = readdir(d))) {
++      const int tid = atoi(e->d_name);
++      if (tid <= 0)
++         continue;
++      bool done = false;
++      for (int i = 0; i < pinned_count; i++)
++         done |= pinned[i] == tid;
++      if (done)
++         continue;
++      char path[64], comm[32] = "";
++      snprintf(path, sizeof(path), "/proc/self/task/%d/comm", tid);
++      FILE *f = fopen(path, "re");
++      if (!f)
++         continue;
++      if (fgets(comm, sizeof(comm), f))
++         comm[strcspn(comm, "\n")] = 0;
++      fclose(f);
++      /* the names as a comma-separated list, matched whole */
++      bool want = false;
++      for (const char *n = names; *n && !want;) {
++         const size_t l = strcspn(n, ",");
++         want = l && strlen(comm) == l && !strncmp(n, comm, l);
++         n += l + (n[l] == ',');
++      }
++      if (!want)
++         continue;
++      const int r = sched_setaffinity(tid, sizeof(set), &set);
++      vn_droiddeck_log("pinned %s[%d] to cpus %s, off the slowest cluster: %s (DROIDDECK_VN_PIN_THREADS)",
++                       comm, tid, cpus, r ? strerror(errno) : "done");
++      if (pinned_count < (int)ARRAY_SIZE(pinned))
++         pinned[pinned_count++] = tid;
++   }
++   closedir(d);
++}
++
+ /* report the window that ends now and track these threads (the program's busiest) next */
+ static void
+ dd_place_report(double secs, const int *tids, char names[][32], int count)
+@@ -424,6 +502,7 @@
+          line[len - 1] = 0;
+       vn_droiddeck_log("%s", line);
+    }
++   dd_pin_threads();
+    /* the next window's threads */
+    simple_mtx_lock(&dd_lock);
+    memset(dd_place.on_cpu, 0, sizeof(dd_place.on_cpu));
