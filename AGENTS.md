@@ -2311,3 +2311,6 @@ droiddeck_vulkan.txt: the app's SessionArtifacts leaves out Steam logs of 8 MiB 
 driver only started the file over past 4 MiB when a process opened it, so one session could take it
 over the limit. 0040: DROIDDECK_VN_PIN_THREADS defaults to 0 (the 0038/0039 code stays for
 asking), and the log starts over past 1 MiB.
+0041: the user cannot set the environment and chose pinning on by default with 0039's one-second
+re-pin, as a repeat test now that the driver log fits in the bundle. DROIDDECK_VN_PIN_THREADS
+defaults to dxvk-cs again.
