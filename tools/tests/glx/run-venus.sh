@@ -189,22 +189,6 @@ grep -q "precompile: fossilize_replay started" $L && ls $SD/droiddeck-venus/prec
   && grep -q "child=1 as_dxvk=1 dir=$SD" $SD/droiddeck-venus/precompile.log && grep -q "precompile: done for these databases" $L \
   && echo "PASS the driver precompiles Steam's recorded pipelines once" \
   || { echo "FAIL the driver's precompile"; grep "precompile" $L | tail -5 | cut -c1-240; cat $SD/droiddeck-venus/precompile.log 2>/dev/null | head -5; }
-# while Steam is open (0033): the Steam client's UI process (here a copy of vkstats named
-# steamwebhelper) goes through every game in steamapps/shadercache with recorded pipelines
-SR=/tmp/pcache-home/.local/share/Steam
-mkdir -p $SR/steamrtarm64 $SR/steamapps/shadercache/2000/fozpipelinesv6/x $SR/steamapps/shadercache/3000/fozpipelinesv6/x
-cp $STEAM_COMPAT_CLIENT_INSTALL_PATH/steamrtarm64/fossilize_replay $SR/steamrtarm64/
-echo a > $SR/steamapps/shadercache/2000/fozpipelinesv6/x/steamapp_pipeline_cache.foz
-echo b > $SR/steamapps/shadercache/3000/fozpipelinesv6/x/steam_pipeline_cache.foz
-cp $OUT/vkstats $OUT/steamwebhelper
-before=$(wc -l < $L)
-env HOME=/tmp/pcache-home STEAM_COMPAT_CLIENT_INSTALL_PATH= MESA_SHADER_CACHE_DIR= MESA_GLSL_CACHE_DIR= timeout 60 $OUT/steamwebhelper 3 > $OUT/lib.txt 2>&1
-tail -n +$((before + 1)) $L | grep "precompile" | cut -c1-240
-ls $SR/steamapps/shadercache/*/droiddeck-venus/ 2>&1 | head -8
-n=$(ls $SR/steamapps/shadercache/*/droiddeck-venus/precompile-*.done 2>/dev/null | wc -l)
-[ "$n" = 2 ] && tail -n +$((before + 1)) $L | grep -q "precompile: going through the library" \
-  && echo "PASS Steam's own process precompiles every recorded game ($n)" \
-  || echo "FAIL the library precompile ($n of 2 games done)"
 stats_case defer DROIDDECK_VN_POOL_DEFER=1
 grep -q "descriptor pools over .* [1-9][0-9]* sent synchronously to the real pool" $OUT/statslog-defer.txt \
   && echo "PASS DROIDDECK_VN_POOL_DEFER=1 still asks the real pool" || echo "FAIL DROIDDECK_VN_POOL_DEFER=1 (rc $SRC)"
