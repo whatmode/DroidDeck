@@ -2294,3 +2294,12 @@ named in DROIDDECK_VN_PIN_THREADS (default `dxvk-cs`) get an affinity of every C
 slowest cluster (by cpuinfo_max_freq), once per thread. dxvk-cs was 20-40% busy and 60-95% on the
 A520s -- below the hint session's 60% entry. Nothing happens with one cluster (so CI cannot see it;
 checked with a stand-alone build forcing a two-cluster topology).
+
+## The 2026-10-31-10 bundle (0038), and 0039: keep the pin
+
+0038's sched_setaffinity succeeded ("pinned dxvk-cs[9956] to cpus 4,5,6,7 ... done") but the pin did
+not hold: later reports show dxvk-cs "allowed 0-7" and 60-85% on the A520s again (moving a task
+between cpusets resets its affinity to the cpuset's CPUs; Android moves the app's tasks). 0039:
+the 0037 sampler thread checks the pinned threads once a second and pins them again, and each
+report logs `pinned <name>[tid]: its CPUs were put back N times ... and pinned again`. Checked with
+a stand-alone build that resets the affinity from outside.

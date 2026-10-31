@@ -1,0 +1,100 @@
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_stats.c b/src/virtio/vulkan/vn_droiddeck_stats.c
+--- a/src/virtio/vulkan/vn_droiddeck_stats.c	2026-10-31 11:25:59.356883583 +0000
++++ b/src/virtio/vulkan/vn_droiddeck_stats.c	2026-10-31 11:26:16.642071590 +0000
+@@ -153,6 +153,15 @@
+    unsigned cap_min[DD_CPUS];
+ } dd_place;
+ 
++/* 0038/0039: the threads kept off the slowest cluster, and their CPUs */
++static struct {
++   int tid[32];
++   char name[32][16];
++   int count;
++   cpu_set_t set;
++   unsigned resets[32];
++} dd_pin;
++
+ static unsigned
+ dd_read_uint(const char *path)
+ {
+@@ -311,7 +320,20 @@
+       for (int i = 0; i < DD_TRACK; i++)
+          ok[i] = tids[i] > 0 && dd_task_state(tids[i], &state[i], &cpu[i]);
+       unsigned freq[DD_CPUS] = { 0 }, cap[DD_CPUS] = { 0 };
+-      const bool clocks = dd_topo.freq_readable && (tick++ % 10) == 0;
++      const bool clocks = dd_topo.freq_readable && (tick % 10) == 0;
++      /* once a second: a pinned thread whose affinity was put back (a cpuset move resets it to
++       * the cpuset's CPUs; so can Wine) is pinned again */
++      if ((tick++ % 20) == 0) {
++         simple_mtx_lock(&dd_lock);
++         for (int i = 0; i < dd_pin.count; i++) {
++            cpu_set_t now;
++            CPU_ZERO(&now);
++            if (sched_getaffinity(dd_pin.tid[i], sizeof(now), &now) == 0 && !CPU_EQUAL(&now, &dd_pin.set) &&
++                sched_setaffinity(dd_pin.tid[i], sizeof(dd_pin.set), &dd_pin.set) == 0)
++               dd_pin.resets[i]++;
++         }
++         simple_mtx_unlock(&dd_lock);
++      }
+       if (clocks) {
+          for (int c = 0; c < dd_topo.count; c++) {
+             char path[96];
+@@ -352,7 +374,10 @@
+  * 20-40%: too little for the scheduler (or the app's hint session) to move it up. The named threads
+  * of this program (DROIDDECK_VN_PIN_THREADS, comma-separated, default "dxvk-cs"; 0 turns it off)
+  * may use every CPU but those of the slowest cluster. Checked every report, since threads come and
+- * go; a thread is pinned once. Nothing happens on a CPU with one kind of core. */
++ * go. Nothing happens on a CPU with one kind of core.
++ * 0039: on the phone the pin did not hold -- dxvk-cs reported "allowed 0-7" and ran on the A520s
++ * again within seconds (moving a task between cpusets resets its affinity). The sampler thread
++ * checks the pinned threads once a second and pins them again; the report says how often. */
+ static void
+ dd_pin_threads(void)
+ {
+@@ -381,8 +406,16 @@
+          len += snprintf(cpus + len, sizeof(cpus) - len, "%s%d", len ? "," : "", c);
+       }
+    }
+-   static int pinned[32];
+-   static int pinned_count;
++   simple_mtx_lock(&dd_lock);
++   dd_pin.set = set;
++   /* what the last window put back */
++   for (int i = 0; i < dd_pin.count; i++) {
++      if (dd_pin.resets[i])
++         vn_droiddeck_log("pinned %s[%d]: its CPUs were put back %u times since the last report and "
++                          "pinned again", dd_pin.name[i], dd_pin.tid[i], dd_pin.resets[i]);
++      dd_pin.resets[i] = 0;
++   }
++   simple_mtx_unlock(&dd_lock);
+    DIR *d = opendir("/proc/self/task");
+    if (!d)
+       return;
+@@ -392,8 +425,8 @@
+       if (tid <= 0)
+          continue;
+       bool done = false;
+-      for (int i = 0; i < pinned_count; i++)
+-         done |= pinned[i] == tid;
++      for (int i = 0; i < dd_pin.count; i++)
++         done |= dd_pin.tid[i] == tid;
+       if (done)
+          continue;
+       char path[64], comm[32] = "";
+@@ -416,8 +449,14 @@
+       const int r = sched_setaffinity(tid, sizeof(set), &set);
+       vn_droiddeck_log("pinned %s[%d] to cpus %s, off the slowest cluster: %s (DROIDDECK_VN_PIN_THREADS)",
+                        comm, tid, cpus, r ? strerror(errno) : "done");
+-      if (pinned_count < (int)ARRAY_SIZE(pinned))
+-         pinned[pinned_count++] = tid;
++      simple_mtx_lock(&dd_lock);
++      if (!r && dd_pin.count < (int)ARRAY_SIZE(dd_pin.tid)) {
++         dd_pin.tid[dd_pin.count] = tid;
++         snprintf(dd_pin.name[dd_pin.count], sizeof(dd_pin.name[0]), "%s", comm);
++         dd_pin.resets[dd_pin.count] = 0;
++         dd_pin.count++;
++      }
++      simple_mtx_unlock(&dd_lock);
+    }
+    closedir(d);
+ }
