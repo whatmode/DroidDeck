@@ -230,7 +230,7 @@ else
     cat $OUT/fz-pre.txt | tail -4; grep -v "^$" $G/droiddeck-venus/precompile.log 2>/dev/null | tail -14;
     tail -n +$((before + 1)) $L | grep -E "pipeline cache|precompile|emulated for|vkCreateDevice:" | tail -12; } | sed 's/%/%25/g' | cut -c1-250 | awk 'BEGIN{ORS="%0A"}{print}')" >&3
   if [ "$FZRC" = 0 ] && grep -q '"compute": {"done": 1, "total": 1, "skipped": 0' $G/droiddeck-venus/precompile.log \
-     && tail -n +$((before + 1)) $L | grep -q "fossilize.*pipeline cache: saved" \
+     && tail -n +$((before + 1)) $L | grep -v " vkstats " | grep -q "pipeline cache: saved" \
      && tail -n +$((before + 1)) $L | grep -q "precompile: compiled before the game started"; then
     echo "PASS Fossilize's replay compiles the recorded pipeline through the bridge, and the game starts compiled"
   else
