@@ -1,0 +1,2120 @@
+diff -ruN a/src/virtio/vulkan/vn_common.c b/src/virtio/vulkan/vn_common.c
+--- a/src/virtio/vulkan/vn_common.c	1970-01-01 00:00:00.000000000 +0000
++++ b/src/virtio/vulkan/vn_common.c	2026-10-31 12:35:24.964416331 +0000
+@@ -0,0 +1,898 @@
++/*
++ * Copyright 2019 Google LLC
++ * SPDX-License-Identifier: MIT
++ *
++ * based in part on anv and radv which are:
++ * Copyright © 2015 Intel Corporation
++ * Copyright © 2016 Red Hat.
++ * Copyright © 2016 Bas Nieuwenhuizen
++ */
++
++#include "vn_common.h"
++#include "vn_droiddeck_prof.h"
++#include "vn_droiddeck_stats.h"
++
++#include <stdio.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <time.h>
++#include <unistd.h>
++
++#include <stdarg.h>
++#include <dlfcn.h>
++#include <execinfo.h>
++#include <sys/prctl.h>
++#include <elf.h>
++#include <stdlib.h>
++#include <inttypes.h>
++
++#include "util/log.h"
++#include "util/os_misc.h"
++#include "util/os_time.h"
++#include "util/u_debug.h"
++#include "venus-protocol/vn_protocol_driver_info.h"
++#include "vk_enum_to_str.h"
++
++#include "vn_instance.h"
++#include "vn_ring.h"
++
++static const struct debug_control vn_debug_options[] = {
++   /* clang-format off */
++   { "init", VN_DEBUG_INIT },
++   { "result", VN_DEBUG_RESULT },
++   { "vtest", VN_DEBUG_VTEST },
++   { "wsi", VN_DEBUG_WSI },
++   { "no_abort", VN_DEBUG_NO_ABORT },
++   { "log_ctx_info", VN_DEBUG_LOG_CTX_INFO },
++   { "cache", VN_DEBUG_CACHE },
++   { "no_sparse", VN_DEBUG_NO_SPARSE },
++   { "no_gpl", VN_DEBUG_NO_GPL },
++   { "no_second_queue", VN_DEBUG_NO_SECOND_QUEUE },
++   { "no_ray_tracing", VN_DEBUG_NO_RAY_TRACING },
++   { "mem_budget", VN_DEBUG_MEM_BUDGET },
++   { NULL, 0 },
++   /* clang-format on */
++};
++
++static const struct debug_control vn_perf_options[] = {
++   /* clang-format off */
++   { "no_async_set_alloc", VN_PERF_NO_ASYNC_SET_ALLOC },
++   { "no_async_buffer_create", VN_PERF_NO_ASYNC_BUFFER_CREATE },
++   { "no_async_queue_submit", VN_PERF_NO_ASYNC_QUEUE_SUBMIT },
++   { "no_event_feedback", VN_PERF_NO_EVENT_FEEDBACK },
++   { "no_fence_feedback", VN_PERF_NO_FENCE_FEEDBACK },
++   { "no_cmd_batching", VN_PERF_NO_CMD_BATCHING },
++   { "no_semaphore_feedback", VN_PERF_NO_SEMAPHORE_FEEDBACK },
++   { "no_query_feedback", VN_PERF_NO_QUERY_FEEDBACK },
++   { "no_async_mem_alloc", VN_PERF_NO_ASYNC_MEM_ALLOC },
++   { "no_tiled_wsi_image", VN_PERF_NO_TILED_WSI_IMAGE },
++   { "no_multi_ring", VN_PERF_NO_MULTI_RING },
++   { "no_async_image_create", VN_PERF_NO_ASYNC_IMAGE_CREATE },
++   { "no_async_image_format", VN_PERF_NO_ASYNC_IMAGE_FORMAT },
++   { NULL, 0 },
++   /* clang-format on */
++};
++
++uint64_t vn_next_obj_id = 1;
++struct vn_env vn_env;
++
++static void
++vn_env_init_once(void)
++{
++   vn_env.debug =
++      parse_debug_string(os_get_option("VN_DEBUG"), vn_debug_options);
++   vn_env.perf =
++      parse_debug_string(os_get_option("VN_PERF"), vn_perf_options);
++}
++
++void
++vn_env_init(void)
++{
++   static once_flag once = ONCE_FLAG_INIT;
++   call_once(&once, vn_env_init_once);
++
++   /* log per VkInstance creation */
++   if (VN_DEBUG(INIT)) {
++      vn_log(NULL,
++             "vn_env is as below:"
++             "\n\tdebug = 0x%" PRIx64 ""
++             "\n\tperf = 0x%" PRIx64 "",
++             vn_env.debug, vn_env.perf);
++   }
++}
++
++void
++vn_trace_init(void)
++{
++#if DETECT_OS_ANDROID
++   atrace_init();
++#else
++   util_cpu_trace_init();
++#endif
++}
++
++static mtx_t vn_dd_stats_mutex;
++static void vn_dd_lock_init(void) { mtx_init(&vn_dd_stats_mutex, mtx_plain); }
++static FILE *vn_dd_file;
++static mtx_t vn_dd_mutex;
++static char vn_dd_prog[96];
++
++static void
++vn_dd_open_once(void)
++{
++   mtx_init(&vn_dd_mutex, mtx_plain);
++   const char *env = getenv("DROIDDECK_VK_LOG");
++   if (env && !strcmp(env, "0"))
++      return;
++   char path[512];
++   if (env && *env) {
++      snprintf(path, sizeof(path), "%s", env);
++   } else {
++      const char *steam = getenv("STEAM_COMPAT_CLIENT_INSTALL_PATH");
++      const char *home = getenv("HOME");
++      char dir[400];
++      if (steam && *steam)
++         snprintf(dir, sizeof(dir), "%s/logs", steam);
++      else
++         snprintf(dir, sizeof(dir), "%s/.local/share/Steam/logs", home && *home ? home : "/root");
++      struct stat st;
++      if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode))
++         snprintf(dir, sizeof(dir), "/root/.local/share/Steam/logs");
++      if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode))
++         return;
++      snprintf(path, sizeof(path), "%s/droiddeck_vulkan.txt", dir);
++   }
++   struct stat st;
++   /* started over past 1 MiB (was 4): a game session adds several MiB, and the app leaves out Steam
++    * logs over 8 MiB, so on 2026-10-31-11 the file was missing from the bundle */
++   bool big = stat(path, &st) == 0 && st.st_size > 1024 * 1024;
++   vn_dd_file = fopen(path, big ? "w" : "a");
++   /* the program: its command line's first two words (Wine: the .exe) */
++   FILE *c = fopen("/proc/self/cmdline", "r");
++   if (c) {
++      char buf[512];
++      size_t n = fread(buf, 1, sizeof(buf) - 1, c);
++      fclose(c);
++      buf[n] = 0;
++      const char *a0 = buf, *a1 = n > strlen(buf) + 1 ? buf + strlen(buf) + 1 : "";
++      const char *b0 = strrchr(a0, '/');
++      const char *b1 = strrchr(a1, '\\') ? strrchr(a1, '\\') : strrchr(a1, '/');
++      snprintf(vn_dd_prog, sizeof(vn_dd_prog), "%s%s%s", b0 ? b0 + 1 : a0, *a1 ? " " : "",
++               b1 ? b1 + 1 : a1);
++   }
++}
++
++void
++vn_droiddeck_log(const char *format, ...)
++{
++   static once_flag once = ONCE_FLAG_INIT;
++   static unsigned lines;
++   call_once(&once, vn_dd_open_once);
++   if (!vn_dd_file)
++      return;
++   char msg[1024];
++   va_list ap;
++   va_start(ap, format);
++   vsnprintf(msg, sizeof(msg), format, ap);
++   va_end(ap);
++   mtx_lock(&vn_dd_mutex);
++   /* droiddeck: 600 lines ran out 80 s into a Lake session (most of them one
++    * VK_ERROR_OUT_OF_POOL_MEMORY line per pool DXVK filled), so the steady state the stutter
++    * reports are about was never in the file. The 10 s reports are ~15 lines; 4000 is an hour. */
++   if (++lines <= 4000) {
++      struct timespec ts;
++      clock_gettime(CLOCK_REALTIME, &ts);
++      struct tm tm;
++      localtime_r(&ts.tv_sec, &tm);
++      fprintf(vn_dd_file, "%02d:%02d:%02d.%03ld [%d %s] %s\n", tm.tm_hour, tm.tm_min, tm.tm_sec,
++              ts.tv_nsec / 1000000, (int)getpid(), vn_dd_prog, msg);
++      fflush(vn_dd_file);
++   }
++   mtx_unlock(&vn_dd_mutex);
++}
++
++void
++vn_log(struct vn_instance *instance, const char *format, ...)
++{
++   va_list ap;
++
++   va_start(ap, format);
++   char msg[1024];
++   va_list ap2;
++   va_copy(ap2, ap);
++   vsnprintf(msg, sizeof(msg), format, ap2);
++   va_end(ap2);
++   vn_droiddeck_log("venus: %s", msg);
++   mesa_log_v(MESA_LOG_DEBUG, "MESA-VIRTIO", format, ap);
++   va_end(ap);
++
++   /* instance may be NULL or partially initialized */
++}
++
++VkResult
++vn_log_result(struct vn_instance *instance,
++              VkResult result,
++              const char *where)
++{
++   /* image format queries answer "not supported" by the hundred, and a full descriptor pool is
++    * how DXVK learns to take the next one (dozens a frame; counted in the 10 s descriptor-pool
++    * report instead): not for the file */
++   if (result == VK_ERROR_FORMAT_NOT_SUPPORTED || result == VK_ERROR_OUT_OF_POOL_MEMORY ||
++       result == VK_ERROR_FRAGMENTED_POOL)
++      mesa_log(MESA_LOG_DEBUG, "MESA-VIRTIO", "%s: %s", where, vk_Result_to_str(result));
++   else
++      vn_log(instance, "%s: %s", where, vk_Result_to_str(result));
++   return result;
++}
++
++uint32_t
++vn_extension_get_spec_version(const char *name)
++{
++   const int32_t index = vn_info_extension_index(name);
++   return index >= 0 ? vn_info_extension_get(index)->spec_version : 0;
++}
++
++static inline bool
++vn_watchdog_timeout(const struct vn_watchdog *watchdog)
++{
++   return !watchdog->alive;
++}
++
++static inline void
++vn_watchdog_release(struct vn_watchdog *watchdog)
++{
++   if (vn_gettid() == watchdog->tid) {
++      watchdog->tid = 0;
++      mtx_unlock(&watchdog->mutex);
++   }
++}
++
++static bool
++vn_watchdog_acquire(struct vn_watchdog *watchdog, bool alive)
++{
++   pid_t tid = vn_gettid();
++   if (!watchdog->tid && tid != watchdog->tid &&
++       mtx_trylock(&watchdog->mutex) == thrd_success) {
++      /* register as the only waiting thread that monitors the ring. */
++      watchdog->tid = tid;
++      /* Always set alive to true for new watchdog owner because the
++       * last owner might have just unset the alive bit before release.
++       */
++      alive = true;
++   }
++
++   if (tid != watchdog->tid)
++      return false;
++
++   watchdog->alive = alive;
++   return true;
++}
++
++/* droiddeck: how long this process waits on the bridge, by reason, every 10 s in
++ * droiddeck_vulkan.txt: waits that cost frames (Steam's UI at 120 Hz) show here. */
++static void
++vn_dd_wait_stats(int reason, const char *name, int64_t start, int64_t end)
++{
++   static mtx_t lock;
++   static once_flag once = ONCE_FLAG_INIT;
++   static int64_t since;
++   static uint64_t count[8], total[8], longest[8];
++   static const char *names[8];
++   static unsigned reports;
++   call_once(&once, vn_dd_lock_init);
++   (void)lock;
++   mtx_lock(&vn_dd_stats_mutex);
++   if (reason >= 0 && reason < 8) {
++      int64_t d = end - start;
++      count[reason]++;
++      total[reason] += d;
++      if (d > (int64_t)longest[reason])
++         longest[reason] = d;
++      names[reason] = name;
++   }
++   if (!since)
++      since = start;
++   if (end - since >= 10000000000ll) {
++      char line[512] = "";
++      for (int i = 0; i < 8; i++) {
++         if (!count[i])
++            continue;
++         size_t len = strlen(line);
++         snprintf(line + len, sizeof(line) - len, "%s %s %" PRIu64 "x %.1f ms (longest %.1f)", len ? ";" : "",
++                  names[i], count[i], total[i] / 1e6, longest[i] / 1e6);
++      }
++      if (line[0] && ++reports <= 2000)
++         vn_droiddeck_log("waits over %.0f s:%s", (end - since) / 1e9, line);
++      memset(count, 0, sizeof(count));
++      memset(total, 0, sizeof(total));
++      memset(longest, 0, sizeof(longest));
++      since = end;
++   }
++   mtx_unlock(&vn_dd_stats_mutex);
++}
++
++/* droiddeck: the frame rate, and how much of each frame is the GPU drain before presenting.
++ * One call per present: the interval since the last present is the frame time, and
++ * present_wait_ns is what the present path itself blocked on the GPU (see vn_queue_wsi_present,
++ * which waits for the queue to go idle when the renderer has no implicit or explicit fencing).
++ * Every 10 s the averages go to droiddeck_vulkan.txt. This is the measurement the 24->60 fps
++ * work needs: if the wait is most of the frame, the fix is pipelining, not the CPU work. */
++static int
++vn_dd_float_cmp(const void *a, const void *b)
++{
++   const float x = *(const float *)a, y = *(const float *)b;
++   return x < y ? -1 : x > y;
++}
++
++void
++vn_dd_frame_stats(int64_t present_wait_ns)
++{
++   static int64_t last, since;
++   static uint64_t frames, wait_total;
++   static unsigned reports;
++   /* the frame times of the window, for how even they are: a steady 9 fps and 20 fps with
++    * hitches can have the same average */
++   static float times[4096];
++   static unsigned time_count;
++   const int64_t now = os_time_get_nano();
++
++   vn_dd_prof_present();
++   vn_dd_stats_present();
++   mtx_lock(&vn_dd_stats_mutex);
++   if (last && now > last) {
++      frames++;
++      wait_total += present_wait_ns > 0 ? (uint64_t)present_wait_ns : 0;
++      if (time_count < ARRAY_SIZE(times))
++         times[time_count++] = (float)((now - last) / 1e6);
++   }
++   last = now;
++   if (!since)
++      since = now;
++   if (now - since >= 10000000000ll) {
++      if (frames && ++reports <= 2000) {
++         const double span = (double)(now - since);
++         float median = 0, p95 = 0, max = 0;
++         unsigned hitches = 0;
++         if (time_count) {
++            qsort(times, time_count, sizeof(times[0]), vn_dd_float_cmp);
++            median = times[time_count / 2];
++            p95 = times[MIN2(time_count - 1, time_count * 95 / 100)];
++            max = times[time_count - 1];
++            for (unsigned i = 0; i < time_count; i++)
++               hitches += times[i] > 2.0f * median && times[i] > 25.0f;
++         }
++         vn_droiddeck_log("frames: %.1f fps (%.2f ms/frame); present GPU wait %.2f ms/frame; "
++                          "frame times median %.1f, 95%% %.1f, max %.1f ms, %u over twice the "
++                          "median",
++                          frames * 1e9 / span, span / 1e6 / frames,
++                          (double)wait_total / 1e6 / frames, median, p95, max, hitches);
++      }
++      frames = wait_total = 0;
++      time_count = 0;
++      since = now;
++   }
++   mtx_unlock(&vn_dd_stats_mutex);
++}
++
++/* droiddeck: which waits get a call stack. The first cut attributed fence and ring only, and
++ * the report it produced was misleading: the per-reason totals show semaphore as the largest
++ * bucket in every Lake session (2-5 s of each 10 s window) while no semaphore wait could reach
++ * the stack list, so the biggest number in the report had no owner and read as if the attributed
++ * stacks were the whole story. Keep this list in step with the totals it explains. */
++#define VN_DD_REASON_ATTRIBUTED(reason)                                          \
++   ((reason) == VN_RELAX_REASON_FENCE || (reason) == VN_RELAX_REASON_RING_SEQNO || \
++    (reason) == VN_RELAX_REASON_TLS_RING_SEQNO || (reason) == VN_RELAX_REASON_RING_SPACE || \
++    (reason) == VN_RELAX_REASON_SEMAPHORE)
++
++static const char *
++vn_dd_reason_str(int reason)
++{
++   switch (reason) {
++   case VN_RELAX_REASON_FENCE: return "fence";
++   case VN_RELAX_REASON_SEMAPHORE: return "semaphore";
++   case VN_RELAX_REASON_RING_SPACE: return "ring space";
++   case VN_RELAX_REASON_TLS_RING_SEQNO: return "tls ring seqno";
++   default: return "ring";
++   }
++}
++
++/* droiddeck: who waits. For fence and ring waits (a program's vkWaitForFences, or a call that
++ * needs the server's reply), the call stack is kept with its count and time, and the stacks
++ * that waited longest are written to droiddeck_vulkan.txt every 10 s as library+offset frames
++ * (to be symbolized against the driver's libraries). DROIDDECK_VN_WAIT_STACKS=0 turns it off.
++ */
++#define VN_DD_SITE_FRAMES 8
++#define VN_DD_SITES 48
++struct vn_dd_site {
++   void *pc[VN_DD_SITE_FRAMES];
++   int n;
++   int reason;
++   /* the waiting thread's name: a background thread that waits for the GPU by design (DXVK's
++    * submission finisher) and the thread that records the frame read differently */
++   char thread[16];
++   uint64_t count, ns, max;
++};
++static struct vn_dd_site vn_dd_sites[VN_DD_SITES];
++static int64_t vn_dd_sites_since;
++static unsigned vn_dd_sites_reports;
++
++/* droiddeck: the driver's own functions by name in the wait stacks. Offsets alone needed the
++ * exact build's library to read, and the CI artifacts that hold it are not always reachable;
++ * the library keeps its .symtab, so it can name its own static functions. */
++struct vn_dd_sym {
++   uintptr_t addr, size;
++   const char *name;
++};
++static struct vn_dd_sym *vn_dd_syms;
++static size_t vn_dd_sym_count;
++static void *vn_dd_sym_base;
++
++static int
++vn_dd_sym_cmp(const void *a, const void *b)
++{
++   const struct vn_dd_sym *x = a, *y = b;
++   return x->addr < y->addr ? -1 : x->addr > y->addr;
++}
++
++static void
++vn_dd_syms_load(void)
++{
++   Dl_info info;
++   if (!dladdr((void *)vn_dd_syms_load, &info) || !info.dli_fname)
++      return;
++   FILE *f = fopen(info.dli_fname, "rb");
++   if (!f)
++      return;
++   char *data = NULL;
++   if (fseek(f, 0, SEEK_END) == 0) {
++      const long size = ftell(f);
++      if (size > (long)sizeof(Elf64_Ehdr) && size < (64l << 20) && fseek(f, 0, SEEK_SET) == 0) {
++         data = malloc(size);
++         if (data && fread(data, 1, size, f) != (size_t)size) {
++            free(data);
++            data = NULL;
++         }
++      }
++      if (data) {
++         const Elf64_Ehdr *eh = (const Elf64_Ehdr *)data;
++         const Elf64_Shdr *sh = (const Elf64_Shdr *)(data + eh->e_shoff);
++         if (!memcmp(eh->e_ident, ELFMAG, SELFMAG) && eh->e_ident[EI_CLASS] == ELFCLASS64 &&
++             eh->e_shoff + (uint64_t)eh->e_shnum * sizeof(Elf64_Shdr) <= (uint64_t)size) {
++            for (int i = 0; i < eh->e_shnum; i++) {
++               if (sh[i].sh_type != SHT_SYMTAB || sh[i].sh_link >= eh->e_shnum)
++                  continue;
++               const Elf64_Sym *sym = (const Elf64_Sym *)(data + sh[i].sh_offset);
++               const size_t n = sh[i].sh_size / sizeof(Elf64_Sym);
++               const char *strtab = data + sh[sh[i].sh_link].sh_offset;
++               vn_dd_syms = calloc(n, sizeof(*vn_dd_syms));
++               if (!vn_dd_syms)
++                  break;
++               for (size_t k = 0; k < n; k++) {
++                  if (ELF64_ST_TYPE(sym[k].st_info) != STT_FUNC || !sym[k].st_value)
++                     continue;
++                  vn_dd_syms[vn_dd_sym_count++] = (struct vn_dd_sym){
++                     sym[k].st_value, sym[k].st_size, strdup(strtab + sym[k].st_name) };
++               }
++               qsort(vn_dd_syms, vn_dd_sym_count, sizeof(*vn_dd_syms), vn_dd_sym_cmp);
++               vn_dd_sym_base = info.dli_fbase;
++               break;
++            }
++         }
++         free(data);
++      }
++   }
++   fclose(f);
++}
++
++static const char *
++vn_dd_sym_find(uintptr_t off, uintptr_t *sym_off)
++{
++   size_t lo = 0, hi = vn_dd_sym_count;
++   while (lo < hi) {
++      const size_t mid = (lo + hi) / 2;
++      if (vn_dd_syms[mid].addr <= off)
++         lo = mid + 1;
++      else
++         hi = mid;
++   }
++   if (!lo)
++      return NULL;
++   const struct vn_dd_sym *s = &vn_dd_syms[lo - 1];
++   if (s->size && off >= s->addr + s->size)
++      return NULL;
++   *sym_off = off - s->addr;
++   return s->name;
++}
++
++static void
++vn_dd_frame_str(void *pc, char *buf, size_t size)
++{
++   static once_flag syms_once = ONCE_FLAG_INIT;
++   call_once(&syms_once, vn_dd_syms_load);
++   Dl_info info;
++   if (dladdr(pc, &info) && info.dli_fname) {
++      if (vn_dd_sym_base && info.dli_fbase == vn_dd_sym_base) {
++         uintptr_t sym_off;
++         const char *name =
++            vn_dd_sym_find((uintptr_t)pc - (uintptr_t)info.dli_fbase, &sym_off);
++         if (name) {
++            snprintf(buf, size, "%s+0x%lx", name, (unsigned long)sym_off);
++            return;
++         }
++      }
++      const char *base = strrchr(info.dli_fname, '/');
++      snprintf(buf, size, "%s+0x%lx", base ? base + 1 : info.dli_fname,
++               (unsigned long)((uintptr_t)pc - (uintptr_t)info.dli_fbase));
++   } else {
++      snprintf(buf, size, "%p", pc);
++   }
++}
++
++static int
++vn_dd_site_cmp(const void *a, const void *b)
++{
++   const struct vn_dd_site *x = a, *y = b;
++   return x->ns < y->ns ? 1 : x->ns > y->ns ? -1 : 0;
++}
++
++static void
++vn_dd_wait_site(int reason, int64_t start, int64_t end)
++{
++   static int on = -1;
++   static int64_t interval = 10000000000ll;
++   if (on < 0) {
++      on = debug_get_bool_option("DROIDDECK_VN_WAIT_STACKS", true);
++      /* DROIDDECK_VN_WAIT_STACKS_MS: how often (tests use less than 10 s) */
++      interval = debug_get_num_option("DROIDDECK_VN_WAIT_STACKS_MS", 10000) * 1000000ll;
++   }
++   if (!on || !VN_DD_REASON_ATTRIBUTED(reason))
++      return;
++   void *bt[VN_DD_SITE_FRAMES + 2];
++   int n = backtrace(bt, VN_DD_SITE_FRAMES + 2);
++   /* skip this function and vn_relax_fini */
++   n = n > 2 ? n - 2 : 0;
++   void **pc = bt + 2;
++   const uint64_t d = end - start;
++   char thread[16] = "";
++   prctl(PR_GET_NAME, thread, 0, 0, 0);
++   thread[15] = 0;
++
++   struct vn_dd_site report[VN_DD_SITES];
++   int report_n = 0;
++   double secs = 0;
++   mtx_lock(&vn_dd_stats_mutex);
++   struct vn_dd_site *site = NULL;
++   for (int i = 0; i < VN_DD_SITES; i++) {
++      struct vn_dd_site *s = &vn_dd_sites[i];
++      if (!s->count) {
++         site = s;
++         s->n = n;
++         s->reason = reason;
++         memcpy(s->thread, thread, sizeof(thread));
++         memcpy(s->pc, pc, n * sizeof(void *));
++         break;
++      }
++      if (s->reason == reason && s->n == n && !strcmp(s->thread, thread) &&
++          !memcmp(s->pc, pc, n * sizeof(void *))) {
++         site = s;
++         break;
++      }
++   }
++   if (site) {
++      site->count++;
++      site->ns += d;
++      if (d > site->max)
++         site->max = d;
++   }
++   if (!vn_dd_sites_since)
++      vn_dd_sites_since = start;
++   if (end - vn_dd_sites_since >= interval) {
++      secs = (end - vn_dd_sites_since) / 1e9;
++      for (int i = 0; i < VN_DD_SITES && vn_dd_sites[i].count; i++)
++         report[report_n++] = vn_dd_sites[i];
++      memset(vn_dd_sites, 0, sizeof(vn_dd_sites));
++      vn_dd_sites_since = end;
++      if (++vn_dd_sites_reports > 600)
++         report_n = 0;
++   }
++   mtx_unlock(&vn_dd_stats_mutex);
++
++   if (!report_n)
++      return;
++   qsort(report, report_n, sizeof(report[0]), vn_dd_site_cmp);
++   for (int i = 0; i < report_n && i < 8; i++) {
++      char line[1024];
++      int len = snprintf(line, sizeof(line), "wait stack %d over %.0f s: %s %" PRIu64 "x %.1f ms (max %.1f) in thread '%s':",
++                         i + 1, secs, vn_dd_reason_str(report[i].reason),
++                         report[i].count, report[i].ns / 1e6, report[i].max / 1e6, report[i].thread);
++      for (int f = 0; f < report[i].n && len < (int)sizeof(line) - 64; f++) {
++         char frame[160];
++         vn_dd_frame_str(report[i].pc[f], frame, sizeof(frame));
++         len += snprintf(line + len, sizeof(line) - len, " %s", frame);
++      }
++      vn_droiddeck_log("%s", line);
++   }
++}
++
++void
++vn_relax_fini(struct vn_relax_state *state)
++{
++   const int64_t dd_end = os_time_get_nano();
++   /* the stats first: they set up the lock both use */
++   vn_dd_wait_stats(state->reason, state->reason_str, state->start_ns, dd_end);
++   vn_dd_wait_site(state->reason, state->start_ns, dd_end);
++   vn_watchdog_release(&state->instance->ring.watchdog);
++}
++
++static inline const char *
++vn_relax_reason_string(enum vn_relax_reason reason)
++{
++   /* deliberately avoid default case for -Wswitch to catch upon compile */
++   switch (reason) {
++   case VN_RELAX_REASON_RING_SEQNO:
++      return "ring seqno";
++   case VN_RELAX_REASON_TLS_RING_SEQNO:
++      return "tls ring seqno";
++   case VN_RELAX_REASON_RING_SPACE:
++      return "ring space";
++   case VN_RELAX_REASON_FENCE:
++      return "fence";
++   case VN_RELAX_REASON_SEMAPHORE:
++      return "semaphore";
++   case VN_RELAX_REASON_QUERY:
++      return "query";
++   }
++   return "";
++}
++
++static uint32_t
++vn_dd_relax_base_us(void)
++{
++   static int us = -1;
++   if (us < 0) {
++      const char *e = getenv("DROIDDECK_VN_RELAX_US");
++      us = e ? atoi(e) : 160;
++      if (us < 1 || us > 1000)
++         us = 160;
++   }
++   return us;
++}
++
++static struct vn_relax_profile
++vn_relax_get_profile(enum vn_relax_reason reason)
++{
++   /* This is the helper to map a vn_relax_reason to a profile. For new
++    * profiles added, we MUST also update the pre-calculated "first_warn_time"
++    * in vn_watchdog_init() if the "first warn" comes sooner.
++    */
++
++   /* deliberately avoid default case for -Wswitch to catch upon compile */
++   switch (reason) {
++   case VN_RELAX_REASON_RING_SEQNO:
++      /* warn every 4096 iters after having already slept ~3.5s:
++       *   (yielded 255 times)
++       *   stuck in wait with iter at 4096  (3.5s slept already)
++       *   stuck in wait with iter at 8192  (14s slept already)
++       *   stuck in wait with iter at 12288 (35s slept already)
++       *   ...
++       *   aborting after 895s
++       */
++      return (struct vn_relax_profile){
++         .base_sleep_us = 160,
++         .busy_wait_order = 8,
++         .warn_order = 12,
++         .abort_order = 16,
++      };
++   case VN_RELAX_REASON_TLS_RING_SEQNO:
++   case VN_RELAX_REASON_RING_SPACE:
++   case VN_RELAX_REASON_FENCE:
++   case VN_RELAX_REASON_SEMAPHORE:
++   case VN_RELAX_REASON_QUERY:
++      /* warn every 1024 iters after having already slept ~3.5s:
++       *   (yielded 15 times)
++       *   stuck in wait with iter at 1024 (3.5s slept already)
++       *   stuck in wait with iter at 2048 (14s slept already)
++       *   stuck in wait with iter at 3072 (35s slept already)
++       *   ...
++       *   aborting after 895s
++       */
++      /* droiddeck: DROIDDECK_VN_RELAX_US sets the first sleep (default 160 us as upstream:
++       * shorter sleeps made every waiting thread poll more and starved the bridge's server
++       * of CPU, which made Steam's UI slower) */
++      return (struct vn_relax_profile){
++         .base_sleep_us = vn_dd_relax_base_us(),
++         .busy_wait_order = 4,
++         .warn_order = 10,
++         .abort_order = 14,
++      };
++   }
++
++   unreachable("unhandled vn_relax_reason");
++}
++
++struct vn_relax_state
++vn_relax_init(struct vn_instance *instance, enum vn_relax_reason reason)
++{
++   struct vn_ring *ring = instance->ring.ring;
++   struct vn_watchdog *watchdog = &instance->ring.watchdog;
++   if (vn_watchdog_acquire(watchdog, true))
++      vn_ring_unset_status_bits(ring, VK_RING_STATUS_ALIVE_BIT_MESA);
++
++   return (struct vn_relax_state){
++      .instance = instance,
++      .iter = 0,
++      .profile = vn_relax_get_profile(reason),
++      .reason_str = vn_relax_reason_string(reason),
++      .start_ns = os_time_get_nano(),
++      .reason = reason,
++   };
++}
++
++void
++vn_relax(struct vn_relax_state *state)
++{
++   const uint32_t base_sleep_us = state->profile.base_sleep_us;
++   const uint32_t busy_wait_order = state->profile.busy_wait_order;
++   const uint32_t warn_order = state->profile.warn_order;
++   const uint32_t abort_order = state->profile.abort_order;
++
++   uint32_t *iter = &state->iter;
++   (*iter)++;
++   if (*iter < (1 << busy_wait_order)) {
++      thrd_yield();
++      return;
++   }
++
++   if (unlikely(*iter % (1 << warn_order) == 0)) {
++      struct vn_instance *instance = state->instance;
++      vn_log(instance, "stuck in %s wait with iter at %d", state->reason_str,
++             *iter);
++
++      struct vn_ring *ring = instance->ring.ring;
++      const uint32_t status = vn_ring_load_status(ring);
++      if (status & VK_RING_STATUS_FATAL_BIT_MESA) {
++         vn_log(instance, "aborting on ring fatal error at iter %d", *iter);
++         abort();
++      }
++
++      struct vn_watchdog *watchdog = &instance->ring.watchdog;
++      const bool alive = status & VK_RING_STATUS_ALIVE_BIT_MESA;
++      if (vn_watchdog_acquire(watchdog, alive))
++         vn_ring_unset_status_bits(ring, VK_RING_STATUS_ALIVE_BIT_MESA);
++
++      if (vn_watchdog_timeout(watchdog) && !VN_DEBUG(NO_ABORT)) {
++         vn_log(instance, "aborting on expired ring alive status at iter %d",
++                *iter);
++         abort();
++      }
++
++      if (*iter >= (1 << abort_order) && !VN_DEBUG(NO_ABORT)) {
++         vn_log(instance, "aborting");
++         abort();
++      }
++   }
++
++   const uint32_t shift = util_last_bit(*iter) - busy_wait_order - 1;
++   os_time_sleep(base_sleep_us << shift);
++}
++
++struct vn_ring *
++vn_tls_get_ring(struct vn_instance *instance)
++{
++   if (VN_PERF(NO_MULTI_RING))
++      return instance->ring.ring;
++
++   struct vn_tls *tls = vn_tls_get();
++   if (unlikely(!tls)) {
++      /* only allow to fallback on missing tls */
++      return instance->ring.ring;
++   }
++
++   /* look up tls_ring owned by instance */
++   list_for_each_entry(struct vn_tls_ring, tls_ring, &tls->tls_rings,
++                       tls_head) {
++      mtx_lock(&tls_ring->mutex);
++      if (tls_ring->instance == instance) {
++         mtx_unlock(&tls_ring->mutex);
++         assert(tls_ring->ring);
++         return tls_ring->ring;
++      }
++      mtx_unlock(&tls_ring->mutex);
++   }
++
++   struct vn_tls_ring *tls_ring = calloc(1, sizeof(*tls_ring));
++   if (!tls_ring)
++      return NULL;
++
++   /* keep the extra for potential roundtrip sync on tls ring */
++   static const size_t extra_size = sizeof(uint32_t);
++
++   /* only need a small ring for synchronous cmds on tls ring */
++   static const size_t buf_size = 16 * 1024;
++
++   /* single cmd can use the entire ring shmem on tls ring */
++   static const uint8_t direct_order = 0;
++
++   struct vn_ring_layout layout;
++   vn_ring_get_layout(buf_size, extra_size, &layout);
++
++   tls_ring->ring =
++      vn_ring_create(instance, &layout, direct_order, true /* is_tls_ring */);
++   if (!tls_ring->ring) {
++      free(tls_ring);
++      return NULL;
++   }
++
++   mtx_init(&tls_ring->mutex, mtx_plain);
++   tls_ring->instance = instance;
++   list_add(&tls_ring->tls_head, &tls->tls_rings);
++   list_add(&tls_ring->vk_head, &instance->ring.tls_rings);
++
++   return tls_ring->ring;
++}
++
++void
++vn_tls_destroy_ring(struct vn_tls_ring *tls_ring)
++{
++   mtx_lock(&tls_ring->mutex);
++   if (tls_ring->ring) {
++      vn_ring_destroy(tls_ring->ring);
++      tls_ring->ring = NULL;
++      tls_ring->instance = NULL;
++      mtx_unlock(&tls_ring->mutex);
++   } else {
++      mtx_unlock(&tls_ring->mutex);
++      mtx_destroy(&tls_ring->mutex);
++      free(tls_ring);
++   }
++}
++
++static void
++vn_tls_free(void *tls)
++{
++   if (tls) {
++      list_for_each_entry_safe(struct vn_tls_ring, tls_ring,
++                               &((struct vn_tls *)tls)->tls_rings, tls_head)
++         vn_tls_destroy_ring(tls_ring);
++   }
++   free(tls);
++}
++
++static tss_t vn_tls_key;
++static bool vn_tls_key_valid;
++
++static void
++vn_tls_key_create_once(void)
++{
++   vn_tls_key_valid = tss_create(&vn_tls_key, vn_tls_free) == thrd_success;
++   if (!vn_tls_key_valid && VN_DEBUG(INIT))
++      vn_log(NULL, "WARNING: failed to create vn_tls_key");
++}
++
++struct vn_tls *
++vn_tls_get(void)
++{
++   static once_flag once = ONCE_FLAG_INIT;
++   call_once(&once, vn_tls_key_create_once);
++   if (unlikely(!vn_tls_key_valid))
++      return NULL;
++
++   struct vn_tls *tls = tss_get(vn_tls_key);
++   if (likely(tls))
++      return tls;
++
++   tls = calloc(1, sizeof(*tls));
++   if (!tls)
++      return NULL;
++
++   /* initialize tls */
++   tls->async_pipeline_create = false;
++   list_inithead(&tls->tls_rings);
++
++   if (tss_set(vn_tls_key, tls) != thrd_success) {
++      free(tls);
++      return NULL;
++   }
++
++   return tls;
++}
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_stats.c b/src/virtio/vulkan/vn_droiddeck_stats.c
+--- a/src/virtio/vulkan/vn_droiddeck_stats.c	1970-01-01 00:00:00.000000000 +0000
++++ b/src/virtio/vulkan/vn_droiddeck_stats.c	2026-10-31 12:35:24.964110825 +0000
+@@ -0,0 +1,1155 @@
++/*
++ * DroidDeck: what a Vulkan program's frames cost (see the header).
++ * SPDX-License-Identifier: MIT
++ */
++
++#include "vn_droiddeck_stats.h"
++
++#include <dirent.h>
++#include <errno.h>
++#include <sched.h>
++#include <inttypes.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++#include "c11/threads.h"
++#include "util/os_time.h"
++#include "util/simple_mtx.h"
++#include "util/u_debug.h"
++
++#include "vn_device.h"
++#include "vn_instance.h"
++#include "vn_physical_device.h"
++#include "vn_queue.h"
++#include "vn_droiddeck_prof.h"
++
++#define DD_SLOTS 48
++
++struct vn_dd_slot {
++   VkQueryPool pool;
++   VkCommandBuffer cmd[2];
++   bool pending;
++};
++
++struct vn_dd_queue_timing {
++   VkCommandPool cmd_pool;
++   struct vn_dd_slot slots[DD_SLOTS];
++   unsigned next;
++   bool failed;
++};
++
++static simple_mtx_t dd_lock = SIMPLE_MTX_INITIALIZER;
++static struct {
++   uint64_t submits, cmds, timed, gpu_ns, gpu_max_ns, busy_skips, submit_ns;
++   /* the GPU's busy time as the union of the timed spans: submissions that overlap on the GPU
++    * (several queues, or work queued behind work) are not counted twice */
++   uint64_t gpu_union_ns, gpu_last_end;
++   uint64_t pool_refused, pool_sync, pool_sync_failed;
++   int64_t since;
++   unsigned reports;
++} dd_stats;
++
++void
++vn_dd_stats_descriptor_pool(enum vn_dd_pool_event event)
++{
++   simple_mtx_lock(&dd_lock);
++   if (event == VN_DD_POOL_REFUSED)
++      dd_stats.pool_refused++;
++   else if (event == VN_DD_POOL_SYNC)
++      dd_stats.pool_sync++;
++   else
++      dd_stats.pool_sync_failed++;
++   simple_mtx_unlock(&dd_lock);
++}
++
++static int
++dd_enabled(struct vn_device *dev)
++{
++   static int on = -1;
++   if (on < 0)
++      on = debug_get_bool_option("DROIDDECK_VN_STATS", true);
++   if (!on)
++      return 0;
++   const char *engine = dev->instance->base.vk.app_info.engine_name;
++   if (engine && !strcmp(engine, "mesa zink"))
++      return 0;
++   return 1;
++}
++
++/* ---- the session's busiest threads ---- */
++
++#define DD_TASKS 4096
++struct dd_task {
++   int tid, pid;
++   uint64_t ticks, delta;
++   char name[32];
++};
++static struct dd_task dd_tasks[2][DD_TASKS];
++static int dd_task_count[2], dd_task_cur;
++
++static bool
++dd_read_task(int pid, int tid, uint64_t *ticks, char *name, size_t name_size)
++{
++   char path[64], buf[512];
++   snprintf(path, sizeof(path), "/proc/%d/task/%d/stat", pid, tid);
++   FILE *f = fopen(path, "re");
++   if (!f)
++      return false;
++   size_t n = fread(buf, 1, sizeof(buf) - 1, f);
++   fclose(f);
++   buf[n] = 0;
++   char *open = strchr(buf, '('), *close = strrchr(buf, ')');
++   if (!open || !close || close < open)
++      return false;
++   size_t len = MIN2((size_t)(close - open - 1), name_size - 1);
++   memcpy(name, open + 1, len);
++   name[len] = 0;
++   unsigned long long ut = 0, st = 0;
++   if (sscanf(close + 2, "%*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu", &ut, &st) != 2)
++      return false;
++   *ticks = ut + st;
++   return true;
++}
++
++static int
++dd_task_cmp(const void *a, const void *b)
++{
++   const struct dd_task *x = a, *y = b;
++   return x->delta < y->delta ? 1 : x->delta > y->delta ? -1 : 0;
++}
++
++/* ---- where this program's busiest threads run, and at what clocks (0037) ----
++ *
++ * Phones mix core types (Tensor G4: 4 A520, 3 A720, 1 X4) and cap clocks when hot. A game's main
++ * thread on a small core, or the big cores capped, looks like "the game is slow" in every other
++ * report. A thread samples, 20 times a second, which CPU each of the program's four busiest threads
++ * is running on (/proc/self/task/<tid>/stat: state R, field 39), and twice a second each CPU's
++ * clock and its cap (cpufreq scaling_cur_freq / scaling_max_freq). The report groups CPUs into
++ * clusters by core type (/proc/cpuinfo "CPU part") and top clock. DROIDDECK_VN_CPU_PLACE=0 turns
++ * it off. */
++
++#define DD_CPUS 16
++#define DD_TRACK 4
++
++static struct {
++   int count;
++   char kind[DD_CPUS][12];
++   unsigned max_khz[DD_CPUS];
++   int cluster[DD_CPUS]; /* index of the cluster's first CPU */
++   bool freq_readable;
++   char cpuset[96];
++} dd_topo;
++
++static struct {
++   bool started, stop;
++   int tid[DD_TRACK];
++   char name[DD_TRACK][32];
++   uint64_t on_cpu[DD_TRACK][DD_CPUS];
++   uint64_t samples[DD_TRACK], running[DD_TRACK];
++   char affinity[DD_TRACK][32];
++   uint64_t freq_sum[DD_CPUS], freq_n[DD_CPUS];
++   unsigned cap_min[DD_CPUS];
++} dd_place;
++
++/* 0038/0039: the threads kept off the slowest cluster, and their CPUs */
++static struct {
++   int tid[32];
++   char name[32][16];
++   int count;
++   cpu_set_t set;
++   unsigned resets[32];
++} dd_pin;
++
++static unsigned
++dd_read_uint(const char *path)
++{
++   FILE *f = fopen(path, "re");
++   if (!f)
++      return 0;
++   unsigned v = 0;
++   if (fscanf(f, "%u", &v) != 1)
++      v = 0;
++   fclose(f);
++   return v;
++}
++
++static const char *
++dd_core_name(unsigned part)
++{
++   switch (part) {
++   case 0xd05: return "A55";
++   case 0xd0b: return "A76";
++   case 0xd0d: return "A77";
++   case 0xd41: return "A78";
++   case 0xd44: return "X1";
++   case 0xd46: return "A510";
++   case 0xd47: return "A710";
++   case 0xd48: return "X2";
++   case 0xd4d: return "A715";
++   case 0xd4e: return "X3";
++   case 0xd80: return "A520";
++   case 0xd81: return "A720";
++   case 0xd82: return "X4";
++   case 0xd85: return "X925";
++   case 0xd87: return "A725";
++   default: return NULL;
++   }
++}
++
++static void
++dd_topo_init(void)
++{
++   int n = (int)sysconf(_SC_NPROCESSORS_CONF);
++   dd_topo.count = n < 1 ? 1 : MIN2(n, DD_CPUS);
++   for (int c = 0; c < dd_topo.count; c++)
++      snprintf(dd_topo.kind[c], sizeof(dd_topo.kind[c]), "?");
++   FILE *f = fopen("/proc/cpuinfo", "re");
++   if (f) {
++      char line[256];
++      int cpu = -1;
++      while (fgets(line, sizeof(line), f)) {
++         unsigned v;
++         if (sscanf(line, "processor : %u", &v) == 1 || sscanf(line, "processor\t: %u", &v) == 1)
++            cpu = (int)v;
++         else if (cpu >= 0 && cpu < dd_topo.count && strstr(line, "CPU part") &&
++                  sscanf(strchr(line, ':') + 1, "%x", &v) == 1) {
++            const char *name = dd_core_name(v);
++            if (name)
++               snprintf(dd_topo.kind[cpu], sizeof(dd_topo.kind[cpu]), "%s", name);
++            else
++               snprintf(dd_topo.kind[cpu], sizeof(dd_topo.kind[cpu]), "0x%x", v);
++         }
++      }
++      fclose(f);
++   }
++   for (int c = 0; c < dd_topo.count; c++) {
++      char path[96];
++      snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", c);
++      dd_topo.max_khz[c] = dd_read_uint(path);
++      if (dd_topo.max_khz[c])
++         dd_topo.freq_readable = true;
++      dd_topo.cluster[c] = c;
++      for (int d = 0; d < c; d++) {
++         if (!strcmp(dd_topo.kind[d], dd_topo.kind[c]) && dd_topo.max_khz[d] == dd_topo.max_khz[c]) {
++            dd_topo.cluster[c] = dd_topo.cluster[d];
++            break;
++         }
++      }
++      dd_place.cap_min[c] = ~0u;
++   }
++   f = fopen("/proc/self/cpuset", "re");
++   if (f) {
++      if (fgets(dd_topo.cpuset, sizeof(dd_topo.cpuset), f))
++         dd_topo.cpuset[strcspn(dd_topo.cpuset, "\n")] = 0;
++      fclose(f);
++   }
++   if (!dd_topo.cpuset[0])
++      snprintf(dd_topo.cpuset, sizeof(dd_topo.cpuset), "unreadable");
++}
++
++/* "cpu 0-3" for a cluster */
++static int
++dd_cluster_span(int first, char *out, size_t size)
++{
++   int lo = -1, hi = -1, n = 0;
++   for (int c = 0; c < dd_topo.count; c++) {
++      if (dd_topo.cluster[c] != first)
++         continue;
++      if (lo < 0)
++         lo = c;
++      hi = c;
++      n++;
++   }
++   if (lo == hi)
++      snprintf(out, size, "%d", lo);
++   else if (hi - lo + 1 == n)
++      snprintf(out, size, "%d-%d", lo, hi);
++   else
++      snprintf(out, size, "%d..%d", lo, hi);
++   return n;
++}
++
++static bool
++dd_task_state(int tid, char *state, int *cpu)
++{
++   char path[64], buf[600];
++   snprintf(path, sizeof(path), "/proc/self/task/%d/stat", tid);
++   FILE *f = fopen(path, "re");
++   if (!f)
++      return false;
++   size_t n = fread(buf, 1, sizeof(buf) - 1, f);
++   fclose(f);
++   buf[n] = 0;
++   char *p = strrchr(buf, ')');
++   if (!p || p[1] != ' ')
++      return false;
++   p += 2;
++   *state = *p;
++   /* field 3 is the state; the processor is field 39 */
++   for (int field = 3; field < 39; field++) {
++      p = strchr(p, ' ');
++      if (!p)
++         return false;
++      p++;
++   }
++   *cpu = atoi(p);
++   return true;
++}
++
++/* ---- hitches (0042) ----
++ *
++ * Steady driving in Lake still had frames of 0.4-0.9 s that no driver wait explains (the game's
++ * threads never waited on the bridge more than ~30 ms then). For a frame over 200 ms and three
++ * times the usual, this says what the program's four busiest threads did during it, from
++ * /proc/self/task/<tid>/schedstat read at every present: time running, time ready but waiting for a
++ * CPU, and the rest asleep (blocked on something: a lock, I/O, another thread). It also names the
++ * threads that used the most CPU during it (from a once-a-second snapshot of every thread). A main
++ * thread that ran the whole time points at the game's own work or the x86 translator compiling new
++ * code; one asleep at a loading thread; one waiting for a CPU at contention. */
++
++#define DD_SNAP_THREADS 512
++
++struct dd_snap {
++   int64_t at;
++   int count;
++   int tid[DD_SNAP_THREADS];
++   uint64_t ticks[DD_SNAP_THREADS];
++};
++
++static struct {
++   struct dd_snap snap[2];
++   int cur;
++   int64_t last_present;
++   double usual_ms;
++   int tid[DD_TRACK];
++   uint64_t run[DD_TRACK], wait[DD_TRACK];
++   unsigned reported;
++} dd_hitch;
++
++static bool
++dd_thread_ticks(int tid, uint64_t *ticks, char *name, size_t name_size)
++{
++   return dd_read_task(getpid(), tid, ticks, name, name_size);
++}
++
++/* every thread's CPU ticks now, into *s */
++static void
++dd_snap_take(struct dd_snap *s)
++{
++   s->count = 0;
++   s->at = os_time_get_nano();
++   DIR *d = opendir("/proc/self/task");
++   if (!d)
++      return;
++   struct dirent *e;
++   char name[32];
++   while ((e = readdir(d)) && s->count < DD_SNAP_THREADS) {
++      const int tid = atoi(e->d_name);
++      if (tid > 0 && dd_thread_ticks(tid, &s->ticks[s->count], name, sizeof(name)))
++         s->tid[s->count++] = tid;
++   }
++   closedir(d);
++}
++
++static void
++dd_hitch_snapshot(void)
++{
++   struct dd_snap *next = malloc(sizeof(*next));
++   if (!next)
++      return;
++   dd_snap_take(next);
++   simple_mtx_lock(&dd_lock);
++   dd_hitch.cur ^= 1;
++   dd_hitch.snap[dd_hitch.cur] = *next;
++   simple_mtx_unlock(&dd_lock);
++   free(next);
++}
++
++static bool
++dd_schedstat(int tid, uint64_t *run, uint64_t *wait)
++{
++   char path[64];
++   snprintf(path, sizeof(path), "/proc/self/task/%d/schedstat", tid);
++   FILE *f = fopen(path, "re");
++   if (!f)
++      return false;
++   unsigned long long r = 0, w = 0;
++   const bool ok = fscanf(f, "%llu %llu", &r, &w) == 2;
++   fclose(f);
++   *run = r;
++   *wait = w;
++   return ok;
++}
++
++struct dd_busy {
++   int tid;
++   uint64_t delta;
++   char name[32];
++};
++
++static int
++dd_busy_cmp(const void *a, const void *b)
++{
++   const struct dd_busy *x = a, *y = b;
++   return x->delta < y->delta ? 1 : x->delta > y->delta ? -1 : 0;
++}
++
++void
++vn_dd_stats_present(void)
++{
++   if (!dd_place.started)
++      return;
++   const int64_t now = os_time_get_nano();
++   int tids[DD_TRACK];
++   char names[DD_TRACK][32];
++   simple_mtx_lock(&dd_lock);
++   memcpy(tids, dd_place.tid, sizeof(tids));
++   memcpy(names, dd_place.name, sizeof(names));
++   simple_mtx_unlock(&dd_lock);
++   uint64_t run[DD_TRACK] = { 0 }, wait[DD_TRACK] = { 0 };
++   for (int i = 0; i < DD_TRACK; i++)
++      if (tids[i] > 0)
++         dd_schedstat(tids[i], &run[i], &wait[i]);
++   const int64_t start = dd_hitch.last_present;
++   if (start) {
++      const double ms = (now - start) / 1e6;
++      const bool hitch = ms > 200.0 && dd_hitch.usual_ms > 0 && ms > 3.0 * dd_hitch.usual_ms;
++      if (!hitch)
++         dd_hitch.usual_ms = dd_hitch.usual_ms > 0 ? 0.9 * dd_hitch.usual_ms + 0.1 * ms : ms;
++      if (hitch && dd_hitch.reported < 150) {
++         dd_hitch.reported++;
++         char line[1500];
++         int len = snprintf(line, sizeof(line), "hitch: a frame took %.0f ms (usual %.0f):", ms,
++                            dd_hitch.usual_ms);
++         for (int i = 0; i < DD_TRACK && len < (int)sizeof(line) - 160; i++) {
++            if (tids[i] <= 0 || dd_hitch.tid[i] != tids[i])
++               continue;
++            const double r = (run[i] - dd_hitch.run[i]) / 1e6, w = (wait[i] - dd_hitch.wait[i]) / 1e6;
++            const double sleep = ms - r - w;
++            len += snprintf(line + len, sizeof(line) - len,
++                            " %s[%d] ran %.0f, waited for a CPU %.0f, asleep %.0f ms;", names[i],
++                            tids[i], r, w, sleep > 0 ? sleep : 0.0);
++         }
++         /* who used the CPU since the snapshot just before the frame began */
++         struct dd_snap *base = malloc(sizeof(*base)), *now_snap = malloc(sizeof(*now_snap));
++         if (base && now_snap) {
++            simple_mtx_lock(&dd_lock);
++            const struct dd_snap *a = &dd_hitch.snap[dd_hitch.cur], *b = &dd_hitch.snap[dd_hitch.cur ^ 1];
++            *base = (a->at && a->at <= start) ? *a : (b->at && b->at <= start) ? *b : (a->at < b->at ? *a : *b);
++            simple_mtx_unlock(&dd_lock);
++            if (base->at) {
++               dd_snap_take(now_snap);
++               struct dd_busy *busy = calloc(now_snap->count ? now_snap->count : 1, sizeof(*busy));
++               int n = 0;
++               for (int i = 0; busy && i < now_snap->count; i++) {
++                  for (int j = 0; j < base->count; j++) {
++                     if (base->tid[j] == now_snap->tid[i] && now_snap->ticks[i] > base->ticks[j]) {
++                        busy[n].tid = now_snap->tid[i];
++                        busy[n].delta = now_snap->ticks[i] - base->ticks[j];
++                        n++;
++                        break;
++                     }
++                  }
++               }
++               if (busy && n) {
++                  qsort(busy, n, sizeof(*busy), dd_busy_cmp);
++                  const double hz = sysconf(_SC_CLK_TCK) > 0 ? (double)sysconf(_SC_CLK_TCK) : 100.0;
++                  len += snprintf(line + len, sizeof(line) - len, " CPU over the last %.1f s:",
++                                  (now_snap->at - base->at) / 1e9);
++                  for (int i = 0; i < n && i < 6 && len < (int)sizeof(line) - 60; i++) {
++                     uint64_t t;
++                     dd_thread_ticks(busy[i].tid, &t, busy[i].name, sizeof(busy[i].name));
++                     len += snprintf(line + len, sizeof(line) - len, " %s[%d] %.0f ms", busy[i].name,
++                                     busy[i].tid, busy[i].delta * 1000.0 / hz);
++                  }
++               }
++               free(busy);
++            }
++         }
++         free(base);
++         free(now_snap);
++         vn_droiddeck_log("%s", line);
++      }
++   }
++   dd_hitch.last_present = now;
++   memcpy(dd_hitch.tid, tids, sizeof(tids));
++   memcpy(dd_hitch.run, run, sizeof(run));
++   memcpy(dd_hitch.wait, wait, sizeof(wait));
++}
++
++static int
++dd_place_thread(void *arg)
++{
++   (void)arg;
++   unsigned tick = 0;
++   for (;;) {
++      struct timespec ts = { 0, 50 * 1000 * 1000 };
++      nanosleep(&ts, NULL);
++      simple_mtx_lock(&dd_lock);
++      if (dd_place.stop) {
++         simple_mtx_unlock(&dd_lock);
++         return 0;
++      }
++      int tids[DD_TRACK];
++      memcpy(tids, dd_place.tid, sizeof(tids));
++      simple_mtx_unlock(&dd_lock);
++      char state[DD_TRACK];
++      int cpu[DD_TRACK];
++      bool ok[DD_TRACK];
++      for (int i = 0; i < DD_TRACK; i++)
++         ok[i] = tids[i] > 0 && dd_task_state(tids[i], &state[i], &cpu[i]);
++      unsigned freq[DD_CPUS] = { 0 }, cap[DD_CPUS] = { 0 };
++      const bool clocks = dd_topo.freq_readable && (tick % 10) == 0;
++      if ((tick % 20) == 10)
++         dd_hitch_snapshot();
++      /* once a second: a pinned thread whose affinity was put back (a cpuset move resets it to
++       * the cpuset's CPUs; so can Wine) is pinned again */
++      if ((tick++ % 20) == 0) {
++         simple_mtx_lock(&dd_lock);
++         for (int i = 0; i < dd_pin.count; i++) {
++            cpu_set_t now;
++            CPU_ZERO(&now);
++            if (sched_getaffinity(dd_pin.tid[i], sizeof(now), &now) == 0 && !CPU_EQUAL(&now, &dd_pin.set) &&
++                sched_setaffinity(dd_pin.tid[i], sizeof(dd_pin.set), &dd_pin.set) == 0)
++               dd_pin.resets[i]++;
++         }
++         simple_mtx_unlock(&dd_lock);
++      }
++      if (clocks) {
++         for (int c = 0; c < dd_topo.count; c++) {
++            char path[96];
++            snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq", c);
++            freq[c] = dd_read_uint(path);
++            snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_max_freq", c);
++            cap[c] = dd_read_uint(path);
++         }
++      }
++      simple_mtx_lock(&dd_lock);
++      for (int i = 0; i < DD_TRACK; i++) {
++         if (!ok[i] || dd_place.tid[i] != tids[i])
++            continue;
++         dd_place.samples[i]++;
++         if (state[i] == 'R' && cpu[i] >= 0 && cpu[i] < dd_topo.count) {
++            dd_place.running[i]++;
++            dd_place.on_cpu[i][cpu[i]]++;
++         }
++      }
++      if (clocks) {
++         for (int c = 0; c < dd_topo.count; c++) {
++            if (freq[c]) {
++               dd_place.freq_sum[c] += freq[c];
++               dd_place.freq_n[c]++;
++            }
++            if (cap[c] && cap[c] < dd_place.cap_min[c])
++               dd_place.cap_min[c] = cap[c];
++         }
++      }
++      simple_mtx_unlock(&dd_lock);
++   }
++}
++
++/* DXVK's command-stream thread off the small cores (0038).
++ *
++ * On the Pixel 9 Pro XL (2026-10-31) Lake's dxvk-cs, which turns every D3D11 call into Vulkan and is
++ * on each frame's path to the GPU, ran 60-95% of the time on the A520s at 1.1-1.7 GHz while busy
++ * 20-40%: too little for the scheduler (or the app's hint session) to move it up. The named threads
++ * of this program (DROIDDECK_VN_PIN_THREADS, comma-separated, default "dxvk-cs"; 0 turns it off)
++ * may use every CPU but those of the slowest cluster. Checked every report, since threads come and
++ * go. Nothing happens on a CPU with one kind of core.
++ * 0039: on the phone the pin did not hold -- dxvk-cs reported "allowed 0-7" and ran on the A520s
++ * again within seconds (moving a task between cpusets resets its affinity). The sampler thread
++ * checks the pinned threads once a second and pins them again; the report says how often. */
++static void
++dd_pin_threads(void)
++{
++   static const char *names = NULL;
++   if (!names) {
++      /* 0041: on again by the user's choice (0040 had turned it off after a run that felt worse
++       * but whose bundle lacked this log); 0 turns it off */
++      names = os_get_option("DROIDDECK_VN_PIN_THREADS");
++      if (!names)
++         names = "dxvk-cs";
++   }
++   if (!strcmp(names, "0") || !names[0])
++      return;
++   unsigned slowest = ~0u, fastest = 0;
++   for (int c = 0; c < dd_topo.count; c++) {
++      slowest = MIN2(slowest, dd_topo.max_khz[c]);
++      fastest = MAX2(fastest, dd_topo.max_khz[c]);
++   }
++   if (!fastest || slowest == fastest)
++      return;
++   cpu_set_t set;
++   CPU_ZERO(&set);
++   char cpus[64] = "";
++   int len = 0;
++   for (int c = 0; c < dd_topo.count; c++) {
++      if (dd_topo.max_khz[c] > slowest) {
++         CPU_SET(c, &set);
++         len += snprintf(cpus + len, sizeof(cpus) - len, "%s%d", len ? "," : "", c);
++      }
++   }
++   simple_mtx_lock(&dd_lock);
++   dd_pin.set = set;
++   /* what the last window put back */
++   for (int i = 0; i < dd_pin.count; i++) {
++      if (dd_pin.resets[i])
++         vn_droiddeck_log("pinned %s[%d]: its CPUs were put back %u times since the last report and "
++                          "pinned again", dd_pin.name[i], dd_pin.tid[i], dd_pin.resets[i]);
++      dd_pin.resets[i] = 0;
++   }
++   simple_mtx_unlock(&dd_lock);
++   DIR *d = opendir("/proc/self/task");
++   if (!d)
++      return;
++   struct dirent *e;
++   while ((e = readdir(d))) {
++      const int tid = atoi(e->d_name);
++      if (tid <= 0)
++         continue;
++      bool done = false;
++      for (int i = 0; i < dd_pin.count; i++)
++         done |= dd_pin.tid[i] == tid;
++      if (done)
++         continue;
++      char path[64], comm[32] = "";
++      snprintf(path, sizeof(path), "/proc/self/task/%d/comm", tid);
++      FILE *f = fopen(path, "re");
++      if (!f)
++         continue;
++      if (fgets(comm, sizeof(comm), f))
++         comm[strcspn(comm, "\n")] = 0;
++      fclose(f);
++      /* the names as a comma-separated list, matched whole */
++      bool want = false;
++      for (const char *n = names; *n && !want;) {
++         const size_t l = strcspn(n, ",");
++         want = l && strlen(comm) == l && !strncmp(n, comm, l);
++         n += l + (n[l] == ',');
++      }
++      if (!want)
++         continue;
++      const int r = sched_setaffinity(tid, sizeof(set), &set);
++      vn_droiddeck_log("pinned %s[%d] to cpus %s, off the slowest cluster: %s (DROIDDECK_VN_PIN_THREADS)",
++                       comm, tid, cpus, r ? strerror(errno) : "done");
++      simple_mtx_lock(&dd_lock);
++      if (!r && dd_pin.count < (int)ARRAY_SIZE(dd_pin.tid)) {
++         dd_pin.tid[dd_pin.count] = tid;
++         snprintf(dd_pin.name[dd_pin.count], sizeof(dd_pin.name[0]), "%s", comm);
++         dd_pin.resets[dd_pin.count] = 0;
++         dd_pin.count++;
++      }
++      simple_mtx_unlock(&dd_lock);
++   }
++   closedir(d);
++}
++
++/* report the window that ends now and track these threads (the program's busiest) next */
++static void
++dd_place_report(double secs, const int *tids, char names[][32], int count)
++{
++   static int on = -1;
++   if (on < 0)
++      on = debug_get_bool_option("DROIDDECK_VN_CPU_PLACE", true);
++   if (!on)
++      return;
++   if (!dd_place.started) {
++      dd_topo_init();
++      char line[700];
++      int len = snprintf(line, sizeof(line), "cpu cores:");
++      for (int c = 0; c < dd_topo.count && len < (int)sizeof(line) - 80; c++) {
++         if (dd_topo.cluster[c] != c)
++            continue;
++         char span[16];
++         dd_cluster_span(c, span, sizeof(span));
++         len += snprintf(line + len, sizeof(line) - len, " cpu %s %s %.2f GHz;", span, dd_topo.kind[c],
++                         dd_topo.max_khz[c] / 1e6);
++      }
++      snprintf(line + len, sizeof(line) - len, " clocks %s; cpuset %s (DROIDDECK_VN_CPU_PLACE=0 turns this off)",
++               dd_topo.freq_readable ? "readable" : "not readable", dd_topo.cpuset);
++      vn_droiddeck_log("%s", line);
++      thrd_t t;
++      simple_mtx_lock(&dd_lock);
++      dd_place.started = true;
++      simple_mtx_unlock(&dd_lock);
++      if (thrd_create(&t, dd_place_thread, NULL) == thrd_success)
++         thrd_detach(t);
++   } else {
++      char line[1400];
++      simple_mtx_lock(&dd_lock);
++      int len = snprintf(line, sizeof(line), "cpu placement over %.0f s:", secs);
++      for (int i = 0; i < DD_TRACK && len < (int)sizeof(line) - 200; i++) {
++         if (dd_place.tid[i] <= 0 || !dd_place.samples[i])
++            continue;
++         len += snprintf(line + len, sizeof(line) - len, " %s[%d] running in %.0f%% of samples:",
++                         dd_place.name[i], dd_place.tid[i],
++                         dd_place.running[i] * 100.0 / dd_place.samples[i]);
++         for (int c = 0; c < dd_topo.count && len < (int)sizeof(line) - 60; c++) {
++            if (dd_topo.cluster[c] != c)
++               continue;
++            uint64_t n = 0;
++            for (int d = 0; d < dd_topo.count; d++)
++               if (dd_topo.cluster[d] == c)
++                  n += dd_place.on_cpu[i][d];
++            if (n && dd_place.running[i])
++               len += snprintf(line + len, sizeof(line) - len, " %s %.0f%%", dd_topo.kind[c],
++                               n * 100.0 / dd_place.running[i]);
++         }
++         len += snprintf(line + len, sizeof(line) - len, " (allowed %s);", dd_place.affinity[i]);
++      }
++      if (dd_topo.freq_readable && len < (int)sizeof(line) - 100) {
++         len += snprintf(line + len, sizeof(line) - len, " clocks:");
++         for (int c = 0; c < dd_topo.count && len < (int)sizeof(line) - 80; c++) {
++            if (dd_topo.cluster[c] != c)
++               continue;
++            uint64_t sum = 0, k = 0;
++            unsigned cap = ~0u;
++            for (int d = 0; d < dd_topo.count; d++) {
++               if (dd_topo.cluster[d] != c)
++                  continue;
++               sum += dd_place.freq_sum[d];
++               k += dd_place.freq_n[d];
++               cap = MIN2(cap, dd_place.cap_min[d]);
++            }
++            len += snprintf(line + len, sizeof(line) - len, " %s avg %.2f GHz", dd_topo.kind[c],
++                            k ? sum / (double)k / 1e6 : 0.0);
++            if (cap != ~0u && cap < dd_topo.max_khz[c])
++               len += snprintf(line + len, sizeof(line) - len, " (capped to %.2f of %.2f)",
++                               cap / 1e6, dd_topo.max_khz[c] / 1e6);
++            len += snprintf(line + len, sizeof(line) - len, ",");
++         }
++      }
++      simple_mtx_unlock(&dd_lock);
++      if (len > 0 && line[len - 1] == ',')
++         line[len - 1] = 0;
++      vn_droiddeck_log("%s", line);
++   }
++   dd_pin_threads();
++   /* the next window's threads */
++   simple_mtx_lock(&dd_lock);
++   memset(dd_place.on_cpu, 0, sizeof(dd_place.on_cpu));
++   memset(dd_place.samples, 0, sizeof(dd_place.samples));
++   memset(dd_place.running, 0, sizeof(dd_place.running));
++   memset(dd_place.freq_sum, 0, sizeof(dd_place.freq_sum));
++   memset(dd_place.freq_n, 0, sizeof(dd_place.freq_n));
++   for (int c = 0; c < DD_CPUS; c++)
++      dd_place.cap_min[c] = ~0u;
++   for (int i = 0; i < DD_TRACK; i++) {
++      dd_place.tid[i] = i < count ? tids[i] : 0;
++      if (i < count) {
++         snprintf(dd_place.name[i], sizeof(dd_place.name[i]), "%s", names[i]);
++         cpu_set_t set;
++         CPU_ZERO(&set);
++         int len = 0;
++         dd_place.affinity[i][0] = 0;
++         if (sched_getaffinity(tids[i], sizeof(set), &set) == 0) {
++            for (int c = 0; c < dd_topo.count && len < (int)sizeof(dd_place.affinity[i]) - 4; c++) {
++               if (!CPU_ISSET(c, &set))
++                  continue;
++               int e = c;
++               while (e + 1 < dd_topo.count && CPU_ISSET(e + 1, &set))
++                  e++;
++               len += snprintf(dd_place.affinity[i] + len, sizeof(dd_place.affinity[i]) - len, "%s%d",
++                               len ? "," : "", c);
++               if (e > c)
++                  len += snprintf(dd_place.affinity[i] + len, sizeof(dd_place.affinity[i]) - len,
++                                  "-%d", e);
++               c = e;
++            }
++         }
++         if (!dd_place.affinity[i][0])
++            snprintf(dd_place.affinity[i], sizeof(dd_place.affinity[i]), "?");
++      }
++   }
++   simple_mtx_unlock(&dd_lock);
++}
++
++static void
++dd_cpu_report(double secs)
++{
++   const int cur = dd_task_cur ^ 1, prev = dd_task_cur;
++   struct dd_task *now = dd_tasks[cur];
++   int count = 0;
++   DIR *proc = opendir("/proc");
++   if (!proc)
++      return;
++   struct dirent *pe;
++   while ((pe = readdir(proc)) && count < DD_TASKS) {
++      const int pid = atoi(pe->d_name);
++      if (pid <= 0)
++         continue;
++      char tpath[64];
++      snprintf(tpath, sizeof(tpath), "/proc/%d/task", pid);
++      DIR *tasks = opendir(tpath);
++      if (!tasks)
++         continue;
++      struct dirent *te;
++      while ((te = readdir(tasks)) && count < DD_TASKS) {
++         const int tid = atoi(te->d_name);
++         if (tid <= 0)
++            continue;
++         struct dd_task *t = &now[count];
++         if (!dd_read_task(pid, tid, &t->ticks, t->name, sizeof(t->name)))
++            continue;
++         t->tid = tid;
++         t->pid = pid;
++         t->delta = 0;
++         for (int i = 0; i < dd_task_count[prev]; i++) {
++            if (dd_tasks[prev][i].tid == tid) {
++               if (t->ticks >= dd_tasks[prev][i].ticks)
++                  t->delta = t->ticks - dd_tasks[prev][i].ticks;
++               break;
++            }
++         }
++         count++;
++      }
++      closedir(tasks);
++   }
++   closedir(proc);
++   const bool have_prev = dd_task_count[prev] > 0;
++   dd_task_count[cur] = count;
++   dd_task_cur = cur;
++   if (!have_prev || !count)
++      return;
++   struct dd_task *sorted = malloc(count * sizeof(*sorted));
++   if (!sorted)
++      return;
++   memcpy(sorted, now, count * sizeof(*sorted));
++   qsort(sorted, count, sizeof(*sorted), dd_task_cmp);
++   const double hz = sysconf(_SC_CLK_TCK) > 0 ? (double)sysconf(_SC_CLK_TCK) : 100.0;
++   const int self = getpid();
++   uint64_t total = 0, mine = 0;
++   for (int i = 0; i < count; i++) {
++      total += sorted[i].delta;
++      if (sorted[i].pid == self)
++         mine += sorted[i].delta;
++   }
++   char line[1600];
++   int len = snprintf(line, sizeof(line),
++                      "cpu over %.0f s: all %.0f%% of a core, this program %.0f%%; its threads:", secs,
++                      total / hz / secs * 100.0, mine / hz / secs * 100.0);
++   int shown = 0;
++   for (int i = 0; i < count && shown < 10 && sorted[i].delta && len < (int)sizeof(line) - 80; i++) {
++      if (sorted[i].pid != self)
++         continue;
++      len += snprintf(line + len, sizeof(line) - len, " %s[%d] %.0f%%", sorted[i].name, sorted[i].tid,
++                      sorted[i].delta / hz / secs * 100.0);
++      shown++;
++   }
++   len += snprintf(line + len, sizeof(line) - len, "; others:");
++   shown = 0;
++   for (int i = 0; i < count && shown < 8 && sorted[i].delta && len < (int)sizeof(line) - 80; i++) {
++      if (sorted[i].pid == self)
++         continue;
++      char pname[32] = "";
++      uint64_t dummy;
++      if (sorted[i].pid != sorted[i].tid)
++         dd_read_task(sorted[i].pid, sorted[i].pid, &dummy, pname, sizeof(pname));
++      len += snprintf(line + len, sizeof(line) - len, " %s%s%s[%d] %.0f%%", pname, pname[0] ? "/" : "",
++                      sorted[i].name, sorted[i].tid, sorted[i].delta / hz / secs * 100.0);
++      shown++;
++   }
++   vn_droiddeck_log("%s", line);
++   int track[DD_TRACK];
++   char track_names[DD_TRACK][32];
++   int tracked = 0;
++   for (int i = 0; i < count && tracked < DD_TRACK && sorted[i].delta; i++) {
++      if (sorted[i].pid != self)
++         continue;
++      track[tracked] = sorted[i].tid;
++      snprintf(track_names[tracked], sizeof(track_names[tracked]), "%s", sorted[i].name);
++      tracked++;
++   }
++   free(sorted);
++   dd_place_report(secs, track, track_names, tracked);
++}
++
++static void
++dd_tick(void)
++{
++   static int64_t interval = -1;
++   if (interval < 0)
++      interval = debug_get_num_option("DROIDDECK_VN_STATS_MS", 10000) * 1000000ll;
++   const int64_t now = os_time_get_nano();
++   simple_mtx_lock(&dd_lock);
++   if (!dd_stats.since)
++      dd_stats.since = now;
++   if (now - dd_stats.since < interval) {
++      simple_mtx_unlock(&dd_lock);
++      return;
++   }
++   const double secs = (now - dd_stats.since) / 1e9;
++   const uint64_t submits = dd_stats.submits, cmds = dd_stats.cmds, timed = dd_stats.timed,
++                  gpu = dd_stats.gpu_ns, gpu_max = dd_stats.gpu_max_ns, skips = dd_stats.busy_skips,
++                  submit_ns = dd_stats.submit_ns, gpu_union = dd_stats.gpu_union_ns,
++                  refused = dd_stats.pool_refused, sync = dd_stats.pool_sync,
++                  sync_failed = dd_stats.pool_sync_failed;
++   const unsigned reports = ++dd_stats.reports;
++   dd_stats.submits = dd_stats.cmds = dd_stats.timed = dd_stats.gpu_ns = dd_stats.gpu_max_ns =
++      dd_stats.busy_skips = dd_stats.submit_ns = dd_stats.gpu_union_ns = 0;
++   dd_stats.pool_refused = dd_stats.pool_sync = dd_stats.pool_sync_failed = 0;
++   dd_stats.since = now;
++   simple_mtx_unlock(&dd_lock);
++   if (reports > 2000)
++      return;
++   vn_droiddeck_log("gpu over %.0f s: busy %.1f ms (%.0f%%) as the union of %" PRIu64 " timed "
++                    "submissions (sum %.1f ms, avg %.2f, max %.2f ms; %" PRIu64 " not timed); "
++                    "%" PRIu64 " submissions, %" PRIu64 " command buffers, %.1f ms in vkQueueSubmit "
++                    "on the CPU",
++                    secs, gpu_union / 1e6, gpu_union / 1e7 / secs, timed, gpu / 1e6,
++                    timed ? gpu / 1e6 / timed : 0.0, gpu_max / 1e6, skips, submits, cmds,
++                    submit_ns / 1e6);
++   if (refused || sync || sync_failed)
++      vn_droiddeck_log("descriptor pools over %.0f s: %" PRIu64 " allocations refused by the "
++                       "guest's accounting (no round trip); %" PRIu64 " sent synchronously to the "
++                       "real pool, %" PRIu64 " of them refused there (DROIDDECK_VN_POOL_DEFER)",
++                       secs, refused, sync, sync_failed);
++   dd_cpu_report(secs);
++}
++
++/* ---- timestamps around submissions ---- */
++
++static struct vn_dd_queue_timing *
++dd_timing(struct vn_queue *queue, struct vn_device *dev)
++{
++   if (queue->dd_timing)
++      return queue->dd_timing->failed ? NULL : queue->dd_timing;
++   struct vn_dd_queue_timing *t = calloc(1, sizeof(*t));
++   if (!t)
++      return NULL;
++   queue->dd_timing = t;
++   VkDevice device = vn_device_to_handle(dev);
++   const uint32_t family = queue->base.vk.queue_family_index;
++   if (family >= dev->physical_device->queue_family_count ||
++       !dev->physical_device->queue_family_properties[family].queueFamilyProperties.timestampValidBits) {
++      vn_droiddeck_log("gpu timing: queue family %u has no timestamps; GPU busy is not measured",
++                       family);
++      t->failed = true;
++      return NULL;
++   }
++   const VkCommandPoolCreateInfo cpci = {
++      .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
++      .queueFamilyIndex = queue->base.vk.queue_family_index,
++   };
++   if (vn_CreateCommandPool(device, &cpci, NULL, &t->cmd_pool) != VK_SUCCESS) {
++      t->failed = true;
++      return NULL;
++   }
++   const VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
++   for (unsigned i = 0; i < DD_SLOTS; i++) {
++      struct vn_dd_slot *s = &t->slots[i];
++      const VkQueryPoolCreateInfo qpci = {
++         .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
++         .queryType = VK_QUERY_TYPE_TIMESTAMP,
++         .queryCount = 2,
++      };
++      const VkCommandBufferAllocateInfo cbai = {
++         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
++         .commandPool = t->cmd_pool,
++         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
++         .commandBufferCount = 2,
++      };
++      if (vn_CreateQueryPool(device, &qpci, NULL, &s->pool) != VK_SUCCESS ||
++          vn_AllocateCommandBuffers(device, &cbai, s->cmd) != VK_SUCCESS) {
++         t->failed = true;
++         return NULL;
++      }
++      if (vn_BeginCommandBuffer(s->cmd[0], &bi) != VK_SUCCESS)
++         goto fail;
++      vn_CmdResetQueryPool(s->cmd[0], s->pool, 0, 2);
++      vn_CmdWriteTimestamp(s->cmd[0], VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, s->pool, 0);
++      if (vn_EndCommandBuffer(s->cmd[0]) != VK_SUCCESS || vn_BeginCommandBuffer(s->cmd[1], &bi) != VK_SUCCESS)
++         goto fail;
++      vn_CmdWriteTimestamp(s->cmd[1], VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s->pool, 1);
++      if (vn_EndCommandBuffer(s->cmd[1]) != VK_SUCCESS)
++         goto fail;
++   }
++   vn_droiddeck_log("gpu timing: timestamps around this program's submissions (DROIDDECK_VN_STATS=0 turns it off)");
++   return t;
++fail:
++   t->failed = true;
++   return NULL;
++}
++
++/* the slot's last result, if the GPU is done with it */
++static bool
++dd_slot_collect(struct vn_device *dev, struct vn_dd_slot *s)
++{
++   if (!s->pending)
++      return true;
++   uint64_t ts[2];
++   if (vn_GetQueryPoolResults(vn_device_to_handle(dev), s->pool, 0, 2, sizeof(ts), ts, sizeof(ts[0]),
++                              VK_QUERY_RESULT_64_BIT) != VK_SUCCESS)
++      return false;
++   s->pending = false;
++   if (ts[1] < ts[0])
++      return true;
++   const uint64_t ns =
++      (uint64_t)((ts[1] - ts[0]) * (double)dev->physical_device->base.vk.properties.timestampPeriod);
++   if (ns > 10000000000ull)
++      return true;
++   simple_mtx_lock(&dd_lock);
++   const double period = dev->physical_device->base.vk.properties.timestampPeriod;
++   const uint64_t start = (uint64_t)(ts[0] * period), end = start + ns;
++   if (end > dd_stats.gpu_last_end) {
++      dd_stats.gpu_union_ns += end - MAX2(start, dd_stats.gpu_last_end);
++      dd_stats.gpu_last_end = end;
++   }
++   dd_stats.timed++;
++   dd_stats.gpu_ns += ns;
++   if (ns > dd_stats.gpu_max_ns)
++      dd_stats.gpu_max_ns = ns;
++   simple_mtx_unlock(&dd_lock);
++   return true;
++}
++
++void
++vn_dd_stats_submit_begin(struct vn_queue *queue,
++                         uint32_t count,
++                         const VkSubmitInfo **batches,
++                         const VkSubmitInfo2 **batches2,
++                         struct vn_dd_submit *local)
++{
++   memset(local, 0, sizeof(*local));
++   struct vn_device *dev = vn_device_from_vk(queue->base.vk.base.device);
++   if (!dd_enabled(dev))
++      return;
++   local->start = os_time_get_nano();
++   const VkSubmitInfo *b1 = batches ? *batches : NULL;
++   const VkSubmitInfo2 *b2 = batches2 ? *batches2 : NULL;
++   int first = -1, last = -1;
++   uint64_t cmds = 0;
++   for (uint32_t i = 0; i < count; i++) {
++      const uint32_t n = b1 ? b1[i].commandBufferCount : b2[i].commandBufferInfoCount;
++      if (!n)
++         continue;
++      cmds += n;
++      if (first < 0)
++         first = (int)i;
++      last = (int)i;
++   }
++   simple_mtx_lock(&dd_lock);
++   dd_stats.submits++;
++   dd_stats.cmds += cmds;
++   simple_mtx_unlock(&dd_lock);
++   dd_tick();
++   vn_dd_prof_submit(count, b1, b2);
++   if (first < 0)
++      return;
++
++   struct vn_dd_queue_timing *t = dd_timing(queue, dev);
++   if (!t)
++      return;
++   struct vn_dd_slot *s = &t->slots[t->next % DD_SLOTS];
++   if (!dd_slot_collect(dev, s)) {
++      simple_mtx_lock(&dd_lock);
++      dd_stats.busy_skips++;
++      simple_mtx_unlock(&dd_lock);
++      return;
++   }
++   t->next++;
++
++   if (b1) {
++      local->batches = malloc(count * sizeof(*b1));
++      const uint32_t n_first = b1[first].commandBufferCount + 1 + (first == last ? 1 : 0);
++      const uint32_t n_last = first == last ? 0 : b1[last].commandBufferCount + 1;
++      local->cmds = malloc((n_first + n_last) * sizeof(VkCommandBuffer));
++      if (!local->batches || !local->cmds)
++         goto fail;
++      memcpy(local->batches, b1, count * sizeof(*b1));
++      VkCommandBuffer *c = local->cmds;
++      c[0] = s->cmd[0];
++      memcpy(c + 1, b1[first].pCommandBuffers, b1[first].commandBufferCount * sizeof(VkCommandBuffer));
++      if (first == last)
++         c[n_first - 1] = s->cmd[1];
++      local->batches[first].pCommandBuffers = c;
++      local->batches[first].commandBufferCount = n_first;
++      if (first != last) {
++         VkCommandBuffer *d = c + n_first;
++         memcpy(d, b1[last].pCommandBuffers, b1[last].commandBufferCount * sizeof(VkCommandBuffer));
++         d[n_last - 1] = s->cmd[1];
++         local->batches[last].pCommandBuffers = d;
++         local->batches[last].commandBufferCount = n_last;
++      }
++      *batches = local->batches;
++   } else {
++      local->batches2 = malloc(count * sizeof(*b2));
++      const uint32_t n_first = b2[first].commandBufferInfoCount + 1 + (first == last ? 1 : 0);
++      const uint32_t n_last = first == last ? 0 : b2[last].commandBufferInfoCount + 1;
++      local->cmd_infos = malloc((n_first + n_last) * sizeof(VkCommandBufferSubmitInfo));
++      if (!local->batches2 || !local->cmd_infos)
++         goto fail;
++      memcpy(local->batches2, b2, count * sizeof(*b2));
++      const VkCommandBufferSubmitInfo ts0 = {
++         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
++         .commandBuffer = s->cmd[0],
++      };
++      const VkCommandBufferSubmitInfo ts1 = {
++         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
++         .commandBuffer = s->cmd[1],
++      };
++      VkCommandBufferSubmitInfo *c = local->cmd_infos;
++      c[0] = ts0;
++      memcpy(c + 1, b2[first].pCommandBufferInfos,
++             b2[first].commandBufferInfoCount * sizeof(VkCommandBufferSubmitInfo));
++      if (first == last)
++         c[n_first - 1] = ts1;
++      local->batches2[first].pCommandBufferInfos = c;
++      local->batches2[first].commandBufferInfoCount = n_first;
++      if (first != last) {
++         VkCommandBufferSubmitInfo *d = c + n_first;
++         memcpy(d, b2[last].pCommandBufferInfos,
++                b2[last].commandBufferInfoCount * sizeof(VkCommandBufferSubmitInfo));
++         d[n_last - 1] = ts1;
++         local->batches2[last].pCommandBufferInfos = d;
++         local->batches2[last].commandBufferInfoCount = n_last;
++      }
++      *batches2 = local->batches2;
++   }
++   s->pending = true;
++   return;
++
++fail:
++   free(local->batches);
++   free(local->batches2);
++   free(local->cmds);
++   free(local->cmd_infos);
++   const int64_t start = local->start;
++   memset(local, 0, sizeof(*local));
++   local->start = start;
++}
++
++void
++vn_dd_stats_submit_end(struct vn_dd_submit *local)
++{
++   if (local->start) {
++      const int64_t ns = os_time_get_nano() - local->start;
++      simple_mtx_lock(&dd_lock);
++      dd_stats.submit_ns += ns;
++      simple_mtx_unlock(&dd_lock);
++   }
++   free(local->batches);
++   free(local->batches2);
++   free(local->cmds);
++   free(local->cmd_infos);
++   memset(local, 0, sizeof(*local));
++}
++
++void
++vn_dd_stats_queue_fini(struct vn_queue *queue)
++{
++   struct vn_dd_queue_timing *t = queue->dd_timing;
++   if (!t)
++      return;
++   VkDevice device = vk_device_to_handle(queue->base.vk.base.device);
++   for (unsigned i = 0; i < DD_SLOTS; i++) {
++      if (t->slots[i].pool)
++         vn_DestroyQueryPool(device, t->slots[i].pool, NULL);
++   }
++   if (t->cmd_pool)
++      vn_DestroyCommandPool(device, t->cmd_pool, NULL);
++   free(t);
++   queue->dd_timing = NULL;
++}
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_stats.h b/src/virtio/vulkan/vn_droiddeck_stats.h
+--- a/src/virtio/vulkan/vn_droiddeck_stats.h	1970-01-01 00:00:00.000000000 +0000
++++ b/src/virtio/vulkan/vn_droiddeck_stats.h	2026-10-31 12:35:24.964396396 +0000
+@@ -0,0 +1,55 @@
++/*
++ * DroidDeck: what a Vulkan program's frames cost, every 10 s in droiddeck_vulkan.txt:
++ *   the GPU's time for its submissions (timestamps written before and after each
++ *   vkQueueSubmit(2)'s command buffers), how many submissions and command buffers;
++ *   the CPU time of the session's busiest threads (this program's first), as % of a core;
++ *   how descriptor-pool exhaustion was answered (refused locally, or by a synchronous round trip).
++ * Tells a GPU-bound game from one held back by the CPU (the game under FEX, DXVK, the
++ * driver) or by the bridge. DROIDDECK_VN_STATS=0 turns it off; DROIDDECK_VN_STATS_MS sets the
++ * interval. GL programs (Zink) report their own (zink_dd_stats.h) and are left out here.
++ */
++#ifndef VN_DROIDDECK_STATS_H
++#define VN_DROIDDECK_STATS_H
++
++#include "vn_common.h"
++
++struct vn_queue;
++
++/* a submission with its timestamp command buffers added: the caller submits *batches /
++ * *batches2 instead and calls _end after */
++struct vn_dd_submit {
++   VkSubmitInfo *batches;
++   VkSubmitInfo2 *batches2;
++   VkCommandBuffer *cmds;
++   VkCommandBufferSubmitInfo *cmd_infos;
++   int64_t start;
++};
++
++void
++vn_dd_stats_submit_begin(struct vn_queue *queue,
++                         uint32_t count,
++                         const VkSubmitInfo **batches,
++                         const VkSubmitInfo2 **batches2,
++                         struct vn_dd_submit *local);
++void
++vn_dd_stats_submit_end(struct vn_dd_submit *local);
++
++/* descriptor-pool outcomes (vn_descriptor_set.c), counted into the 10 s report */
++enum vn_dd_pool_event {
++   VN_DD_POOL_REFUSED,     /* the guest's accounting refused, no round trip */
++   VN_DD_POOL_SYNC,        /* sent synchronously to the real pool (DROIDDECK_VN_POOL_DEFER=1) */
++   VN_DD_POOL_SYNC_FAILED, /* ... and refused there */
++};
++void
++vn_dd_stats_descriptor_pool(enum vn_dd_pool_event event);
++
++/* the queue's timing resources, at vkDestroyDevice */
++void
++vn_dd_stats_queue_fini(struct vn_queue *queue);
++
++/* each presented frame (vn_dd_frame_stats): a frame far longer than the usual is a hitch, and
++ * what the program's busiest threads did during it goes to the log (0042) */
++void
++vn_dd_stats_present(void);
++
++#endif /* VN_DROIDDECK_STATS_H */

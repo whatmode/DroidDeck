@@ -2314,3 +2314,19 @@ asking), and the log starts over past 1 MiB.
 0041: the user cannot set the environment and chose pinning on by default with 0039's one-second
 re-pin, as a repeat test now that the driver log fits in the bundle. DROIDDECK_VN_PIN_THREADS
 defaults to dxvk-cs again.
+
+## The 2026-10-31-12 bundle (0041), and 0042: what the threads did during a hitch
+
+0041's pin held all session (dxvk-cs allowed 4-7, 78-90% on the A720s, no resets) and dxvk-cs
+needed 5-16% of a core instead of 20-28%; fps unchanged (11-13 driving, 19-23 lighter areas;
+resolution now 1280x720). Hitches: the first minute is loading -- BC textures decoded at up to
+432 MiB -> 2.7 GiB per 10 s (2.3-2.4 s of decode CPU, GPU decode spans up to 33 ms), game threads
+waiting 22-110 ms in vkGetBufferDeviceAddress behind main-ring allocations, spare blocks taking up
+to 211 ms on the side ring. Later 0.45-0.85 s frames line up with no driver wait over ~28 ms.
+
+0042 (`vn_dd_stats_present`, called from `vn_dd_frame_stats`): schedstat (run, runqueue wait) of
+the four tracked threads at every present; a frame over 200 ms and 3x the usual (EMA of non-hitch
+frames) logs `hitch: a frame took N ms (usual M): <thread> ran R, waited for a CPU W, asleep S ms;
+... CPU over the last T s: <top threads by CPU since the once-a-second snapshot before the frame>`.
+150 lines per process. Checked with a stand-alone build (a 300 ms burn + 200 ms sleep reads back
+as ran 296, asleep 204).
