@@ -189,6 +189,48 @@ grep -q "precompile: fossilize_replay started" $L && ls $SD/droiddeck-venus/prec
   && grep -q "child=1 as_dxvk=1 dir=$SD" $SD/droiddeck-venus/precompile.log && grep -q "precompile: done for these databases" $L \
   && echo "PASS the driver precompiles Steam's recorded pipelines once" \
   || { echo "FAIL the driver's precompile"; grep "precompile" $L | tail -5 | cut -c1-240; cat $SD/droiddeck-venus/precompile.log 2>/dev/null | head -5; }
+# The real thing (launch-time precompile, droiddeck-shader-precompile): Fossilize's own layer records
+# vkstats' pipeline as Steam's does, and Fossilize's own fossilize_replay replays it through the
+# bridge with the launcher's script -- does the replay compile through venus, and does the game
+# then find it compiled.
+echo "---- Fossilize: record, replay through the bridge at launch, then the game"
+pacman -S --noconfirm --needed cmake >>/tmp/pacman.log 2>&1 || true
+FZS=$OUT/fossilize-src FZB=$OUT/fossilize-build
+FZ_REF=556da9ff7d7616704dda515756219ab1dab693ec
+( git init -q $FZS && cd $FZS && git remote add origin https://github.com/ValveSoftware/Fossilize \
+  && git fetch -q --depth 1 origin $FZ_REF && git checkout -q FETCH_HEAD \
+  && git submodule update -q --init --depth 1 rapidjson cli/volk cli/SPIRV-Headers cli/SPIRV-Tools cli/SPIRV-Cross cli/dirent ) > $OUT/fz-fetch.log 2>&1
+cmake -S $FZS -B $FZB -G Ninja -DCMAKE_BUILD_TYPE=Release -DFOSSILIZE_TESTS=OFF -DFOSSILIZE_REPLAYER_SPIRV_VAL=OFF > $OUT/fz-cmake.log 2>&1 \
+  && ninja -C $FZB fossilize-replay VkLayer_fossilize > $OUT/fz-build.log 2>&1
+FZR=$(find $FZB -name fossilize-replay -type f -perm -u+x | head -1)
+if [ -z "$FZR" ]; then
+  echo "FAIL building Fossilize"; tail -5 $OUT/fz-fetch.log; tail -15 $OUT/fz-cmake.log; grep -E "error|Error" $OUT/fz-build.log | head -10
+else
+  rm -rf /tmp/rec /tmp/fzhome /tmp/fzlaunch; mkdir -p /tmp/rec /tmp/fzlaunch
+  FOSSILIZE=1 FOSSILIZE_DUMP_PATH=/tmp/rec/steamapp_pipeline_cache VK_ADD_LAYER_PATH=$FZB/layer VK_INSTANCE_LAYERS=VK_LAYER_fossilize \
+    timeout 60 $OUT/vkstats 0.1 $OUT/pc.spv > $OUT/fz-record.txt 2>&1
+  ls -la /tmp/rec | tail -3
+  G=/tmp/fzhome/.local/share/Steam/steamapps/shadercache/1118240
+  mkdir -p $G/fozpipelinesv6/steamapprun_pipeline_cache.r /tmp/fzhome/.local/share/Steam/steamrtarm64
+  cp "$(ls /tmp/rec/*.foz | head -1)" $G/fozpipelinesv6/steamapprun_pipeline_cache.r/steamapp_pipeline_cache.foz 2>/dev/null
+  cp $FZR /tmp/fzhome/.local/share/Steam/steamrtarm64/fossilize_replay
+  before=$(wc -l < $L)
+  env HOME=/tmp/fzhome STEAM_COMPAT_CLIENT_INSTALL_PATH= MESA_SHADER_CACHE_DIR= MESA_GLSL_CACHE_DIR=$G BL_LAUNCH_DIR=/tmp/fzlaunch \
+    timeout 300 python3 -c "import runpy,sys; m=runpy.run_path('tools/linuxfs/overlay/usr/local/bin/droiddeck-shader-precompile'); sys.exit(m['run']('1118240','vkstats'))" > $OUT/fz-pre.txt 2>&1; FZRC=$?
+  cat $OUT/fz-pre.txt | tail -4 | cut -c1-300
+  grep -v "^$" $G/droiddeck-venus/precompile.log 2>/dev/null | tail -6 | cut -c1-300
+  tail -n +$((before + 1)) $L | grep -E "pipeline cache|precompile|emulated for" | cut -c1-220 | tail -6
+  env HOME=/tmp/fzhome STEAM_COMPAT_CLIENT_INSTALL_PATH= MESA_SHADER_CACHE_DIR= MESA_GLSL_CACHE_DIR=$G DROIDDECK_VN_PRECOMPILE_DONE=1 \
+    timeout 60 $OUT/vkstats 0.1 $OUT/pc.spv > $OUT/fz-game.txt 2>&1
+  tail -n +$((before + 1)) $L | grep "vkstats" | grep -E "pipeline cache|precompile" | cut -c1-220 | tail -3
+  if [ "$FZRC" = 0 ] && grep -q '"compute": {"done": 1, "total": 1, "skipped": 0' $G/droiddeck-venus/precompile.log \
+     && tail -n +$((before + 1)) $L | grep -q "fossilize.*pipeline cache: saved" \
+     && tail -n +$((before + 1)) $L | grep -q "precompile: compiled before the game started"; then
+    echo "PASS Fossilize's replay compiles the recorded pipeline through the bridge, and the game starts compiled"
+  else
+    echo "FAIL Fossilize replay through the bridge (rc ${FZRC:-none})"; tail -12 $G/droiddeck-venus/precompile.log 2>/dev/null | cut -c1-250
+  fi
+fi
 stats_case defer DROIDDECK_VN_POOL_DEFER=1
 grep -q "descriptor pools over .* [1-9][0-9]* sent synchronously to the real pool" $OUT/statslog-defer.txt \
   && echo "PASS DROIDDECK_VN_POOL_DEFER=1 still asks the real pool" || echo "FAIL DROIDDECK_VN_POOL_DEFER=1 (rc $SRC)"

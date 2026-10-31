@@ -399,6 +399,31 @@ def with_media_debug(env):
     return env
 
 
+PRECOMPILE = "/usr/local/bin/droiddeck-shader-precompile"
+
+
+def with_precompiled_shaders(command, env, app_id, run=None):
+    """On the Venus bridge, compile the game's recorded shaders before it starts, with progress
+    on screen (droiddeck-shader-precompile). When every recorded pipeline is in the bridge
+    driver's cache, the driver is told not to replay them again in the background."""
+    if not app_id or len(command) < 3:
+        return env
+    if not (env.get("BL_VENUS_SINGLE") == "1" or env.get("BL_DRIVER_GL")):
+        return env
+    if env.get("DROIDDECK_VN_PRECOMPILE", "1") == "0":
+        return env
+    game = os.path.splitext(os.path.basename(command[2].replace("\\", "/")))[0] or "the game"
+    try:
+        if run is None:
+            run = runpy.run_path(PRECOMPILE)["run"]
+        if run(app_id, game, env) == 0:
+            env["DROIDDECK_VN_PRECOMPILE_DONE"] = "1"
+    except Exception as error:  # a launch must not fail because shaders were not compiled ahead
+        print("droiddeck-game-env: shader precompile failed (%s); the game compiles as it goes" % error,
+              file=sys.stderr)
+    return env
+
+
 def main():
     command = sys.argv[1:]
     if not command:
@@ -443,6 +468,8 @@ def main():
     env = with_log_dir(command, env)
     env = with_mali_video(env)
     env = with_hide_exts(env)
+    if waiting:
+        env = with_precompiled_shaders(command, env, app_id)
     sync = load_sync()
     launch, launch_env = select_sync(command, env, sync)
     if launch[0] != command[0]:

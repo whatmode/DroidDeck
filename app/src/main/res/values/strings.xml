@@ -2625,4 +2625,14 @@
     <string name="boot_movie_converting_started">Converting %1$s for Steam. Keep DroidDeck open.</string>
     <string name="boot_movie_unsupported">This device cannot decode that video.</string>
     <string name="boot_movie_import_failed">Could not import that movie</string>
+    <string name="shader_precompile_title">Compiling shaders for %1$s</string>
+    <string name="shader_precompile_the_game">the game</string>
+    <string name="shader_precompile_preparing">Reading the recorded shaders…</string>
+    <string name="shader_precompile_count">%1$d / %2$d</string>
+    <string name="shader_precompile_count_seconds">%1$d / %2$d · about %3$d s left</string>
+    <string name="shader_precompile_count_minutes">%1$d / %2$d · about %3$d min left</string>
+    <string name="shader_precompile_skip">Skip</string>
+    <string name="shader_precompile_skipping">Skipping…</string>
+    <string name="shader_precompile_done">Done, starting the game</string>
+    <string name="shader_precompile_failed">Could not compile them all; starting the game</string>
 </resources>

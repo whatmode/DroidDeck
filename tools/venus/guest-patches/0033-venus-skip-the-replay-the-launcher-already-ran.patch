@@ -1,0 +1,16 @@
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_pcache.c b/src/virtio/vulkan/vn_droiddeck_pcache.c
+--- a/src/virtio/vulkan/vn_droiddeck_pcache.c	2026-10-31 00:34:25.914593723 +0000
++++ b/src/virtio/vulkan/vn_droiddeck_pcache.c	2026-10-31 00:34:26.291027075 +0000
+@@ -354,6 +354,12 @@
+    if (!debug_get_bool_option("DROIDDECK_VN_PRECOMPILE", true) ||
+        getenv("DROIDDECK_VN_PRECOMPILE_CHILD"))
+       return;
++   /* the launcher (droiddeck-shader-precompile, run by droiddeck-game-env before the game
++    * starts, with progress on screen) already compiled every recorded pipeline into this cache */
++   if (debug_get_bool_option("DROIDDECK_VN_PRECOMPILE_DONE", false)) {
++      vn_droiddeck_log("precompile: compiled before the game started (droiddeck-shader-precompile)");
++      return;
++   }
+    char tool[512] = "";
+    const char *roots[3] = { getenv("STEAM_COMPAT_CLIENT_INSTALL_PATH"), NULL, "/root/.local/share/Steam" };
+    char home_steam[400] = "";

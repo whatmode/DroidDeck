@@ -2159,3 +2159,35 @@ launch; its log tail is printed (`precompile: last run: ...`). `DROIDDECK_VN_PRE
 off. Open question this build answers: whether fossilize_replay through the bridge compiles at all
 (Steam's own replays did 3000 pipelines in 13 s, which is too fast) -- the replay's own
 `pipeline cache: saved ... (N new pipelines)` lines and `precompile.log` will say.
+
+## Shaders compiled at launch, with progress (`droiddeck-shader-precompile`, app card, guest 0033)
+
+The user asked for the launched game's shaders -- that game only -- compiled during Steam's launch,
+with progress on screen. The library-wide walk (0033 at c0e37489) was reverted the same evening.
+
+- `droiddeck-game-env` calls `with_precompiled_shaders` before exec'ing Proton, on the Venus
+  bridge only (`BL_VENUS_SINGLE=1` or `BL_DRIVER_GL`), for `waitforexitandrun` launches with an app
+  id. It runs `droiddeck-shader-precompile`'s `run(app_id, exe stem, env)`.
+- The script finds the game's Steam shader dir (`MESA_SHADER_CACHE_DIR`/`MESA_GLSL_CACHE_DIR` when
+  they end in the app id, else `~/.local/share/Steam/steamapps/shadercache/<appid>`) and its
+  recordings (`fozpipelinesv6/*/steamapp_pipeline_cache.foz` + `steam_pipeline_cache.foz`), and
+  runs `steamrtarm64/fossilize_replay --progress --num-threads <cores-1>` on them with the
+  driver's child switches (`DROIDDECK_VN_PRECOMPILE_CHILD=1`, `DROIDDECK_VN_EMULATE_AS_DXVK=1`,
+  `MESA_SHADER_CACHE_DIR` = that dir). It parses the `Overall N / M` and `Compile graphics|compute`
+  lines `--progress` prints ten times a second (not kept in `droiddeck-venus/precompile.log`; the
+  log gets the rest and a `final:` state line) and writes `$BL_LAUNCH_DIR/shader-precompile.json`
+  (`game`, `state`, `done`, `total`, `eta`). A finished run writes
+  `droiddeck-venus/precompile-launch.done` with the recordings' sizes and mtimes; the same game
+  starts at once next time until Steam records more.
+- Exit 0 sets `DROIDDECK_VN_PRECOMPILE_DONE=1` in the game's environment, and guest patch 0033 then
+  skips 0032's in-game background replay (`precompile: compiled before the game started`). A
+  skipped or failed run leaves it unset, so 0032 still replays in the background during play.
+- The app: `session/ShaderPrecompile.kt` reads the JSON (the session root is the same path on both
+  sides), `ui/ShaderPrecompileCard.kt` shows a card at the top of the session (title, bar, count,
+  time left, Skip) whenever the file exists, polling twice a second; Skip writes
+  `shader-precompile.skip`, and the script kills the replay's process group and the game starts.
+- Tests: `tools/tests/test_shader_precompile.py` (progress parsing, once-per-recording, the progress
+  file while running, Skip, failure not marked done, child environment, the launcher hook);
+  `ShaderPrecompileTest.kt` (the app's parser); `run-venus.sh` builds Fossilize at a pinned commit,
+  records vkstats' pipeline with Fossilize's own layer, replays it through the bridge with the
+  script, and starts the "game" with `DROIDDECK_VN_PRECOMPILE_DONE=1`.

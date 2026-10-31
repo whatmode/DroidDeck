@@ -1,0 +1,244 @@
+#!/usr/bin/python3
+"""Compile the shaders of the game being launched before it starts, with progress on screen.
+
+droiddeck-game-env runs this while Steam's launch is in progress, on the Venus bridge only.
+Steam's fossilize layer has recorded the game's pipelines in
+<shadercache>/fozpipelinesv6/*/steamapp_pipeline_cache.foz (and the set other players recorded,
+steam_pipeline_cache.foz); fossilize_replay creates each of them through the bridge driver, whose
+pipeline cache (the driver's guest patch 0031) keeps the compiled result in
+<shadercache>/droiddeck-venus/ for the game to load. On a Steam Deck the same step is Steam's
+"Processing Vulkan shaders"; Steam runs it here only after downloading a new set.
+
+Progress goes to $BL_LAUNCH_DIR/shader-precompile.json, which the app shows over the session, and
+the app's Skip button writes $BL_LAUNCH_DIR/shader-precompile.skip. A run that finishes writes
+<shadercache>/droiddeck-venus/precompile-launch.done with the databases' sizes and times, so the
+next launch of the same game starts at once. Exit 0 means the cache holds every recorded pipeline
+(the launcher then tells the driver not to replay them again in the background).
+
+DROIDDECK_VN_PRECOMPILE=0 turns it off.
+"""
+
+import glob
+import json
+import os
+import re
+import select
+import signal
+import subprocess
+import sys
+import time
+
+DONE_NAME = "precompile-launch.done"
+OVERALL = re.compile(r"Overall (\d+) / (\d+)")
+GRAPHICS = re.compile(r"Compile graphics (\d+) / (\d+), skipped (\d+), cached (\d+)")
+COMPUTE = re.compile(r"Compile compute (\d+) / (\d+), skipped (\d+), cached (\d+)")
+# the report fossilize_replay --progress prints ten times a second: parsed, not kept in the log
+REPORT = re.compile(r"=====|Progress report|Overall |Parsed |Decompress modules|Compile (graphics|compute|raytracing)|(Clean|Dirty) crashes")
+
+
+def shader_dir(env, app_id):
+    """Steam's per-game shader cache dir: the one it sets for the game, or where Steam keeps it."""
+    for key in ("MESA_SHADER_CACHE_DIR", "MESA_GLSL_CACHE_DIR"):
+        value = env.get(key, "")
+        if value and value.rstrip("/").endswith("/" + app_id):
+            return value.rstrip("/")
+    home = env.get("HOME") or "/root"
+    return os.path.join(home, ".local/share/Steam/steamapps/shadercache", app_id)
+
+
+def databases(folder):
+    """Steam's recorded pipelines for the game, in the order the driver lists them."""
+    own = sorted(glob.glob(os.path.join(folder, "fozpipelinesv6/*/steamapp_pipeline_cache.foz")))
+    shared = sorted(glob.glob(os.path.join(folder, "fozpipelinesv6/*/steam_pipeline_cache.foz")))
+    return own + shared
+
+
+def signature(paths):
+    parts = []
+    for path in paths:
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        parts.append("%d:%d" % (st.st_size, int(st.st_mtime)))
+    return " ".join(parts)
+
+
+def replay_tool(env):
+    roots = [env.get("STEAM_COMPAT_CLIENT_INSTALL_PATH", ""),
+             os.path.join(env.get("HOME") or "/root", ".local/share/Steam"),
+             "/root/.local/share/Steam"]
+    for root in roots:
+        if not root:
+            continue
+        tool = os.path.join(root, "steamrtarm64/fossilize_replay")
+        if os.access(tool, os.X_OK):
+            return tool
+    return None
+
+
+def parse_progress(line, state):
+    """Fold one line of fossilize_replay --progress output into state; True when it changed."""
+    match = OVERALL.search(line)
+    if match:
+        state["done"], state["total"] = int(match.group(1)), int(match.group(2))
+        return True
+    for kind, pattern in (("graphics", GRAPHICS), ("compute", COMPUTE)):
+        match = pattern.search(line)
+        if match:
+            state[kind] = {"done": int(match.group(1)), "total": int(match.group(2)),
+                           "skipped": int(match.group(3)), "cached": int(match.group(4))}
+            return True
+    return False
+
+
+def write_json(path, data):
+    if not path:
+        return
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as out:
+            json.dump(data, out)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def remove(path):
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def threads():
+    try:
+        count = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        count = os.cpu_count() or 4
+    return max(2, count - 1)
+
+
+def run(app_id, game, env=None, launch_dir=None, clock=time.monotonic, log=None):
+    """0: everything recorded is in the cache; 1: skipped, failed or nothing to do."""
+    env = dict(os.environ if env is None else env)
+    log = log or (lambda text: print("droiddeck-shader-precompile: " + text, file=sys.stderr))
+    if env.get("DROIDDECK_VN_PRECOMPILE", "1") == "0":
+        return 1
+    folder = shader_dir(env, app_id)
+    paths = databases(folder)
+    if not paths:
+        log("no recorded pipelines for %s yet (%s)" % (game, folder))
+        return 1
+    own = os.path.join(folder, "droiddeck-venus")
+    os.makedirs(own, exist_ok=True)
+    done_file = os.path.join(own, DONE_NAME)
+    sig = signature(paths)
+    try:
+        with open(done_file, encoding="utf-8") as source:
+            if source.read() == sig:
+                log("%s: shaders already compiled" % game)
+                return 0
+    except OSError:
+        pass
+    tool = replay_tool(env)
+    if not tool:
+        log("no fossilize_replay; %s compiles its shaders as it meets them" % game)
+        return 1
+    launch_dir = launch_dir if launch_dir is not None else env.get("BL_LAUNCH_DIR", "")
+    progress_file = os.path.join(launch_dir, "shader-precompile.json") if launch_dir else ""
+    skip_file = os.path.join(launch_dir, "shader-precompile.skip") if launch_dir else ""
+    remove(skip_file)
+    child_env = dict(env)
+    child_env.pop("LD_PRELOAD", None)
+    child_env.pop("MESA_GLSL_CACHE_DIR", None)
+    child_env.update({
+        "MESA_SHADER_CACHE_DIR": folder,
+        "DROIDDECK_VN_PRECOMPILE_CHILD": "1",
+        "DROIDDECK_VN_EMULATE_AS_DXVK": "1",
+    })
+    command = [tool, "--progress", "--num-threads", str(threads())] + paths
+    state = {"game": game, "state": "compiling", "done": 0, "total": 0, "eta": -1}
+    started = clock()
+    write_json(progress_file, state)
+    log("compiling %s's recorded pipelines: %s" % (game, " ".join(command)))
+    with open(os.path.join(own, "precompile.log"), "w", encoding="utf-8") as record:
+        try:
+            child = subprocess.Popen(command, env=child_env, stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT, start_new_session=True)
+        except OSError as error:
+            log("could not start %s (%s)" % (tool, error))
+            remove(progress_file)
+            return 1
+        skipped = False
+        fd = child.stdout.fileno()
+        buffer = ""
+        eof = False
+        while not eof:
+            ready, _, _ = select.select([fd], [], [], 0.2)
+            if ready:
+                data = os.read(fd, 65536)
+                if not data:
+                    eof = True
+                buffer += data.decode("utf-8", "replace")
+                *lines, buffer = buffer.split("\n")
+                changed = False
+                for line in lines:
+                    changed |= parse_progress(line, state)
+                    if not REPORT.search(line):
+                        record.write(line + "\n")
+                if changed:
+                    elapsed = clock() - started
+                    if state["done"] and state["total"]:
+                        rate = state["done"] / max(elapsed, 0.001)
+                        state["eta"] = int((state["total"] - state["done"]) / rate) if rate else -1
+                    write_json(progress_file, state)
+            if skip_file and os.path.exists(skip_file):
+                skipped = True
+                log("skipped by the user at %d / %d" % (state["done"], state["total"]))
+                try:
+                    os.killpg(child.pid, signal.SIGTERM)
+                except OSError:
+                    pass
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(child.pid, signal.SIGKILL)
+                    child.wait()
+                break
+        child.wait()
+        for line in buffer.split("\n"):
+            parse_progress(line, state)
+            if line and not REPORT.search(line):
+                record.write(line + "\n")
+        record.write("final: %s\n" % json.dumps(state))
+    remove(skip_file)
+    seconds = clock() - started
+    summary = ", ".join("%s %d/%d (skipped %d, cached %d)" % (kind, v["done"], v["total"], v["skipped"], v["cached"])
+                        for kind, v in ((k, state[k]) for k in ("graphics", "compute") if k in state))
+    if skipped:
+        state["state"] = "skipped"
+        write_json(progress_file, state)
+        remove(progress_file)
+        return 1
+    code = child.returncode
+    log("%s: done in %.0f s, exit %d%s" % (game, seconds, code, "; " + summary if summary else ""))
+    if code == 0:
+        with open(done_file, "w", encoding="utf-8") as out:
+            out.write(sig)
+    state["state"] = "done" if code == 0 else "failed"
+    write_json(progress_file, state)
+    time.sleep(1.0 if progress_file else 0)
+    remove(progress_file)
+    return 0 if code == 0 else 1
+
+
+def main(argv):
+    if len(argv) < 3:
+        print("usage: droiddeck-shader-precompile <appid> <game name>", file=sys.stderr)
+        return 2
+    return run(argv[1], argv[2])
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
