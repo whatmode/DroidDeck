@@ -84,3 +84,12 @@ DROIDDECK_VN_BC_GPU=1
 # launch after the recordings change runs fossilize_replay in the background into the game's
 # pipeline cache. =0 turns it off.
 #DROIDDECK_VN_PRECOMPILE=0
+#
+# DXVK's tiler mode (0034): DXVK is told the GPU's own driver ID when it is a tiler (Mali), so it
+# records render passes with load/store ops fitted to a tiler instead of a desktop GPU's. =0 hides
+# it again (DXVK sees venus).
+#DROIDDECK_VN_DXVK_TILER=0
+#
+# How long of every 10 s report the GPU time is measured render pass by render pass (0035), in ms
+# (default 2000). 0 turns it off.
+#DROIDDECK_VN_PASS_STATS_MS=0

@@ -1,0 +1,35 @@
+diff -ruN a/src/virtio/vulkan/vn_physical_device.c b/src/virtio/vulkan/vn_physical_device.c
+--- a/src/virtio/vulkan/vn_physical_device.c	2026-10-31 01:38:39.859566921 +0000
++++ b/src/virtio/vulkan/vn_physical_device.c	2026-10-31 01:43:05.090048559 +0000
+@@ -534,6 +534,31 @@
+    physical_dev->renderer_driver_id = props->driverID;
+    props->driverID = VK_DRIVER_ID_MESA_VENUS;
+ 
++   /* droiddeck: DXVK turns on its tiler mode by the driver ID -- render passes recorded in
++    * secondary command buffers so clears, discards and resolves become the pass's load and
++    * store ops, trimmed render areas, cached memory for what the CPU writes. Behind venus it saw
++    * MESA_VENUS and treated Mali as a desktop GPU, storing and reloading whole attachments
++    * between passes. DXVK and only DXVK is told the GPU's own ID when that GPU is a tiler.
++    * DROIDDECK_VN_DXVK_TILER=0 turns it off; =1 claims ARM's ID whatever the GPU (to test it). */
++   {
++      const char *engine = instance->base.vk.app_info.engine_name;
++      const char *mode = os_get_option("DROIDDECK_VN_DXVK_TILER");
++      const VkDriverId gpu = physical_dev->renderer_driver_id;
++      const bool tiler = gpu == VK_DRIVER_ID_ARM_PROPRIETARY ||
++                         gpu == VK_DRIVER_ID_QUALCOMM_PROPRIETARY ||
++                         gpu == VK_DRIVER_ID_MESA_TURNIP || gpu == VK_DRIVER_ID_MESA_PANVK ||
++                         gpu == VK_DRIVER_ID_IMAGINATION_PROPRIETARY ||
++                         gpu == VK_DRIVER_ID_BROADCOM_PROPRIETARY || gpu == VK_DRIVER_ID_MESA_V3DV;
++      const bool off = mode && !strcmp(mode, "0");
++      const bool force = mode && !strcmp(mode, "1");
++      if (engine && !strncmp(engine, "DXVK", 4) && !off && (tiler || force)) {
++         props->driverID = tiler ? gpu : VK_DRIVER_ID_ARM_PROPRIETARY;
++         vn_droiddeck_log("DXVK sees driver ID %d (the GPU's, a tiler: DXVK's tiler mode on; "
++                          "DROIDDECK_VN_DXVK_TILER=0 turns it off)",
++                          props->driverID);
++      }
++   }
++
+    snprintf(props->driverName, sizeof(props->driverName), "venus");
+    snprintf(props->driverInfo, sizeof(props->driverInfo),
+             "Mesa " PACKAGE_VERSION MESA_GIT_SHA1);

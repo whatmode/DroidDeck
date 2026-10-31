@@ -138,6 +138,23 @@ grep "wait stack" $OUT/statslog-default.txt | grep -q "in thread 'vkstats'.* vn_
   && echo "PASS wait stacks name the thread and the driver's functions" \
   || { echo "FAIL wait stacks name the thread and the driver's functions"; grep "wait stack" $OUT/statslog-default.txt | head -2 | cut -c1-300; }
 # lavapipe does not hold a pool to its maxSets, so here the real pool says yes (vkstats rc 2)
+# Where the GPU time goes (0035): a render pass recorded as DXVK's tiler mode does (secondary
+# command buffer contents) gets timestamps around it, and the report names it by size,
+# attachments and load/store ops; the fill before it is work between passes.
+echo "---- the GPU time by render pass (0035) and DXVK's tiler mode (0034)"
+stats_case passes VKSTATS_PASSES=1 DROIDDECK_VN_PASS_STATS_MS=300
+grep "gpu passes" $OUT/statslog-passes.txt | tail -4 | cut -c1-260
+grep -q "gpu passes over .* command buffers): [0-9.]* ms measured" $OUT/statslog-passes.txt \
+  && grep -q "gpu passes [0-9]*: .*256x256 R8G8B8A8_UNORM CS, 1 sample" $OUT/statslog-passes.txt \
+  && grep -q "gpu passes [0-9]*: .*between passes: .*buffer fills" $OUT/statslog-passes.txt \
+  && echo "PASS GPU time by render pass, secondary command buffers included" \
+  || { echo "FAIL GPU time by render pass (rc $SRC)"; grep -E "gpu passes|rror" $OUT/statslog-passes.txt | head -6 | cut -c1-260; tail -5 $OUT/stats-passes.txt; }
+DEFID=$(grep "vkstats: driver ID" $OUT/stats-default.txt | sed 's/.*driver ID \([0-9]*\).*/\1/')
+stats_case tiler DROIDDECK_VN_DXVK_TILER=1
+TILID=$(grep "vkstats: driver ID" $OUT/stats-tiler.txt | sed 's/.*driver ID \([0-9]*\).*/\1/')
+[ "$DEFID" = 22 ] && [ "$TILID" = 9 ] && grep -q "DXVK sees driver ID 9" $OUT/statslog-tiler.txt \
+  && echo "PASS DXVK is told a tiler's driver ID (lavapipe: venus's own)" \
+  || echo "FAIL DXVK driver ID (default ${DEFID:-none}, forced ${TILID:-none})"
 # the driver's on-disk pipeline cache (0030): the first run saves what it compiled at
 # vkDestroyDevice, the second loads it
 printf '#version 450\nlayout(local_size_x = 64) in;\nlayout(std430, binding = 0) buffer B { uint v[]; };\nvoid main() { }\n' > $OUT/pc.comp

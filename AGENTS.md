@@ -2199,3 +2199,35 @@ with progress on screen. The library-wide walk (0033 at c0e37489) was reverted t
   `ShaderPrecompileTest.kt` (the app's parser); `run-venus.sh` builds Fossilize at a pinned commit,
   records vkstats' pipeline with Fossilize's own layer, replays it through the bridge with the
   script, and starts the "game" with `DROIDDECK_VN_PRECOMPILE_DONE=1`.
+
+## The 2026-10-31-05 bundle: shader hitches gone, the game GPU-bound (guest 0034, 0035)
+
+The launch precompile worked on the phone (Lake: 16 s, 3053/4646 graphics pipelines compiled,
+cache 12.8 MB) and in-game pipeline creates are 2-3 ms at most. What is left: 8-10 fps with the GPU
+96-99% busy (about 100 ms of GPU work per frame at 1602x720; every earlier bundle had the same
+fps), plus a 60-100 ms `vkAllocateMemory` on the primary ring about once a minute (DXVK growing a
+256 MiB chunk).
+
+- 0034: DXVK picks its tiler mode by `driverID` (Turnip, Qualcomm, ARM, PanVK, ... in
+  `DxvkDevice::getPerfHints`): render passes in secondary command buffers so clears, discards and
+  resolves fold into load/store ops, trimmed render areas, cached memory for mapped allocations.
+  Venus reported `MESA_VENUS`, so DXVK treated Mali as a desktop GPU. For engine `DXVK*` only, the
+  guest now reports the GPU's own driver ID when it is a tiler. `DROIDDECK_VN_DXVK_TILER=0` turns it
+  off, `=1` claims `ARM_PROPRIETARY` on any GPU (CI uses it on lavapipe). Log: `DXVK sees driver
+  ID 9 ...`.
+- 0035 (`vn_droiddeck_prof.c`): for 2 s of every 10 s report (`DROIDDECK_VN_PASS_STATS_MS`), each
+  primary command buffer begun `ONE_TIME_SUBMIT` gets a timestamp at its start, before and after
+  each render pass (dynamic rendering or render pass objects) and at its end -- never inside a
+  pass. Every command buffer counts its draws, dispatches and kinds of work (copies, blits,
+  clears, resolves, BC decodes, barriers, fills); secondaries add theirs at
+  `vkCmdExecuteCommands`. Finished spans are grouped by kind (pass: size, attachment formats,
+  load/store ops as L/C/D/N and S/D/N, samples; between passes: what was recorded) and the top
+  ten go to droiddeck_vulkan.txt as `gpu passes N: X ms/frame (Y%), Z per frame, D draws each,
+  max M ms: <kind>`, under a `gpu passes over ...` total. A recycled query pool reads back its old
+  results until the new reset runs, so results whose first timestamp equals the last use's are
+  not counted. The `frames:` line also gets frame-time median, 95th percentile, max and the count
+  over twice the median (stutter vs low fps).
+- CI (`run-venus.sh`): `VKSTATS_PASSES=1` makes vkstats record a 256x256 pass with secondary
+  command buffer contents (as DXVK's tiler mode does) after a fill; the check wants the pass by
+  size/format/ops and the fill as work between passes; `DROIDDECK_VN_DXVK_TILER=1` must give
+  driver ID 9 and the default 22 on lavapipe.

@@ -2,7 +2,11 @@
  *  - a descriptor pool DXVK-style: fill it, and the next allocation must come back
  *    VK_ERROR_OUT_OF_POOL_MEMORY (from the guest's accounting unless DROIDDECK_VN_POOL_DEFER=1);
  *  - submissions for a while, each waited on, so the 10 s reports (shortened by the test's
- *    DROIDDECK_VN_STATS_MS / DROIDDECK_VN_WAIT_STACKS_MS) have GPU spans and wait stacks.
+ *    DROIDDECK_VN_STATS_MS / DROIDDECK_VN_WAIT_STACKS_MS) have GPU spans and wait stacks;
+ *  - with VKSTATS_PASSES=1 each submission also has a render pass DXVK's tiler mode records:
+ *    vkCmdBeginRendering with secondary command buffer contents, a secondary that clears, so
+ *    the driver's pass profile (0035) has a 256x256 pass to report;
+ *  - the driver ID the program is told (0034: a tiler's own for DXVK).
  * Prints "vkstats: ..." lines; exit 0 when every Vulkan call did what it should. */
 #include <stdint.h>
 #include <stdio.h>
@@ -32,11 +36,12 @@ int
 main(int argc, char **argv)
 {
    const double seconds = argc > 1 ? atof(argv[1]) : 2.0;
+   const int passes = getenv("VKSTATS_PASSES") && atoi(getenv("VKSTATS_PASSES"));
    const VkApplicationInfo app = {
       .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
       .pApplicationName = "vkstats",
       .pEngineName = "DXVK",
-      .apiVersion = VK_API_VERSION_1_1,
+      .apiVersion = passes ? VK_API_VERSION_1_3 : VK_API_VERSION_1_1,
    };
    const VkInstanceCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app };
    VkInstance inst;
@@ -51,12 +56,22 @@ main(int argc, char **argv)
    VkPhysicalDeviceProperties props;
    vkGetPhysicalDeviceProperties(pd, &props);
    printf("vkstats: GPU %s\n", props.deviceName);
+   {
+      VkPhysicalDeviceDriverProperties drv = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES };
+      VkPhysicalDeviceProperties2 p2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &drv };
+      vkGetPhysicalDeviceProperties2(pd, &p2);
+      printf("vkstats: driver ID %d (%s)\n", (int)drv.driverID, drv.driverName);
+   }
    const float prio = 1.0f;
    const VkDeviceQueueCreateInfo qci = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = 0, .queueCount = 1, .pQueuePriorities = &prio,
    };
+   const VkPhysicalDeviceVulkan13Features f13 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .dynamicRendering = VK_TRUE,
+   };
    const VkDeviceCreateInfo dci = {
-      .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
+      .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = passes ? &f13 : NULL,
+      .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
    };
    VkDevice dev;
    CHECK(vkCreateDevice(pd, &dci, NULL, &dev));
@@ -198,15 +213,94 @@ main(int argc, char **argv)
    };
    VkCommandBuffer cmd;
    CHECK(vkAllocateCommandBuffers(dev, &cbai, &cmd));
+
+   /* the render pass (VKSTATS_PASSES=1): a 256x256 colour target, a secondary that clears it */
+   VkImage rt = VK_NULL_HANDLE;
+   VkImageView rtv = VK_NULL_HANDLE;
+   VkDeviceMemory rtmem = VK_NULL_HANDLE;
+   VkCommandBuffer sec = VK_NULL_HANDLE;
+   const VkFormat rtfmt = VK_FORMAT_R8G8B8A8_UNORM;
+   if (passes) {
+      const VkImageCreateInfo rci = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = rtfmt,
+         .extent = { 256, 256, 1 }, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
+         .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+      };
+      CHECK(vkCreateImage(dev, &rci, NULL, &rt));
+      VkMemoryRequirements rr;
+      vkGetImageMemoryRequirements(dev, rt, &rr);
+      uint32_t rtype = 0;
+      while (rtype < mp.memoryTypeCount && !(rr.memoryTypeBits & (1u << rtype)))
+         rtype++;
+      const VkMemoryAllocateInfo rai = {
+         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = rr.size, .memoryTypeIndex = rtype,
+      };
+      CHECK(vkAllocateMemory(dev, &rai, NULL, &rtmem));
+      CHECK(vkBindImageMemory(dev, rt, rtmem, 0));
+      const VkImageViewCreateInfo vci = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = rt, .viewType = VK_IMAGE_VIEW_TYPE_2D,
+         .format = rtfmt, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+      };
+      CHECK(vkCreateImageView(dev, &vci, NULL, &rtv));
+      const VkCommandBufferAllocateInfo sai = {
+         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = cpool,
+         .level = VK_COMMAND_BUFFER_LEVEL_SECONDARY, .commandBufferCount = 1,
+      };
+      CHECK(vkAllocateCommandBuffers(dev, &sai, &sec));
+      const VkCommandBufferInheritanceRenderingInfo iri = {
+         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_RENDERING_INFO,
+         .colorAttachmentCount = 1, .pColorAttachmentFormats = &rtfmt,
+         .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+      };
+      const VkCommandBufferInheritanceInfo ii = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO, .pNext = &iri };
+      const VkCommandBufferBeginInfo sbi = {
+         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+         .flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT, .pInheritanceInfo = &ii,
+      };
+      CHECK(vkBeginCommandBuffer(sec, &sbi));
+      const VkClearAttachment ca = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .colorAttachment = 0,
+                                     .clearValue = { .color = { .float32 = { 0, 1, 0, 1 } } } };
+      const VkClearRect cr = { .rect = { { 0, 0 }, { 256, 256 } }, .baseArrayLayer = 0, .layerCount = 1 };
+      for (int k = 0; k < 8; k++)
+         vkCmdClearAttachments(sec, 1, &ca, 1, &cr);
+      CHECK(vkEndCommandBuffer(sec));
+   }
    const VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
    VkFence fence;
    CHECK(vkCreateFence(dev, &fci, NULL, &fence));
    const double start = now_ms();
    int submits = 0;
    while (now_ms() - start < seconds * 1000) {
-      const VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+      const VkCommandBufferBeginInfo bi = {
+         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+         .flags = passes ? VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT : 0,
+      };
       CHECK(vkBeginCommandBuffer(cmd, &bi));
       vkCmdFillBuffer(cmd, buf, 0, VK_WHOLE_SIZE, (uint32_t)submits);
+      if (passes) {
+         const VkImageMemoryBarrier ib = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = rt, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+         };
+         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                              0, 0, NULL, 0, NULL, 1, &ib);
+         const VkRenderingAttachmentInfo ra = {
+            .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = rtv,
+            .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+         };
+         const VkRenderingInfo ri = {
+            .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .flags = VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT,
+            .renderArea = { { 0, 0 }, { 256, 256 } }, .layerCount = 1, .colorAttachmentCount = 1,
+            .pColorAttachments = &ra,
+         };
+         vkCmdBeginRendering(cmd, &ri);
+         vkCmdExecuteCommands(cmd, 1, &sec);
+         vkCmdEndRendering(cmd);
+      }
       CHECK(vkEndCommandBuffer(cmd));
       const VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cmd };
       CHECK(vkQueueSubmit(queue, 1, &si, fence));
@@ -217,6 +311,11 @@ main(int argc, char **argv)
    printf("vkstats: %d submissions in %.1f s\n", submits, (now_ms() - start) / 1e3);
    CHECK(vkDeviceWaitIdle(dev));
    vkDestroyFence(dev, fence, NULL);
+   if (passes) {
+      vkDestroyImageView(dev, rtv, NULL);
+      vkDestroyImage(dev, rt, NULL);
+      vkFreeMemory(dev, rtmem, NULL);
+   }
    vkDestroyCommandPool(dev, cpool, NULL);
    vkDestroyBuffer(dev, buf, NULL);
    vkFreeMemory(dev, mem, NULL);
