@@ -1,0 +1,69 @@
+name: Venus GLX check
+
+# Steam client GLX start-up on Zink without DRI3 (see tools/tests/glx), in Arch Linux ARM like
+# the phone's rootfs, before a session change that touches it ships.
+on:
+  push:
+    branches: [venus-bridge]
+    paths:
+      - 'tools/tests/glx/**'
+      - 'tools/linuxfs/preload/**'
+      - '.github/workflows/venus-glx-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  glx:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the bridge driver (for its GL part)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p drv
+          gh release download venus-bridge-latest -R "$GITHUB_REPOSITORY" -p 'Venus-Bridge-guest-*.zip' -D drv || echo "no bridge driver release"
+          ls -la drv
+      - name: GLX start-up cases
+        run: docker run --rm -v "$PWD:/work" -w /work menci/archlinuxarm:base-devel bash tools/tests/glx/run-in-arch.sh
+
+  gamescope:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the bridge driver and the app's gamescope
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p drv gsrt
+          gh release download venus-bridge-latest -R "$GITHUB_REPOSITORY" -p 'Venus-Bridge-guest-*.zip' -D drv
+          gh release download mali-gl-latest -R "$GITHUB_REPOSITORY" -p 'mali-gl-runtime-aarch64.tar.gz' -D gsrt || echo "no mali-gl release"
+      - name: Steam UI pattern under gamescope
+        run: |
+          # gamescope's own images are exportable dma-bufs; lavapipe makes those with udmabuf.
+          sudo modprobe udmabuf && ls -la /dev/udmabuf || echo "::warning::no udmabuf on this runner"
+          dev=(); [ -e /dev/udmabuf ] && dev=(--device /dev/udmabuf)
+          docker run --rm --shm-size=2g "${dev[@]}" -v "$PWD:/work" -w /work menci/archlinuxarm:base-devel bash tools/tests/glx/run-gamescope.sh
+
+
+  venus:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the bridge driver
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p drv
+          gh release download venus-bridge-latest -R "$GITHUB_REPOSITORY" -p 'Venus-Bridge-guest-*.zip' -D drv
+          gh release download venus-bridge-latest -R "$GITHUB_REPOSITORY" -p 'virglrenderer-src.tar.gz' -D drv
+      - name: The bridge end to end (guest driver -> vtest server -> lavapipe)
+        run: |
+          sudo modprobe udmabuf || true
+          dev=(); [ -e /dev/udmabuf ] && dev=(--device /dev/udmabuf)
+          docker run --rm --shm-size=2g "${dev[@]}" -v "$PWD:/work" -w /work menci/archlinuxarm:base-devel bash tools/tests/glx/run-venus.sh

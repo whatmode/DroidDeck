@@ -1,0 +1,455 @@
+diff -ru a/src/virtio/vulkan/vn_common.c b/src/virtio/vulkan/vn_common.c
+--- a/src/virtio/vulkan/vn_common.c
++++ b/src/virtio/vulkan/vn_common.c
+@@ -10,10 +10,17 @@
+ 
+ #include "vn_common.h"
+ 
++#include <stdio.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <time.h>
++#include <unistd.h>
++
+ #include <stdarg.h>
+ 
+ #include "util/log.h"
+ #include "util/os_misc.h"
++#include "util/os_time.h"
+ #include "util/u_debug.h"
+ #include "venus-protocol/vn_protocol_driver_info.h"
+ #include "vk_enum_to_str.h"
+@@ -96,12 +103,93 @@
+ #endif
+ }
+ 
++static mtx_t vn_dd_stats_mutex;
++static void vn_dd_lock_init(void) { mtx_init(&vn_dd_stats_mutex, mtx_plain); }
++static FILE *vn_dd_file;
++static mtx_t vn_dd_mutex;
++static char vn_dd_prog[96];
++
++static void
++vn_dd_open_once(void)
++{
++   mtx_init(&vn_dd_mutex, mtx_plain);
++   const char *env = getenv("DROIDDECK_VK_LOG");
++   if (env && !strcmp(env, "0"))
++      return;
++   char path[512];
++   if (env && *env) {
++      snprintf(path, sizeof(path), "%s", env);
++   } else {
++      const char *steam = getenv("STEAM_COMPAT_CLIENT_INSTALL_PATH");
++      const char *home = getenv("HOME");
++      char dir[400];
++      if (steam && *steam)
++         snprintf(dir, sizeof(dir), "%s/logs", steam);
++      else
++         snprintf(dir, sizeof(dir), "%s/.local/share/Steam/logs", home && *home ? home : "/root");
++      struct stat st;
++      if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode))
++         snprintf(dir, sizeof(dir), "/root/.local/share/Steam/logs");
++      if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode))
++         return;
++      snprintf(path, sizeof(path), "%s/droiddeck_vulkan.txt", dir);
++   }
++   struct stat st;
++   bool big = stat(path, &st) == 0 && st.st_size > 4 * 1024 * 1024;
++   vn_dd_file = fopen(path, big ? "w" : "a");
++   /* the program: its command line's first two words (Wine: the .exe) */
++   FILE *c = fopen("/proc/self/cmdline", "r");
++   if (c) {
++      char buf[512];
++      size_t n = fread(buf, 1, sizeof(buf) - 1, c);
++      fclose(c);
++      buf[n] = 0;
++      const char *a0 = buf, *a1 = n > strlen(buf) + 1 ? buf + strlen(buf) + 1 : "";
++      const char *b0 = strrchr(a0, '/');
++      const char *b1 = strrchr(a1, '\\') ? strrchr(a1, '\\') : strrchr(a1, '/');
++      snprintf(vn_dd_prog, sizeof(vn_dd_prog), "%s%s%s", b0 ? b0 + 1 : a0, *a1 ? " " : "",
++               b1 ? b1 + 1 : a1);
++   }
++}
++
++void
++vn_droiddeck_log(const char *format, ...)
++{
++   static once_flag once = ONCE_FLAG_INIT;
++   static unsigned lines;
++   call_once(&once, vn_dd_open_once);
++   if (!vn_dd_file)
++      return;
++   char msg[1024];
++   va_list ap;
++   va_start(ap, format);
++   vsnprintf(msg, sizeof(msg), format, ap);
++   va_end(ap);
++   mtx_lock(&vn_dd_mutex);
++   if (++lines <= 600) {
++      struct timespec ts;
++      clock_gettime(CLOCK_REALTIME, &ts);
++      struct tm tm;
++      localtime_r(&ts.tv_sec, &tm);
++      fprintf(vn_dd_file, "%02d:%02d:%02d.%03ld [%d %s] %s\n", tm.tm_hour, tm.tm_min, tm.tm_sec,
++              ts.tv_nsec / 1000000, (int)getpid(), vn_dd_prog, msg);
++      fflush(vn_dd_file);
++   }
++   mtx_unlock(&vn_dd_mutex);
++}
++
+ void
+ vn_log(struct vn_instance *instance, const char *format, ...)
+ {
+    va_list ap;
+ 
+    va_start(ap, format);
++   char msg[1024];
++   va_list ap2;
++   va_copy(ap2, ap);
++   vsnprintf(msg, sizeof(msg), format, ap2);
++   va_end(ap2);
++   vn_droiddeck_log("venus: %s", msg);
+    mesa_log_v(MESA_LOG_DEBUG, "MESA-VIRTIO", format, ap);
+    va_end(ap);
+ 
+@@ -113,7 +201,11 @@
+               VkResult result,
+               const char *where)
+ {
+-   vn_log(instance, "%s: %s", where, vk_Result_to_str(result));
++   /* image format queries answer "not supported" by the hundred: not for the file */
++   if (result == VK_ERROR_FORMAT_NOT_SUPPORTED)
++      mesa_log(MESA_LOG_DEBUG, "MESA-VIRTIO", "%s: %s", where, vk_Result_to_str(result));
++   else
++      vn_log(instance, "%s: %s", where, vk_Result_to_str(result));
+    return result;
+ }
+ 
+@@ -160,9 +252,53 @@
+    return true;
+ }
+ 
++/* droiddeck: how long this process waits on the bridge, by reason, every 10 s in
++ * droiddeck_vulkan.txt: waits that cost frames (Steam's UI at 120 Hz) show here. */
++static void
++vn_dd_wait_stats(int reason, const char *name, int64_t start, int64_t end)
++{
++   static mtx_t lock;
++   static once_flag once = ONCE_FLAG_INIT;
++   static int64_t since;
++   static uint64_t count[8], total[8], longest[8];
++   static const char *names[8];
++   static unsigned reports;
++   call_once(&once, vn_dd_lock_init);
++   (void)lock;
++   mtx_lock(&vn_dd_stats_mutex);
++   if (reason >= 0 && reason < 8) {
++      int64_t d = end - start;
++      count[reason]++;
++      total[reason] += d;
++      if (d > (int64_t)longest[reason])
++         longest[reason] = d;
++      names[reason] = name;
++   }
++   if (!since)
++      since = start;
++   if (end - since >= 10000000000ll) {
++      char line[512] = "";
++      for (int i = 0; i < 8; i++) {
++         if (!count[i])
++            continue;
++         size_t len = strlen(line);
++         snprintf(line + len, sizeof(line) - len, "%s %s %" PRIu64 "x %.1f ms (longest %.1f)", len ? ";" : "",
++                  names[i], count[i], total[i] / 1e6, longest[i] / 1e6);
++      }
++      if (line[0] && ++reports <= 120)
++         vn_droiddeck_log("waits over %.0f s:%s", (end - since) / 1e9, line);
++      memset(count, 0, sizeof(count));
++      memset(total, 0, sizeof(total));
++      memset(longest, 0, sizeof(longest));
++      since = end;
++   }
++   mtx_unlock(&vn_dd_stats_mutex);
++}
++
+ void
+ vn_relax_fini(struct vn_relax_state *state)
+ {
++   vn_dd_wait_stats(state->reason, state->reason_str, state->start_ns, os_time_get_nano());
+    vn_watchdog_release(&state->instance->ring.watchdog);
+ }
+ 
+@@ -187,6 +323,19 @@
+    return "";
+ }
+ 
++static uint32_t
++vn_dd_relax_base_us(void)
++{
++   static int us = -1;
++   if (us < 0) {
++      const char *e = getenv("DROIDDECK_VN_RELAX_US");
++      us = e ? atoi(e) : 160;
++      if (us < 1 || us > 1000)
++         us = 160;
++   }
++   return us;
++}
++
+ static struct vn_relax_profile
+ vn_relax_get_profile(enum vn_relax_reason reason)
+ {
+@@ -225,8 +374,11 @@
+        *   ...
+        *   aborting after 895s
+        */
++      /* droiddeck: DROIDDECK_VN_RELAX_US sets the first sleep (default 160 us as upstream:
++       * shorter sleeps made every waiting thread poll more and starved the bridge's server
++       * of CPU, which made Steam's UI slower) */
+       return (struct vn_relax_profile){
+-         .base_sleep_us = 160,
++         .base_sleep_us = vn_dd_relax_base_us(),
+          .busy_wait_order = 4,
+          .warn_order = 10,
+          .abort_order = 14,
+@@ -249,6 +401,8 @@
+       .iter = 0,
+       .profile = vn_relax_get_profile(reason),
+       .reason_str = vn_relax_reason_string(reason),
++      .start_ns = os_time_get_nano(),
++      .reason = reason,
+    };
+ }
+ 
+diff -ru a/src/virtio/vulkan/vn_common.h b/src/virtio/vulkan/vn_common.h
+--- a/src/virtio/vulkan/vn_common.h
++++ b/src/virtio/vulkan/vn_common.h
+@@ -261,6 +261,8 @@
+    uint32_t iter;
+    const struct vn_relax_profile profile;
+    const char *reason_str;
++   int64_t start_ns; /* droiddeck: time spent waiting, by reason (droiddeck_vulkan.txt) */
++   int reason;
+ };
+ 
+ /* TLS ring
+@@ -310,6 +312,11 @@
+ void
+ vn_trace_init(void);
+ 
++/* DroidDeck: what each program asks of Vulkan, appended to Steam's logs folder (the logs zip
++ * takes it): droiddeck_vulkan.txt. DROIDDECK_VK_LOG=<file> elsewhere, =0 off. */
++void
++vn_droiddeck_log(const char *format, ...) PRINTFLIKE(1, 2);
++
+ void
+ vn_log(struct vn_instance *instance, const char *format, ...)
+    PRINTFLIKE(2, 3);
+diff -ru a/src/virtio/vulkan/vn_device.c b/src/virtio/vulkan/vn_device.c
+--- a/src/virtio/vulkan/vn_device.c
++++ b/src/virtio/vulkan/vn_device.c
+@@ -10,6 +10,10 @@
+ 
+ #include "vn_device.h"
+ 
++#include <string.h>
++
++#include "vk_enum_to_str.h"
++
+ #include "util/disk_cache.h"
+ #include "util/hex.h"
+ #include "venus-protocol/vn_protocol_driver_device.h"
+@@ -524,12 +528,90 @@
+    return result;
+ }
+ 
++static VkResult
++vn_create_device(VkPhysicalDevice physicalDevice,
++                 const VkDeviceCreateInfo *pCreateInfo,
++                 const VkAllocationCallbacks *pAllocator,
++                 VkDevice *pDevice);
++
++/* VkPhysicalDeviceFeatures members, in order */
++static const char *const vn_dd_core_features[] = {
++   "robustBufferAccess", "fullDrawIndexUint32", "imageCubeArray", "independentBlend",
++   "geometryShader", "tessellationShader", "sampleRateShading", "dualSrcBlend", "logicOp",
++   "multiDrawIndirect", "drawIndirectFirstInstance", "depthClamp", "depthBiasClamp",
++   "fillModeNonSolid", "depthBounds", "wideLines", "largePoints", "alphaToOne", "multiViewport",
++   "samplerAnisotropy", "textureCompressionETC2", "textureCompressionASTC_LDR",
++   "textureCompressionBC", "occlusionQueryPrecise", "pipelineStatisticsQuery",
++   "vertexPipelineStoresAndAtomics", "fragmentStoresAndAtomics",
++   "shaderTessellationAndGeometryPointSize", "shaderImageGatherExtended",
++   "shaderStorageImageExtendedFormats", "shaderStorageImageMultisample",
++   "shaderStorageImageReadWithoutFormat", "shaderStorageImageWriteWithoutFormat",
++   "shaderUniformBufferArrayDynamicIndexing", "shaderSampledImageArrayDynamicIndexing",
++   "shaderStorageBufferArrayDynamicIndexing", "shaderStorageImageArrayDynamicIndexing",
++   "shaderClipDistance", "shaderCullDistance", "shaderFloat64", "shaderInt64", "shaderInt16",
++   "shaderResourceResidency", "shaderResourceMinLod", "sparseBinding", "sparseResidencyBuffer",
++   "sparseResidencyImage2D", "sparseResidencyImage3D", "sparseResidency2Samples",
++   "sparseResidency4Samples", "sparseResidency8Samples", "sparseResidency16Samples",
++   "sparseResidencyAliased", "variableMultisampleRate", "inheritedQueries",
++};
++
+ VkResult
+ vn_CreateDevice(VkPhysicalDevice physicalDevice,
+                 const VkDeviceCreateInfo *pCreateInfo,
+                 const VkAllocationCallbacks *pAllocator,
+                 VkDevice *pDevice)
+ {
++   /* DroidDeck: what the program asked of the GPU and what it got (droiddeck_vulkan.txt) */
++   struct vn_physical_device *pdev = vn_physical_device_from_handle(physicalDevice);
++   char exts[1500] = "", missing[600] = "", feats[600] = "";
++   for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++) {
++      const char *name = pCreateInfo->ppEnabledExtensionNames[i];
++      size_t len = strlen(exts);
++      snprintf(exts + len, sizeof(exts) - len, "%s%s", i ? " " : "", name);
++      bool found = false;
++      for (int e = 0; e < VK_DEVICE_EXTENSION_COUNT; e++)
++         if (pdev->base.vk.supported_extensions.extensions[e] && !strcmp(vk_device_extensions[e].extensionName, name))
++            found = true;
++      if (!found) {
++         len = strlen(missing);
++         snprintf(missing + len, sizeof(missing) - len, " %s", name);
++      }
++   }
++   const VkPhysicalDeviceFeatures *want = pCreateInfo->pEnabledFeatures;
++   char chain[400] = "";
++   vk_foreach_struct_const(ext, pCreateInfo->pNext) {
++      if (ext->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2)
++         want = &((const VkPhysicalDeviceFeatures2 *)ext)->features;
++      size_t len = strlen(chain);
++      snprintf(chain + len, sizeof(chain) - len, " %s", vk_StructureType_to_str(ext->sType) + 18);
++   }
++   if (want) {
++      VkPhysicalDeviceFeatures have;
++      pdev->base.vk.dispatch_table.GetPhysicalDeviceFeatures(physicalDevice, &have);
++      const VkBool32 *w = (const VkBool32 *)want, *h = (const VkBool32 *)&have;
++      for (unsigned i = 0; i < ARRAY_SIZE(vn_dd_core_features); i++)
++         if (w[i] && !h[i]) {
++            size_t len = strlen(feats);
++            snprintf(feats + len, sizeof(feats) - len, " %s", vn_dd_core_features[i]);
++         }
++   }
++   vn_droiddeck_log("vkCreateDevice on %s: extensions: %s", pdev->base.vk.properties.deviceName,
++                    exts[0] ? exts : "(none)");
++   vn_droiddeck_log("vkCreateDevice: feature structs:%s", chain[0] ? chain : " (none)");
++   if (missing[0] || feats[0])
++      vn_droiddeck_log("vkCreateDevice: asked for what this GPU lacks: extensions:%s; core features:%s",
++                       missing[0] ? missing : " none", feats[0] ? feats : " none");
++   VkResult result = vn_create_device(physicalDevice, pCreateInfo, pAllocator, pDevice);
++   vn_droiddeck_log("vkCreateDevice: %s", result == VK_SUCCESS ? "ok" : vk_Result_to_str(result));
++   return result;
++}
++
++static VkResult
++vn_create_device(VkPhysicalDevice physicalDevice,
++                 const VkDeviceCreateInfo *pCreateInfo,
++                 const VkAllocationCallbacks *pAllocator,
++                 VkDevice *pDevice)
++{
+    VN_TRACE_FUNC();
+    struct vn_physical_device *physical_dev =
+       vn_physical_device_from_handle(physicalDevice);
+diff -ru a/src/virtio/vulkan/vn_instance.c b/src/virtio/vulkan/vn_instance.c
+--- a/src/virtio/vulkan/vn_instance.c
++++ b/src/virtio/vulkan/vn_instance.c
+@@ -10,6 +10,10 @@
+ 
+ #include "vn_instance.h"
+ 
++#include <string.h>
++
++#include "vk_enum_to_str.h"
++
+ #include "util/driconf.h"
+ #include "venus-protocol/vn_protocol_driver_info.h"
+ #include "venus-protocol/vn_protocol_driver_instance.h"
+@@ -263,11 +267,58 @@
+    return VK_SUCCESS;
+ }
+ 
++static VkResult
++vn_create_instance(const VkInstanceCreateInfo *pCreateInfo,
++                   const VkAllocationCallbacks *pAllocator,
++                   VkInstance *pInstance);
++
+ VkResult
+ vn_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
+                   const VkAllocationCallbacks *pAllocator,
+                   VkInstance *pInstance)
+ {
++   /* DroidDeck: what the program asked for and what it got (droiddeck_vulkan.txt) */
++   const VkApplicationInfo *ai = pCreateInfo->pApplicationInfo;
++   char exts[700] = "";
++   for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++) {
++      size_t len = strlen(exts);
++      snprintf(exts + len, sizeof(exts) - len, "%s%s", i ? " " : "", pCreateInfo->ppEnabledExtensionNames[i]);
++   }
++   vn_droiddeck_log("vkCreateInstance: app '%s' engine '%s' api %u.%u, %u layer(s), extensions: %s",
++                    ai && ai->pApplicationName ? ai->pApplicationName : "",
++                    ai && ai->pEngineName ? ai->pEngineName : "",
++                    ai ? VK_VERSION_MAJOR(ai->apiVersion) : 1, ai ? VK_VERSION_MINOR(ai->apiVersion) : 0,
++                    pCreateInfo->enabledLayerCount, exts[0] ? exts : "(none)");
++   VkResult result = vn_create_instance(pCreateInfo, pAllocator, pInstance);
++   if (result != VK_SUCCESS) {
++      /* which extension this driver lacks, when that was it */
++      char missing[400] = "";
++      for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++) {
++         bool found = false;
++         for (int e = 0; e < VK_INSTANCE_EXTENSION_COUNT; e++)
++            if (vn_instance_supported_extensions.extensions[e] &&
++                !strcmp(vk_instance_extensions[e].extensionName, pCreateInfo->ppEnabledExtensionNames[i]))
++               found = true;
++         if (!found) {
++            size_t len = strlen(missing);
++            snprintf(missing + len, sizeof(missing) - len, " %s", pCreateInfo->ppEnabledExtensionNames[i]);
++         }
++      }
++      vn_droiddeck_log("vkCreateInstance FAILED: %s%s%s", vk_Result_to_str(result),
++                       missing[0] ? "; not supported here:" : "", missing);
++   } else {
++      struct vn_instance *instance = vn_instance_from_handle(*pInstance);
++      vn_droiddeck_log("vkCreateInstance: ok%s", instance->renderer ? "" :
++                       " but NO renderer (the bridge's vtest socket did not answer): no GPU will be listed");
++   }
++   return result;
++}
++
++static VkResult
++vn_create_instance(const VkInstanceCreateInfo *pCreateInfo,
++                   const VkAllocationCallbacks *pAllocator,
++                   VkInstance *pInstance)
++{
+    vn_trace_init();
+    VN_TRACE_FUNC();
+ 
+diff -ru a/src/virtio/vulkan/vn_physical_device.c b/src/virtio/vulkan/vn_physical_device.c
+--- a/src/virtio/vulkan/vn_physical_device.c
++++ b/src/virtio/vulkan/vn_physical_device.c
+@@ -10,6 +10,8 @@
+ 
+ #include "vn_physical_device.h"
+ 
++#include "vk_enum_to_str.h"
++
+ #include <stdio.h>
+ 
+ #include "git_sha1.h"
+@@ -1956,6 +1958,16 @@
+ 
+    VkResult result =
+       vn_instance_enumerate_physical_devices_and_groups(instance);
++   static unsigned dd_notes;
++   if (dd_notes++ < 6) {
++      if (result != VK_SUCCESS)
++         vn_droiddeck_log("vkEnumeratePhysicalDevices FAILED: %s", vk_Result_to_str(result));
++      else
++         vn_droiddeck_log("vkEnumeratePhysicalDevices: %u GPU(s)%s%s", instance->physical_device.device_count,
++                          instance->physical_device.device_count ? ": " : "",
++                          instance->physical_device.device_count ?
++                          instance->physical_device.devices[0].base.vk.properties.deviceName : "");
++   }
+    if (result != VK_SUCCESS)
+       return vn_error(instance, result);
+ 

@@ -44,12 +44,6 @@ import com.droiddeck.launcher.files.InAppFilePicker
 import com.droiddeck.launcher.frontend.Library
 import com.droiddeck.launcher.agent.AgentGuest
 import com.droiddeck.launcher.frontend.LibraryCache
-import com.droiddeck.launcher.stores.Store
-import com.droiddeck.launcher.stores.StoreAchievements
-import com.droiddeck.launcher.stores.StoreGameSidecar
-import com.droiddeck.launcher.stores.StoreLaunchRequests
-import com.droiddeck.launcher.stores.epic.EpicClient
-import com.droiddeck.launcher.ui.SessionAchievements
 import com.droiddeck.launcher.gpu.Cardboard
 import com.droiddeck.launcher.gpu.FrameGen
 import com.droiddeck.launcher.gpu.HeadTracker
@@ -85,9 +79,6 @@ import com.droiddeck.launcher.session.PerfHud
 import com.droiddeck.launcher.session.PerfMode
 import com.droiddeck.launcher.session.SteamRepair
 import com.droiddeck.launcher.session.GameEnvironmentStore
-import com.droiddeck.launcher.session.GameProfileFollowState
-import com.droiddeck.launcher.session.GameProfileInventoryCache
-import com.droiddeck.launcher.session.GameProfileRefreshState
 import com.droiddeck.launcher.session.SessionPrefs
 import com.droiddeck.launcher.session.SessionEvents
 import com.droiddeck.launcher.session.SessionArtifacts
@@ -98,8 +89,6 @@ import com.droiddeck.launcher.wayland.HdrSupport
 import com.droiddeck.launcher.session.SessionService
 import com.droiddeck.launcher.session.SessionState
 import com.droiddeck.launcher.session.ProtonDefault
-import com.droiddeck.launcher.session.SelectedGameProfile
-import com.droiddeck.launcher.session.WinComponents
 import com.droiddeck.launcher.ui.CursorOverlay
 import androidx.compose.ui.graphics.asImageBitmap
 import com.droiddeck.launcher.ui.DrawerActions
@@ -113,7 +102,6 @@ import com.droiddeck.launcher.wayland.CompositorHost
 import com.droiddeck.launcher.wayland.WaylandCompositor
 import java.io.File
 import com.droiddeck.launcher.session.ComponentsManager
-import com.droiddeck.launcher.session.LatestRequestCoordinator
 import com.droiddeck.launcher.ui.SessionDrawerPage
 import com.droiddeck.launcher.ui.sessionDrawerPages
 import com.droiddeck.launcher.ui.step
@@ -261,25 +249,6 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
     private var drawerComponents by mutableStateOf<ComponentsManager.Snapshot?>(null)
     private var drawerDefaultProton by mutableStateOf<String?>(null)
     private val drawerComponentMenu by lazy { ComponentsMenu(this, uiHandler) }
-    private var drawerGameProfileId by mutableStateOf<Long?>(null)
-    private val drawerGameInventory = GameProfileInventoryCache<Library.SteamGame>()
-    private var drawerGameInventoryRevision = 0L
-    private var drawerGameFexPresetSaving by mutableStateOf(false)
-    private var drawerGameNoSteamSaving by mutableStateOf(false)
-    private val drawerGameProfileFollowState = GameProfileFollowState()
-    private data class DrawerGameProfileRefresh(
-        val followsSteam: Boolean,
-        val requestedAppId: Long?,
-        val inventoryRevision: Long,
-    )
-    private data class DrawerGameProfileResult(
-        val profiles: List<Pair<Long, String>>,
-        val selectedAppId: Long?,
-        val profile: SelectedGameProfile?,
-        val error: Exception? = null,
-    )
-    private var drawerGameProfileRefresh by mutableStateOf(GameProfileRefreshState<DrawerGameProfileResult>())
-    private val drawerGameProfileRefreshes = LatestRequestCoordinator<DrawerGameProfileRefresh>()
     private var drawerPage by mutableStateOf(SessionDrawerPage.CONTROLLER)
     private var drawerControllerActive by mutableStateOf(false)
     private var backActionsInverted by mutableStateOf(false)
@@ -289,7 +258,10 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
     private var pcKeyboardOpen by mutableStateOf(false)
     private var achievementsInFront by mutableStateOf<AchievementsInFront?>(null)
     private var achievementsOpen by mutableStateOf(false)
-    private var hudOn by mutableStateOf(true)
+    private var overlayLevel by mutableStateOf(SessionPrefs.OVERLAY_LEVEL_1)
+    private var fpsLimit by mutableStateOf(0)
+    private var refreshLimit by mutableStateOf(0)
+    private var sustainedPerformance by mutableStateOf(false)
     private var upscaler by mutableStateOf(0)
     private var upscaleSharpness by mutableStateOf(75)
     private var effects by mutableStateOf(ScreenEffects.OFF)
@@ -326,8 +298,6 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
     private var textureAnisotropy by mutableStateOf(0)
     private var textureLodBias by mutableStateOf(TextureFiltering.LOD_BIAS_OFF)
-    private var drawerTextureAnisotropy by mutableStateOf<Int?>(null)
-    private var drawerTextureLodBias by mutableStateOf<String?>(null)
     private var lossless by mutableStateOf(Lossless.State.NONE)
     private val pickLossless = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
         if (r.resultCode == RESULT_OK) InAppFilePicker.pickedFile(r.data)?.let { importLossless(it) }
@@ -580,6 +550,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
                 CursorOverlay(cursorPos, cursorVisible, resources.displayMetrics.density,
                     cursorImage, cursorHotX, cursorHotY, cursorImageScale)
                 if (hud.text.isNotEmpty()) HudText(hud.text)
+                com.droiddeck.launcher.ui.ShaderPrecompileCard(active = !loading.visible)
                 if (glassesOutputActive && !loading.visible) com.droiddeck.launcher.ui.GlassesPlayingHint(glasses.model)
                 if (GlassesRendering.usesGlasses(glasses, glassesOutputActive, steamVrStatus == SteamVr.Status.RUNNING) &&
                     headTracking && !drawerOpen && !pcKeyboardOpen && !loading.visible) com.droiddeck.launcher.ui.GlassesRecenterButton(
@@ -628,7 +599,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
                         kotlinx.coroutines.delay(3000)
                     }
                 }
-                LaunchedEffect(drawerOpen, achievementsOpen, AgentGuest.focusRevision, StoreAchievements.revision) {
+                LaunchedEffect(drawerOpen, achievementsOpen, AgentGuest.focusRevision) {
                     if (!drawerOpen && !achievementsOpen) return@LaunchedEffect
                     val found = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                         runCatching { resolveAchievementsInFront() }
@@ -652,7 +623,6 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
                         com.droiddeck.launcher.frontend.Library.nameForProgram(SessionState.program) ?: getString(R.string.session_title_game) else null,
                     isHomeApp = isHomeApp,
                     androidApps = androidApps,
-                    hudOn = hudOn,
                     upscaler = upscaler, upscaleSharpness = upscaleSharpness,
                     effects = effects,
                     cardboard = cardboard,
@@ -665,8 +635,8 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
                     steamVr = steamVrStatus,
                     immersiveSteamVr = com.droiddeck.launcher.session.QuestExperimental.isSupported(),
                     onSteamVr = { action -> steamVrAction(action) },
-                    textureAnisotropy = if (drawerGameProfileId == null) textureAnisotropy else drawerTextureAnisotropy,
-                    textureLodBias = if (drawerGameProfileId == null) textureLodBias else drawerTextureLodBias,
+                    textureAnisotropy = textureAnisotropy,
+                    textureLodBias = textureLodBias,
                     frameGen = frameGen,
                     lossless = lossless,
                     oscMode = oscMode, onScreenButtonsVisible = onScreenButtonsVisible, suspendPolicy = suspendPolicy,
@@ -676,7 +646,31 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
                     secondScreenMode = secondScreenMode,
                     secondScreenDisplays = secondScreenDisplays,
                     selectedSecondScreenDisplay = selectedSecondScreenDisplay,
-                    onHud = { on -> SessionPrefs.setHudEnabled(this@SessionActivity, on); hudOn = on; hud.refresh() },
+                    overlayLevel = overlayLevel,
+                    onOverlayLevel = { level ->
+                        SessionPrefs.setOverlayLevel(this@SessionActivity, level)
+                        overlayLevel = level
+                        hud.refresh()
+                    },
+                    fpsLimit = fpsLimit,
+                    onFpsLimit = { fps ->
+                        SessionPrefs.setFpsLimit(this@SessionActivity, prefMode(), fps)
+                        SessionState.fpsLimit = fps
+                        fpsLimit = fps
+                        applyOutputPacing()
+                    },
+                    refreshLimit = refreshLimit,
+                    onRefreshLimit = { hz ->
+                        SessionPrefs.setRefreshLimit(this@SessionActivity, prefMode(), hz)
+                        refreshLimit = hz
+                        applyOutputPacing()
+                    },
+                    sustainedPerformance = sustainedPerformance,
+                    onSustainedPerformance = { on ->
+                        SessionPrefs.setSustainedPerformance(this@SessionActivity, on)
+                        sustainedPerformance = on
+                        applySustainedPerformance()
+                    },
                     onUpscaler = { m ->
                         SessionPrefs.setUpscaler(this@SessionActivity, m); upscaler = m
                         WaylandCompositor.nativeSetUpscaler(m)
@@ -691,22 +685,12 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
                         e.push(upscaler)
                     },
                     onTextureAnisotropy = { value ->
-                        drawerGameProfileId?.let { appId ->
-                            SessionPrefs.setGameTextureAnisotropy(this@SessionActivity, appId.toString(), value)
-                            drawerTextureAnisotropy = value
-                        } ?: value?.let {
-                            SessionPrefs.setTextureAnisotropy(this@SessionActivity, it)
-                            textureAnisotropy = it
-                        }
+                        SessionPrefs.setTextureAnisotropy(this@SessionActivity, value)
+                        textureAnisotropy = value
                     },
                     onTextureLodBias = { value ->
-                        drawerGameProfileId?.let { appId ->
-                            SessionPrefs.setGameTextureLodBias(this@SessionActivity, appId.toString(), value)
-                            drawerTextureLodBias = value
-                        } ?: value?.let {
-                            SessionPrefs.setTextureLodBias(this@SessionActivity, it)
-                            textureLodBias = it
-                        }
+                        SessionPrefs.setTextureLodBias(this@SessionActivity, value)
+                        textureLodBias = value
                     },
                     onFrameGenPick = { mode ->
                         FrameGen.set(this@SessionActivity, mode)
@@ -826,27 +810,9 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
                     componentDownloadRevision = drawerComponentMenu.compDownloadRevision,
                     onComponentCatalogRefresh = { drawerComponentMenu.refreshComponentCatalog() },
                     onComponentDownload = drawerComponentMenu::downloadComponent,
-                    gameProfiles = drawerGameProfileRefresh.data?.profiles.orEmpty(),
-                    selectedGameProfileId = drawerGameProfileId,
-                    selectedGameProfile = drawerGameProfileRefresh.data
-                        ?.takeIf { it.selectedAppId == drawerGameProfileId }?.profile,
-                    gameProfilesLoaded = drawerGameProfileRefresh.loaded,
-                    gameProfileRefreshFailed = drawerGameProfileRefresh.failed,
-                    onSelectedGameProfile = ::selectDrawerGameProfile,
-                    onGameProfilesPageOpened = {
-                        drawerGameProfileFollowState.resumeFollowingSteam()
-                        drawerGameInventoryRevision++
-                    },
-                    onSelectedGameProfileRefresh = ::refreshDrawerGameProfile,
-                    gameFexPresetSaving = drawerGameFexPresetSaving,
-                    onGameFexPreset = ::setDrawerGameFexPreset,
-                    gameNoSteamSaving = drawerGameNoSteamSaving,
-                    onGameNoSteam = ::setDrawerGameNoSteam,
                     onComponentSwap = { pid, comp, value -> swapDrawerComponent(pid, comp, value) },
-                    onGameComponent = ::setDrawerGameComponent,
                     defaultProtonId = drawerDefaultProton,
                     onDefaultProton = ::chooseDrawerDefaultProton,
-                    onGameProton = ::setDrawerGameProton,
                 ))
                 LaunchedEffect(achievementsOpen) {
                     if (achievementsOpen) {
@@ -855,10 +821,6 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
                         sessionOverlay.requestFocus()
                     }
                 }
-                achievementsInFront?.takeIf { achievementsOpen }?.let { inFront ->
-                    SessionAchievements(inFront.game, inFront.title, onClose = ::closeAchievements)
-                }
-                com.droiddeck.launcher.ui.AchievementNotificationOverlay()
                 if (SessionState.suspended) SessionPausedOverlay(
                     title = pausedTitle(),
                     onResume = { SessionService.resume(this@SessionActivity) },
@@ -901,24 +863,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     private fun closeAchievements() { achievementsOpen = false }
 
-    private fun resolveAchievementsInFront(): AchievementsInFront? {
-        if (!SessionState.running || SessionState.mode != SessionService.MODE_STEAM) return null
-        val snapshot = AgentGuest.focus(this) ?: return null
-        val games = LibraryCache.load(this)
-        val byKey = games.mapNotNull { g -> g.profileKey.toLongOrNull()?.let { it to g } }.toMap()
-        val windows = snapshot.optJSONArray("focusableApps")?.let { list -> List(list.length()) { list.optLong(it) } }.orEmpty()
-        val focusedId = snapshot.optLong("focusedApp").takeUnless { snapshot.isNull("focusedApp") }
-        val appId = com.droiddeck.launcher.session.SessionAchievementGame.activeAppId(focusedId, windows, byKey.keys) ?: return null
-        val focused = byKey[appId] ?: return null
-        val store = Store.byId(focused.source) ?: return null
-        val id = focused.storeId ?: return null
-        val source = StoreAchievements.forSource(store.id) ?: return null
-        val sidecar = StoreGameSidecar.find(this, store, id) ?: return null
-        val game = StoreAchievements.Game.of(sidecar)
-        val list = source.cached(this, game) ?: (source.fetch(this, game) as? StoreAchievements.Result.Found)?.list ?: return null
-        if (list.isEmpty()) return null
-        return AchievementsInFront(game, sidecar.title, list.count { it.unlocked } to list.size)
-    }
+    private fun resolveAchievementsInFront(): AchievementsInFront? = null
 
     private fun togglePcKeyboard() {
         drawerOpen = false
@@ -975,107 +920,6 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
         }, "drawer-components").start()
     }
 
-    private fun selectDrawerGameProfile(appId: Long?) {
-        drawerGameProfileFollowState.selectManually()
-        drawerGameProfileId = appId
-        drawerGameProfileRefresh = drawerGameProfileRefresh.retrying()
-        readDrawerTextureFiltering(appId)
-        refreshDrawerGameProfile()
-    }
-
-    private fun readDrawerTextureFiltering(appId: Long?) {
-        val choice = appId?.let { SessionPrefs.gameTextureFiltering(this, it.toString()) }
-        drawerTextureAnisotropy = choice?.anisotropy
-        drawerTextureLodBias = choice?.lodBias
-    }
-
-    private fun refreshDrawerGameProfile() {
-        val refresh = DrawerGameProfileRefresh(
-            drawerGameProfileFollowState.followsSteam,
-            drawerGameProfileId,
-            drawerGameInventoryRevision,
-        )
-        if (!drawerGameProfileRefreshes.submit(refresh)) return
-        Thread({
-            var request = drawerGameProfileRefreshes.takeLatest()
-            while (request != null) {
-                val current = request
-                val result = resolveDrawerGameProfileRefresh(current.value)
-                uiHandler.post {
-                    if (!drawerGameProfileRefreshes.isLatest(current)) return@post
-                    applyDrawerGameProfileRefresh(current.value, result)
-                }
-                request = drawerGameProfileRefreshes.takeLatest()
-            }
-        }, "drawer-game-profile").start()
-    }
-
-    private fun resolveDrawerGameProfileRefresh(
-        refresh: DrawerGameProfileRefresh,
-    ): DrawerGameProfileResult {
-        return try {
-            val games = drawerGameInventory.get(refresh.inventoryRevision) { Library.launchableGames(this) }
-            val options = games.mapNotNull { game ->
-                game.profileKey.toLongOrNull()?.let { it to game.name }
-            }.sortedBy { it.second.lowercase() }
-            val installedAppIds = options.mapTo(mutableSetOf()) { it.first }
-            val selectedAppId = if (refresh.followsSteam) {
-                val activeAppId = AgentGuest.activeSteamAppId(this, installedAppIds)
-                val selectedSteamAppId = runCatching { AgentGuest.selectedSteamAppId(this) }
-                AgentGuest.selectedOrActiveInstalledSteamAppId(selectedSteamAppId, activeAppId, installedAppIds)
-                    ?: refresh.requestedAppId
-            } else {
-                refresh.requestedAppId
-            }
-            val profile = selectedAppId?.let { resolveDrawerGameProfile(it, games) }
-            DrawerGameProfileResult(options, selectedAppId, profile)
-        } catch (error: Exception) {
-            DrawerGameProfileResult(emptyList(), refresh.requestedAppId, null, error)
-        }
-    }
-
-    private fun applyDrawerGameProfileRefresh(
-        refresh: DrawerGameProfileRefresh,
-        result: DrawerGameProfileResult,
-    ) {
-        if (result.error != null) {
-            if (!drawerGameProfileRefresh.failed) {
-                Log.w(TAG, "Could not refresh the selected game profile", result.error)
-            }
-            drawerGameProfileRefresh = drawerGameProfileRefresh.failed()
-            return
-        }
-        drawerGameProfileRefresh = drawerGameProfileRefresh.succeeded(result)
-        if (refresh.followsSteam) {
-            if (drawerGameProfileFollowState.followsSteam) {
-                drawerGameProfileId = result.selectedAppId
-                readDrawerTextureFiltering(result.selectedAppId)
-            }
-        }
-    }
-
-    private fun resolveDrawerGameProfile(
-        selectedAppId: Long,
-        games: List<Library.SteamGame>,
-    ): SelectedGameProfile? {
-        val game = games.firstOrNull { it.profileKey == selectedAppId.toString() } ?: return null
-        val snapshot = drawerComponents ?: ComponentsManager.snapshot(this)
-        val protons = snapshot.protons.map { it.proton }
-        val gameChoice = ProtonDefault.gameChoice(this, game.profileKey)
-        return SelectedGameProfile.resolve(
-            selectedAppId = selectedAppId,
-            games = games,
-            generalFexPreset = SessionPrefs.fexPreset(this),
-            environment = GameEnvironmentStore.read(this),
-            snapshot = snapshot,
-            generalProtonId = ProtonDefault.selectedId(this, protons),
-            gameProtonChoice = gameChoice,
-            gameProtonId = ProtonDefault.gameSelectedId(this, game.profileKey, protons),
-            gameComponents = ComponentsManager.gameComponents(this, game.profileKey),
-            gameWindowsComponents = WinComponents.picks(this, game.profileKey),
-        )
-    }
-
     private fun swapDrawerComponent(protonId: String, comp: String, value: String) {
         Thread({
             val message = runCatching {
@@ -1096,23 +940,6 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
         }, "drawer-components-swap").start()
     }
 
-    private fun setDrawerGameComponent(appId: Long, comp: String, file: String?) {
-        val name = drawerGameProfileRefresh.data?.profiles?.firstOrNull { it.first == appId }?.second ?: appId.toString()
-        Thread({
-            val message = runCatching {
-                ComponentsManager.setGameComponent(this, appId.toString(), comp, file)
-                getString(R.string.comp_game_saved_next, name)
-            }.getOrElse { e ->
-                getString(R.string.session_profile_save_failed, e.message ?: e.javaClass.simpleName)
-            }
-            uiHandler.post {
-                android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_LONG).show()
-                refreshDrawerComponents()
-                refreshDrawerGameProfile()
-            }
-        }, "drawer-game-component").start()
-    }
-
     private fun chooseDrawerDefaultProton(protonId: String) {
         val proton = drawerComponents?.protons?.firstOrNull { it.proton.id == protonId }?.proton ?: return
         drawerDefaultProton = protonId
@@ -1127,71 +954,10 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
             uiHandler.post {
                 Toast.makeText(this, message, Toast.LENGTH_LONG).show()
                 refreshDrawerComponents()
-                refreshDrawerGameProfile()
             }
         }, "drawer-default-proton").start()
     }
 
-    private fun setDrawerGameProton(appId: Long, protonId: String?) {
-        val name = drawerGameProfileRefresh.data?.profiles?.firstOrNull { it.first == appId }?.second ?: appId.toString()
-        val proton = protonId?.let { id -> drawerComponents?.protons?.firstOrNull { it.proton.id == id }?.proton ?: return }
-        Thread({
-            val message = runCatching {
-                getString(
-                    when (ProtonDefault.requestGame(this, appId.toString(), proton)) {
-                        ProtonDefault.Outcome.LIVE -> R.string.comp_game_proton_live
-                        ProtonDefault.Outcome.NEXT_START -> R.string.comp_game_proton_next
-                        ProtonDefault.Outcome.NOT_RUNNABLE -> R.string.comp_game_proton_not_runnable
-                    },
-                    name,
-                )
-            }.getOrElse { e -> getString(R.string.session_profile_save_failed, e.message ?: e.javaClass.simpleName) }
-            uiHandler.post {
-                Toast.makeText(this, message, Toast.LENGTH_LONG).show()
-                refreshDrawerGameProfile()
-            }
-        }, "drawer-game-proton").start()
-    }
-
-    private fun setDrawerGameFexPreset(appId: Long, preset: String?) {
-        if (drawerGameFexPresetSaving) return
-        drawerGameFexPresetSaving = true
-        val name = drawerGameProfileRefresh.data?.profiles?.firstOrNull { it.first == appId }?.second ?: appId.toString()
-        Thread({
-            val message = try {
-                GameEnvironmentStore.setGameFexPreset(this, appId.toString(), preset)
-                getString(R.string.comp_game_saved_next, name)
-            } catch (error: Exception) {
-                Log.w(TAG, "Could not save the game FEX preset for $appId", error)
-                getString(R.string.session_profile_save_failed, error.message ?: error.javaClass.simpleName)
-            }
-            uiHandler.post {
-                drawerGameFexPresetSaving = false
-                Toast.makeText(this, message, Toast.LENGTH_LONG).show()
-                refreshDrawerGameProfile()
-            }
-        }, "drawer-game-fex-preset").start()
-    }
-
-    private fun setDrawerGameNoSteam(appId: Long, on: Boolean) {
-        if (drawerGameNoSteamSaving) return
-        drawerGameNoSteamSaving = true
-        val name = drawerGameProfileRefresh.data?.profiles?.firstOrNull { it.first == appId }?.second ?: appId.toString()
-        Thread({
-            val message = try {
-                GameEnvironmentStore.setGameNoSteam(this, appId.toString(), on)
-                getString(R.string.comp_game_saved_next, name)
-            } catch (error: Exception) {
-                Log.w(TAG, "Could not save Start without Steam for $appId", error)
-                getString(R.string.session_profile_save_failed, error.message ?: error.javaClass.simpleName)
-            }
-            uiHandler.post {
-                drawerGameNoSteamSaving = false
-                Toast.makeText(this, message, Toast.LENGTH_LONG).show()
-                refreshDrawerGameProfile()
-            }
-        }, "drawer-game-no-steam").start()
-    }
 
     private fun loadingMode(): String =
         if (SessionState.running) SessionState.mode
@@ -1238,7 +1004,10 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
         pipAutoEnter = SessionPrefs.pipAutoEnter(this)
         unfoldedControls = SessionPrefs.unfoldedControls(this)
         picturePosition = SessionPrefs.picturePosition(this)
-        hudOn = SessionPrefs.hudEnabled(this)
+        overlayLevel = SessionPrefs.overlayLevel(this)
+        fpsLimit = SessionState.fpsLimit
+        refreshLimit = SessionPrefs.refreshLimit(this, prefMode())
+        sustainedPerformance = SessionPrefs.sustainedPerformance(this)
         upscaler = SessionPrefs.upscaler(this)
         upscaleSharpness = SessionPrefs.upscaleSharpness(this)
         effects = SessionPrefs.screenEffects(this)
@@ -1566,18 +1335,51 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
         val wanted = window.attributes.preferredDisplayModeId
         val hz = display?.supportedModes?.firstOrNull { wanted != 0 && it.modeId == wanted }?.refreshRate
             ?: display?.refreshRate ?: 60f
-        val mirrorCap = mirrorRefreshLimit().takeIf { it > 0 }?.toFloat() ?: Float.POSITIVE_INFINITY
-        val capped = minOf(hz, PerfMode.peakRefreshCap(this), mirrorCap)
+        val cap = refreshCap()
+        val capped = minOf(hz, PerfMode.peakRefreshCap(this), cap.takeIf { it > 0 }?.toFloat() ?: Float.POSITIVE_INFINITY)
         return if (capped > 1f) capped else 60f
     }
+
+    /**
+     * The mode whose per-mode preferences this session reads and writes. A game launched from the
+     * library runs in MODE_RUN but shares Steam's settings, so every per-mode key must go through
+     * prefMode or a game's change would land on a key the next session never reads back.
+     */
+    private fun prefMode(): String =
+        SessionPrefs.prefMode(intent.getStringExtra(SessionService.EXTRA_MODE) ?: SessionService.MODE_STEAM)
+
+    /**
+     * The ceiling the session picks its display mode under: the user's refresh choice, tightened by
+     * the glasses' output rate when a mirror is driving the picture. 0 means neither one has an
+     * opinion, so PerfMode falls back to the panel's own rate.
+     */
+    private fun refreshCap(): Int = SessionPrefs.tightestRefreshLimit(
+        SessionPrefs.refreshLimit(this, prefMode()),
+        mirrorRefreshLimit(),
+    )
 
     private fun mirrorRefreshLimit(): Int =
         GlassesRendering.mirrorRefreshLimit(glassesSettings, glasses, glassesScreen != null)
 
+    /**
+     * Android's sustained performance mode is a window flag, so it takes effect on the next
+     * window (and is dropped when the activity's window is replaced), which is why it is
+     * reapplied on resume rather than only when the switch is flipped.
+     */
+    private fun applySustainedPerformance() {
+        val on = SessionPrefs.sustainedPerformance(this)
+        try {
+            window.setSustainedPerformanceMode(on)
+            Log.i(TAG, "perf: sustained performance mode ${if (on) "on" else "off"}")
+        } catch (t: Throwable) {
+            Log.w(TAG, "sustained performance mode", t)
+        }
+    }
+
     private fun outputFpsLimit(): Int = GlassesRendering.fpsLimit(SessionState.fpsLimit, mirrorRefreshLimit())
 
     private fun applyOutputPacing() {
-        Log.i(TAG, "perf: " + PerfMode.apply(this, outputFpsLimit(), mirrorRefreshLimit()))
+        Log.i(TAG, "perf: " + PerfMode.apply(this, outputFpsLimit(), refreshCap()))
         if (CompositorHost.isStarted) {
             val hz = refreshHz()
             val changed = kotlin.math.abs(SessionState.refreshHz - hz) > 0.1f
@@ -2002,7 +1804,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
         val now = android.os.SystemClock.uptimeMillis()
         if (now - padMouseCheckedAt < PAD_MOUSE_CHECK_MS) return padMouseOn
         padMouseCheckedAt = now
-        val on = !pointerLocked && EpicClient.launcherFocused(this) && !EpicClient.playing(this)
+        val on = false
         if (padMouseOn && !on) padMouse.reset()
         if (!padMouseOn && on) padBridge?.releaseAll()
         padMouseOn = on
@@ -2646,6 +2448,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
         if (!pipUi) sessionClipboard.start()
         updatePadMotion()
         readPrefs()
+        applySustainedPerformance()
         refreshControls()
         if (::pip.isInitialized) pip.resumed()
         if (CompositorHost.isStarted) applyFrameGen()
@@ -3130,4 +2933,4 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 }
 
-private class AchievementsInFront(val game: StoreAchievements.Game, val title: String, val progress: Pair<Int, Int>?)
+private class AchievementsInFront(val title: String, val progress: Pair<Int, Int>?)

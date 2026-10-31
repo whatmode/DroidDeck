@@ -1,8 +1,6 @@
 package com.droiddeck.launcher.frontend
 
 import android.content.Context
-import com.droiddeck.launcher.stores.Store
-import com.droiddeck.launcher.stores.StoreGameSidecar
 import org.json.JSONObject
 import java.io.File
 import java.util.Locale
@@ -75,33 +73,7 @@ object WinCompSources {
     fun forGame(context: Context, game: Library.SteamGame): List<Finding> {
         val folder = game.gameFiles
         val out = ArrayList<Finding>()
-        val store = Store.byId(game.source)
-        val sidecar = folder?.let { StoreGameSidecar.read(it) }
-        when {
-            game.library != Library.ADDED -> if (game.appId > 0) out += steamList(context, folder, game.appId, game.name, auto = true)
-            store == Store.GOG -> sidecar?.extra?.get(GOG_DEPENDENCIES)?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }?.forEach { id ->
-                val parts = gog(id)
-                if (parts.isEmpty()) out += Finding(null, id, Origin.GOG, false)
-                parts.forEach { out += Finding(it, id, Origin.GOG, true) }
-            }
-            store == Store.EPIC -> {
-                val path = sidecar?.extra?.get(EPIC_PREREQ_PATH).orEmpty()
-                val name = sidecar?.extra?.get(EPIC_PREREQ_NAME).orEmpty()
-                if (path.isNotEmpty() || name.isNotEmpty()) {
-                    val parts = epic(path, name)
-                    val original = name.ifEmpty { path.substringAfterLast('/') }
-                    if (parts.isEmpty()) out += Finding(null, original, Origin.EPIC, false)
-                    parts.forEach { out += Finding(it, original, Origin.EPIC, true) }
-                }
-            }
-            store == Store.AMAZON -> folder?.let { amazonPostInstall(it) }?.forEach { command ->
-                val parts = installer(command)
-                val original = command.replace('\\', '/').substringAfterLast('/')
-                if (parts.isEmpty()) out += Finding(null, original, Origin.AMAZON, false)
-                parts.forEach { out += Finding(it, original, Origin.AMAZON, true) }
-            }
-            else -> {}
-        }
+        if (game.library != Library.ADDED && game.appId > 0) out += steamList(context, folder, game.appId, game.name, auto = true)
         if (game.library == Library.ADDED && folder != null) SteamMatch.get(context, folder.path)?.let { match ->
             val id = match.appId ?: return@let
             when (match.certainty) {

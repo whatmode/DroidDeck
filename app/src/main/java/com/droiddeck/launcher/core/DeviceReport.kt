@@ -11,6 +11,7 @@ import android.os.StatFs
 import android.provider.Settings
 import android.util.Log
 import android.view.Display
+import com.droiddeck.launcher.BuildConfig
 import com.droiddeck.launcher.gpu.LinuxVulkanDriver
 import com.droiddeck.launcher.gpu.LinuxVulkanDriverManager
 import com.droiddeck.launcher.gpu.TurnipDriver
@@ -107,6 +108,11 @@ object DeviceReport {
             val info = context.packageManager.getPackageInfo(context.packageName, 0)
             k("Version", "${info.versionName} (${info.longVersionCode})")
         }
+        /* The manifest version does not move between builds, so a report that stops here cannot
+         * say which build ran. Every report from a stale install then looks current, which is how
+         * a fixed build gets reported broken and a broken one gets reported fixed. */
+        k("Build", BuildConfig.BUILD_LABEL)
+        k("Commit", BuildConfig.SOURCE_COMMIT)
         k("Package", context.packageName)
         k("targetSdk", context.applicationInfo.targetSdkVersion)
         k("Native lib dir", context.applicationInfo.nativeLibraryDir)
@@ -188,6 +194,9 @@ object DeviceReport {
             k("Panel refresh modes", refreshModesSummary(display.supportedModes.map { it.refreshRate }))
         }
         k("peak_refresh_rate", runCatching { Settings.System.getString(context.contentResolver, "peak_refresh_rate") }.getOrNull() ?: "not set")
+        k("Session refresh cap", SessionPrefs.refreshLimit(context, SessionPrefs.prefMode(mode)).let { if (it == 0) "panel default" else "$it Hz" })
+        k("Sustained performance", SessionPrefs.sustainedPerformance(context))
+        k("Performance overlay", SessionPrefs.overlayLevel(context))
         k("refresh_rate_mode", runCatching { Settings.Secure.getString(context.contentResolver, "refresh_rate_mode") }.getOrNull() ?: "not set")
         val panelSize = com.droiddeck.launcher.session.SessionDisplay.panelSize(context)
         for ((label, mode) in listOf("Resolution (Steam)" to SessionService.MODE_STEAM, "Resolution (Desktop)" to SessionService.MODE_DESKTOP)) {

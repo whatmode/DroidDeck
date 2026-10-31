@@ -1,0 +1,1819 @@
+diff -ruN a/src/virtio/vulkan/meson.build b/src/virtio/vulkan/meson.build
+--- a/src/virtio/vulkan/meson.build
++++ b/src/virtio/vulkan/meson.build
+@@ -61,6 +61,7 @@
+   'vn_descriptor_set.c',
+   'vn_device.c',
+   'vn_device_memory.c',
++  'vn_droiddeck_bc.c',
+   'vn_droiddeck_emu.c',
+   'vn_feedback.c',
+   'vn_host_copy.c',
+diff -ruN a/src/virtio/vulkan/vn_buffer.c b/src/virtio/vulkan/vn_buffer.c
+--- a/src/virtio/vulkan/vn_buffer.c
++++ b/src/virtio/vulkan/vn_buffer.c
+@@ -9,6 +9,7 @@
+  */
+ 
+ #include "vn_buffer.h"
++#include "vn_droiddeck_bc.h"
+ 
+ #include "venus-protocol/vn_protocol_driver_buffer.h"
+ #include "venus-protocol/vn_protocol_driver_buffer_view.h"
+@@ -462,6 +463,8 @@
+    struct vn_device *dev = vn_device_from_handle(device);
+    vn_async_vkBindBufferMemory2(dev->primary_ring, device, bindInfoCount,
+                                 pBindInfos);
++   for (uint32_t i = 0; i < bindInfoCount; i++)
++      vn_dd_bc_buffer_bound(&pBindInfos[i]);
+ 
+    for (uint32_t i = 0; i < bindInfoCount; i++) {
+       const VkBindMemoryStatus *bind_status =
+diff -ruN a/src/virtio/vulkan/vn_buffer.h b/src/virtio/vulkan/vn_buffer.h
+--- a/src/virtio/vulkan/vn_buffer.h
++++ b/src/virtio/vulkan/vn_buffer.h
+@@ -48,6 +48,10 @@
+    struct vn_object_base base;
+ 
+    struct vn_buffer_memory_requirements requirements;
++
++   /* droiddeck: bound memory, for BC uploads read at submit (vn_droiddeck_bc.h) */
++   VkDeviceMemory dd_memory;
++   VkDeviceSize dd_memory_offset;
+ };
+ VK_DEFINE_NONDISP_HANDLE_CASTS(vn_buffer,
+                                base.vk,
+diff -ruN a/src/virtio/vulkan/vn_command_buffer.c b/src/virtio/vulkan/vn_command_buffer.c
+--- a/src/virtio/vulkan/vn_command_buffer.c
++++ b/src/virtio/vulkan/vn_command_buffer.c
+@@ -9,6 +9,7 @@
+  */
+ 
+ #include "vn_command_buffer.h"
++#include "vn_droiddeck_bc.h"
+ 
+ #include "vn_droiddeck_emu.h"
+ 
+@@ -746,6 +747,8 @@
+       vn_query_feedback_cmd_free(cmd->linked_qfb_cmd);
+       cmd->linked_qfb_cmd = NULL;
+    }
++
++   vn_dd_bc_cmd_reset(cmd);
+ }
+ 
+ void
+@@ -1433,6 +1436,8 @@
+                 uint32_t regionCount,
+                 const VkImageCopy *pRegions)
+ {
++   if (vn_dd_bc_drop_image_copy(srcImage, dstImage))
++      return;
+    VN_CMD_ENQUEUE(vkCmdCopyImage, commandBuffer, srcImage, srcImageLayout,
+                   dstImage, dstImageLayout, regionCount, pRegions);
+ }
+@@ -1441,6 +1446,8 @@
+ vn_CmdCopyImage2(VkCommandBuffer commandBuffer,
+                  const VkCopyImageInfo2 *pCopyImageInfo)
+ {
++   if (vn_dd_bc_drop_image_copy(pCopyImageInfo->srcImage, pCopyImageInfo->dstImage))
++      return;
+    VN_CMD_ENQUEUE(vkCmdCopyImage2, commandBuffer, pCopyImageInfo);
+ }
+ 
+@@ -1473,6 +1480,15 @@
+                         uint32_t regionCount,
+                         const VkBufferImageCopy *pRegions)
+ {
++   struct vn_dd_bc_copy dd_bc;
++   if (vn_dd_bc_copy_begin(commandBuffer, srcBuffer, dstImage, regionCount, pRegions, NULL,
++                           &dd_bc)) {
++      if (dd_bc.count)
++         VN_CMD_ENQUEUE(vkCmdCopyBufferToImage, commandBuffer, dd_bc.staging, dstImage,
++                        dstImageLayout, dd_bc.count, dd_bc.regions);
++      vn_dd_bc_copy_end(&dd_bc);
++      return;
++   }
+    VN_CMD_ENQUEUE(vkCmdCopyBufferToImage, commandBuffer, srcBuffer, dstImage,
+                   dstImageLayout, regionCount, pRegions);
+ }
+@@ -1482,6 +1498,16 @@
+    VkCommandBuffer commandBuffer,
+    const VkCopyBufferToImageInfo2 *pCopyBufferToImageInfo)
+ {
++   const VkCopyBufferToImageInfo2 *info = pCopyBufferToImageInfo;
++   struct vn_dd_bc_copy dd_bc;
++   if (vn_dd_bc_copy_begin(commandBuffer, info->srcBuffer, info->dstImage, info->regionCount,
++                           NULL, info->pRegions, &dd_bc)) {
++      if (dd_bc.count)
++         VN_CMD_ENQUEUE(vkCmdCopyBufferToImage, commandBuffer, dd_bc.staging, info->dstImage,
++                        info->dstImageLayout, dd_bc.count, dd_bc.regions);
++      vn_dd_bc_copy_end(&dd_bc);
++      return;
++   }
+    VN_CMD_ENQUEUE(vkCmdCopyBufferToImage2, commandBuffer,
+                   pCopyBufferToImageInfo);
+ }
+@@ -1494,6 +1520,8 @@
+                         uint32_t regionCount,
+                         const VkBufferImageCopy *pRegions)
+ {
++   if (vn_dd_bc_drop_image_to_buffer(srcImage))
++      return;
+    VN_CMD_ENQUEUE(vkCmdCopyImageToBuffer, commandBuffer, srcImage,
+                   srcImageLayout, dstBuffer, regionCount, pRegions);
+ }
+@@ -1503,6 +1531,8 @@
+    VkCommandBuffer commandBuffer,
+    const VkCopyImageToBufferInfo2 *pCopyImageToBufferInfo)
+ {
++   if (vn_dd_bc_drop_image_to_buffer(pCopyImageToBufferInfo->srcImage))
++      return;
+    VN_CMD_ENQUEUE(vkCmdCopyImageToBuffer2, commandBuffer,
+                   pCopyImageToBufferInfo);
+ }
+diff -ruN a/src/virtio/vulkan/vn_command_buffer.h b/src/virtio/vulkan/vn_command_buffer.h
+--- a/src/virtio/vulkan/vn_command_buffer.h
++++ b/src/virtio/vulkan/vn_command_buffer.h
+@@ -77,6 +77,9 @@
+    struct vn_command_buffer_builder builder;
+ 
+    struct vn_query_feedback_cmd *linked_qfb_cmd;
++
++   /* droiddeck: staging memory and decodes of BC uploads (vn_droiddeck_bc.h) */
++   struct vn_dd_bc_cmd *dd_bc;
+ };
+ VK_DEFINE_HANDLE_CASTS(vn_command_buffer,
+                        base.vk.base,
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck_bc.c
+new file mode 100644
+--- /dev/null
++++ b/src/virtio/vulkan/vn_droiddeck_bc.c
+@@ -0,0 +1,905 @@
++/*
++ * DroidDeck: BC compressed textures on a GPU without them (see the header).
++ * SPDX-License-Identifier: MIT
++ */
++
++#include "vn_droiddeck_bc.h"
++
++#include <inttypes.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "util/format/u_format.h"
++#include "util/simple_mtx.h"
++#include "util/u_atomic.h"
++#include "util/os_time.h"
++#include "util/u_debug.h"
++#include "util/u_cpu_detect.h"
++#include "util/u_dynarray.h"
++#include "util/u_math.h"
++#include "util/u_queue.h"
++#include "util/u_thread.h"
++#include "vk_format.h"
++#include "vk_util.h"
++
++#include "vn_buffer.h"
++#include "vn_command_buffer.h"
++#include "vn_device.h"
++#include "vn_device_memory.h"
++#include "vn_droiddeck_emu.h"
++#include "vn_image.h"
++#include "vn_physical_device.h"
++#include "vn_renderer.h"
++
++static VkFormat
++bc_sub(VkFormat format)
++{
++   switch (format) {
++   case VK_FORMAT_BC1_RGB_UNORM_BLOCK:
++   case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
++   case VK_FORMAT_BC2_UNORM_BLOCK:
++   case VK_FORMAT_BC3_UNORM_BLOCK:
++   case VK_FORMAT_BC7_UNORM_BLOCK:
++      return VK_FORMAT_R8G8B8A8_UNORM;
++   case VK_FORMAT_BC1_RGB_SRGB_BLOCK:
++   case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
++   case VK_FORMAT_BC2_SRGB_BLOCK:
++   case VK_FORMAT_BC3_SRGB_BLOCK:
++   case VK_FORMAT_BC7_SRGB_BLOCK:
++      return VK_FORMAT_R8G8B8A8_SRGB;
++   case VK_FORMAT_BC4_UNORM_BLOCK:
++      return VK_FORMAT_R8_UNORM;
++   case VK_FORMAT_BC4_SNORM_BLOCK:
++      return VK_FORMAT_R8_SNORM;
++   case VK_FORMAT_BC5_UNORM_BLOCK:
++      return VK_FORMAT_R8G8_UNORM;
++   case VK_FORMAT_BC5_SNORM_BLOCK:
++      return VK_FORMAT_R8G8_SNORM;
++   case VK_FORMAT_BC6H_UFLOAT_BLOCK:
++   case VK_FORMAT_BC6H_SFLOAT_BLOCK:
++      return VK_FORMAT_R16G16B16A16_SFLOAT;
++   default:
++      return VK_FORMAT_UNDEFINED;
++   }
++}
++
++static uint32_t
++bc_block_bytes(VkFormat format)
++{
++   switch (format) {
++   case VK_FORMAT_BC1_RGB_UNORM_BLOCK:
++   case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
++   case VK_FORMAT_BC1_RGB_SRGB_BLOCK:
++   case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
++   case VK_FORMAT_BC4_UNORM_BLOCK:
++   case VK_FORMAT_BC4_SNORM_BLOCK:
++      return 8;
++   default:
++      return 16;
++   }
++}
++
++VkFormat
++vn_dd_bc_substitute(const struct vn_physical_device *physical_dev, VkFormat format)
++{
++   if (!physical_dev || !(physical_dev->dd_emu & VN_DD_EMU_BC))
++      return VK_FORMAT_UNDEFINED;
++   return bc_sub(format);
++}
++
++/* ---- statistics, every 10 s in droiddeck_vulkan.txt while they change ---- */
++
++static simple_mtx_t bc_stats_lock = SIMPLE_MTX_INITIALIZER;
++static struct {
++   uint64_t images, copies, regions, bytes_in, bytes_out, decode_ns, dropped, missing_src;
++   int64_t since;
++   unsigned reports;
++} bc_stats;
++
++/* The decoder threads, made on first use (see bc_decode_tasks). */
++static struct util_queue bc_queue;
++
++static void
++bc_decode_task(void *job, void *gdata, int thread_index);
++
++static void
++bc_stats_add(uint64_t images, uint64_t copies, uint64_t regions, uint64_t bytes_in,
++             uint64_t bytes_out, uint64_t decode_ns, uint64_t dropped, uint64_t missing_src)
++{
++   simple_mtx_lock(&bc_stats_lock);
++   bc_stats.images += images;
++   bc_stats.copies += copies;
++   bc_stats.regions += regions;
++   bc_stats.bytes_in += bytes_in;
++   bc_stats.bytes_out += bytes_out;
++   bc_stats.decode_ns += decode_ns;
++   bc_stats.dropped += dropped;
++   bc_stats.missing_src += missing_src;
++   const int64_t now = os_time_get_nano();
++   if (!bc_stats.since)
++      bc_stats.since = now;
++   const bool first = images && bc_stats.images == images && !bc_stats.reports;
++   if (first || now - bc_stats.since >= 10000000000ll) {
++      if (bc_stats.reports++ < 200)
++         vn_droiddeck_log("BC textures emulated over %.1f s: %" PRIu64 " images made, %" PRIu64
++                          " uploads (%" PRIu64 " regions) decoded, %.1f MiB compressed -> %.1f MiB, "
++                          "%.1f ms decoding; %" PRIu64 " copies left out, %" PRIu64
++                          " uploads from memory the driver cannot read",
++                          (now - bc_stats.since) / 1e9, bc_stats.images, bc_stats.copies,
++                          bc_stats.regions, bc_stats.bytes_in / 1048576.0,
++                          bc_stats.bytes_out / 1048576.0, bc_stats.decode_ns / 1e6,
++                          bc_stats.dropped, bc_stats.missing_src);
++      memset(&bc_stats, 0, sizeof(bc_stats));
++      bc_stats.since = now;
++      bc_stats.reports = 1;
++   }
++   simple_mtx_unlock(&bc_stats_lock);
++}
++
++static void
++bc_log_once(int *flag, const char *what)
++{
++   if (!p_atomic_xchg(flag, 1))
++      vn_droiddeck_log("BC textures: %s", what);
++}
++
++/* ---- formats ---- */
++
++void
++vn_dd_bc_fix_format_properties(VkFormatProperties2 *props)
++{
++   const VkFormatFeatureFlags keep =
++      VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
++      VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_MINMAX_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
++      VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_BLIT_SRC_BIT;
++   props->formatProperties.optimalTilingFeatures &= keep;
++   props->formatProperties.linearTilingFeatures = 0;
++   props->formatProperties.bufferFeatures = 0;
++   VkFormatProperties3 *props3 =
++      vk_find_struct(props->pNext, FORMAT_PROPERTIES_3);
++   if (props3) {
++      const VkFormatFeatureFlags2 keep2 =
++         VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
++         VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_MINMAX_BIT | VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT |
++         VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_2_BLIT_SRC_BIT;
++      props3->optimalTilingFeatures &= keep2;
++      props3->linearTilingFeatures = 0;
++      props3->bufferFeatures = 0;
++   }
++}
++
++/* a format list in the chain: BC formats become their substitutes; an emulated image keeps
++ * only those (its other formats cannot view the uncompressed data) */
++static void
++bc_fix_list(const void *chain, bool image_is_bc, struct vn_dd_bc_fix *fix)
++{
++   VkImageFormatListCreateInfo *list =
++      (VkImageFormatListCreateInfo *)vk_find_struct_const(chain, IMAGE_FORMAT_LIST_CREATE_INFO);
++   if (!list || !list->viewFormatCount)
++      return;
++   bool has_bc = false;
++   for (uint32_t i = 0; i < list->viewFormatCount; i++)
++      has_bc |= bc_sub(list->pViewFormats[i]) != VK_FORMAT_UNDEFINED;
++   if (!has_bc && !image_is_bc)
++      return;
++   uint32_t n = 0;
++   for (uint32_t i = 0; i < list->viewFormatCount && n < ARRAY_SIZE(fix->formats); i++) {
++      VkFormat f = list->pViewFormats[i];
++      const VkFormat sub = bc_sub(f);
++      if (sub)
++         f = sub;
++      else if (image_is_bc)
++         continue;
++      bool dup = false;
++      for (uint32_t j = 0; j < n; j++)
++         dup |= fix->formats[j] == f;
++      if (!dup)
++         fix->formats[n++] = f;
++   }
++   fix->list = list;
++   fix->list_formats = list->pViewFormats;
++   fix->list_count = list->viewFormatCount;
++   list->pViewFormats = fix->formats;
++   list->viewFormatCount = n;
++}
++
++static bool
++bc_chain_has_bc_list(const void *chain)
++{
++   const VkImageFormatListCreateInfo *list =
++      vk_find_struct_const(chain, IMAGE_FORMAT_LIST_CREATE_INFO);
++   if (!list)
++      return false;
++   for (uint32_t i = 0; i < list->viewFormatCount; i++) {
++      if (bc_sub(list->pViewFormats[i]))
++         return true;
++   }
++   return false;
++}
++
++const VkImageCreateInfo *
++vn_dd_bc_image_info_begin(const struct vn_physical_device *physical_dev,
++                          const VkImageCreateInfo *info,
++                          VkImageCreateInfo *local,
++                          struct vn_dd_bc_fix *fix)
++{
++   memset(fix, 0, sizeof(*fix));
++   if (!physical_dev || !(physical_dev->dd_emu & VN_DD_EMU_BC))
++      return info;
++   const VkFormat sub = bc_sub(info->format);
++   if (!sub && !bc_chain_has_bc_list(info->pNext))
++      return info;
++   *local = *info;
++   if (sub) {
++      fix->orig = info->format;
++      local->format = sub;
++      local->flags &= ~VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT;
++   }
++   bc_fix_list(info->pNext, sub != VK_FORMAT_UNDEFINED, fix);
++   return local;
++}
++
++const VkPhysicalDeviceImageFormatInfo2 *
++vn_dd_bc_format_info_begin(const struct vn_physical_device *physical_dev,
++                           const VkPhysicalDeviceImageFormatInfo2 *info,
++                           VkPhysicalDeviceImageFormatInfo2 *local,
++                           struct vn_dd_bc_fix *fix)
++{
++   memset(fix, 0, sizeof(*fix));
++   if (!physical_dev || !(physical_dev->dd_emu & VN_DD_EMU_BC))
++      return info;
++   const VkFormat sub = bc_sub(info->format);
++   if (!sub && !bc_chain_has_bc_list(info->pNext))
++      return info;
++   *local = *info;
++   if (sub) {
++      fix->orig = info->format;
++      local->format = sub;
++      local->flags &= ~VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT;
++   }
++   bc_fix_list(info->pNext, sub != VK_FORMAT_UNDEFINED, fix);
++   return local;
++}
++
++void
++vn_dd_bc_info_end(struct vn_dd_bc_fix *fix)
++{
++   if (fix->list) {
++      fix->list->pViewFormats = fix->list_formats;
++      fix->list->viewFormatCount = fix->list_count;
++      fix->list = NULL;
++   }
++}
++
++void
++vn_dd_bc_image_created(VkImage image, VkFormat orig)
++{
++   struct vn_image *img = vn_image_from_handle(image);
++   if (!img || !orig)
++      return;
++   img->dd_bc_format = orig;
++   bc_stats_add(1, 0, 0, 0, 0, 0, 0, 0);
++}
++
++VkFormat
++vn_dd_bc_view_format(VkImage image, VkFormat format)
++{
++   struct vn_image *img = vn_image_from_handle(image);
++   if (!img || !img->dd_bc_format)
++      return format;
++   const VkFormat sub = bc_sub(format);
++   if (sub)
++      return sub;
++   static int logged;
++   bc_log_once(&logged, "a view of a BC image in an uncompressed format (block view) shows "
++                        "the decoded texels instead");
++   return img->base.vk.format;
++}
++
++/* ---- uploads ---- */
++
++struct vn_dd_bc_chunk {
++   VkBuffer buffer;
++   VkDeviceMemory memory;
++   uint8_t *ptr;
++   VkDeviceSize size, used;
++};
++
++struct vn_dd_bc_job {
++   VkBuffer src;
++   VkDeviceSize src_offset; /* in the source buffer */
++   VkDeviceSize src_row, src_slice;
++   uint32_t slices;
++   uint32_t width, height; /* in texels, multiples of 4 */
++   enum pipe_format src_format, dst_format;
++   uint8_t *dst;
++   uint32_t dst_row;
++   VkDeviceSize dst_slice;
++};
++
++/* The decoded bytes a job writes, which the decoder threads share.  src_row is left out on
++ * purpose: it is only read, so it stays on the job. */
++#define VN_DD_BC_JOB_READ_WRITE \
++   ((uint64_t)(offsetof(struct vn_dd_bc_job, src_offset)) | \
++    (uint64_t)(offsetof(struct vn_dd_bc_job, slices)) | \
++    (uint64_t)(offsetof(struct vn_dd_bc_job, width)) | \
++    (uint64_t)(offsetof(struct vn_dd_bc_job, dst)))
++
++/* One unit of decode work: one slice of one job, or part of a big slice.  Fields with an
++ * offset in VN_DD_BC_JOB_READ_WRITE are the job's, so that the thread that takes the unit can
++ * read them without another thread changing them underneath it. */
++struct vn_dd_bc_task {
++   struct vn_dd_bc_job job;
++   const uint8_t *src; /* the slice in the source buffer */
++   uint8_t *dst;
++   uint32_t y0, height;
++};
++
++struct vn_dd_bc_cmd {
++   struct util_dynarray chunks; /* struct vn_dd_bc_chunk */
++   struct util_dynarray jobs;   /* struct vn_dd_bc_job */
++};
++
++static struct vn_dd_bc_chunk *
++bc_chunk_new(struct vn_device *dev, struct vn_dd_bc_cmd *state, VkDeviceSize size)
++{
++   VkDevice device = vn_device_to_handle(dev);
++   struct vn_dd_bc_chunk chunk = { .size = size };
++   const VkBufferCreateInfo bci = {
++      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
++      .size = size,
++      .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
++      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
++   };
++   if (vn_CreateBuffer(device, &bci, NULL, &chunk.buffer) != VK_SUCCESS)
++      return NULL;
++   const VkBufferMemoryRequirementsInfo2 rqi = {
++      .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_REQUIREMENTS_INFO_2,
++      .buffer = chunk.buffer,
++   };
++   VkMemoryRequirements2 req = { .sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2 };
++   vn_GetBufferMemoryRequirements2(device, &rqi, &req);
++   const VkPhysicalDeviceMemoryProperties *mp = &dev->physical_device->memory_properties;
++   const VkMemoryPropertyFlags want =
++      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
++   uint32_t type = UINT32_MAX;
++   for (uint32_t i = 0; i < mp->memoryTypeCount && type == UINT32_MAX; i++) {
++      if ((req.memoryRequirements.memoryTypeBits & (1u << i)) &&
++          (mp->memoryTypes[i].propertyFlags & want) == want)
++         type = i;
++   }
++   if (type == UINT32_MAX)
++      goto fail_buffer;
++   const VkMemoryAllocateInfo mai = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
++      .allocationSize = req.memoryRequirements.size,
++      .memoryTypeIndex = type,
++   };
++   if (vn_AllocateMemory(device, &mai, NULL, &chunk.memory) != VK_SUCCESS)
++      goto fail_buffer;
++   const VkBindBufferMemoryInfo bind = {
++      .sType = VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO,
++      .buffer = chunk.buffer,
++      .memory = chunk.memory,
++   };
++   vn_BindBufferMemory2(device, 1, &bind);
++   const VkMemoryMapInfo map = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_MAP_INFO,
++      .memory = chunk.memory,
++      .size = VK_WHOLE_SIZE,
++   };
++   void *ptr = NULL;
++   if (vn_MapMemory2(device, &map, &ptr) != VK_SUCCESS || !ptr)
++      goto fail_memory;
++   chunk.ptr = ptr;
++   util_dynarray_append(&state->chunks, struct vn_dd_bc_chunk, chunk);
++   return util_dynarray_top_ptr(&state->chunks, struct vn_dd_bc_chunk);
++
++fail_memory:
++   vn_FreeMemory(device, chunk.memory, NULL);
++fail_buffer:
++   vn_DestroyBuffer(device, chunk.buffer, NULL);
++   return NULL;
++}
++
++void
++vn_dd_bc_cmd_reset(struct vn_command_buffer *cmd)
++{
++   struct vn_dd_bc_cmd *state = cmd->dd_bc;
++   if (!state)
++      return;
++   struct vn_device *dev = vn_device_from_vk(cmd->base.vk.pool->base.device);
++   VkDevice device = vn_device_to_handle(dev);
++   util_dynarray_foreach(&state->chunks, struct vn_dd_bc_chunk, chunk) {
++      vn_DestroyBuffer(device, chunk->buffer, NULL);
++      vn_FreeMemory(device, chunk->memory, NULL);
++   }
++   util_dynarray_fini(&state->chunks);
++   util_dynarray_fini(&state->jobs);
++   free(state);
++   cmd->dd_bc = NULL;
++}
++
++bool
++vn_dd_bc_copy_begin(VkCommandBuffer cmd_handle,
++                    VkBuffer src,
++                    VkImage dst,
++                    uint32_t count,
++                    const VkBufferImageCopy *regions,
++                    const VkBufferImageCopy2 *regions2,
++                    struct vn_dd_bc_copy *copy)
++{
++   struct vn_image *img = vn_image_from_handle(dst);
++   memset(copy, 0, sizeof(*copy));
++   if (!img || !img->dd_bc_format || !count)
++      return false;
++   struct vn_command_buffer *cmd = vn_command_buffer_from_handle(cmd_handle);
++   struct vn_device *dev = vn_device_from_vk(cmd->base.vk.pool->base.device);
++   const VkFormat orig = img->dd_bc_format;
++   const VkFormat sub = img->base.vk.format;
++   const uint32_t block = bc_block_bytes(orig);
++   const enum pipe_format src_format = util_format_linear(vk_format_to_pipe_format(orig));
++   const enum pipe_format dst_format = util_format_linear(vk_format_to_pipe_format(sub));
++   const uint32_t texel = util_format_get_blocksize(dst_format);
++
++   copy->regions = malloc(count * sizeof(*copy->regions));
++   if (!copy->regions)
++      return false;
++   VkDeviceSize total = 0;
++   for (uint32_t i = 0; i < count; i++) {
++      const VkExtent3D e = regions ? regions[i].imageExtent : regions2[i].imageExtent;
++      const uint32_t layers = regions ? regions[i].imageSubresource.layerCount
++                                      : regions2[i].imageSubresource.layerCount;
++      total += align64(align(e.width, 4) * (VkDeviceSize)align(e.height, 4) * texel * e.depth *
++                          MAX2(layers, 1), 16);
++   }
++
++   if (!cmd->dd_bc) {
++      cmd->dd_bc = calloc(1, sizeof(*cmd->dd_bc));
++      if (!cmd->dd_bc)
++         goto fail;
++      util_dynarray_init(&cmd->dd_bc->chunks, NULL);
++      util_dynarray_init(&cmd->dd_bc->jobs, NULL);
++   }
++   struct vn_dd_bc_cmd *state = cmd->dd_bc;
++   struct vn_dd_bc_chunk *chunk = util_dynarray_num_elements(&state->chunks, struct vn_dd_bc_chunk)
++                                     ? util_dynarray_top_ptr(&state->chunks, struct vn_dd_bc_chunk)
++                                     : NULL;
++   if (!chunk || chunk->size - chunk->used < total)
++      chunk = bc_chunk_new(dev, state, MAX2(total, 8ull << 20));
++   if (!chunk)
++      goto fail;
++
++   uint64_t bytes_in = 0, bytes_out = 0;
++   for (uint32_t i = 0; i < count; i++) {
++      VkBufferImageCopy r;
++      if (regions) {
++         r = regions[i];
++      } else {
++         r = (VkBufferImageCopy){
++            .bufferOffset = regions2[i].bufferOffset,
++            .bufferRowLength = regions2[i].bufferRowLength,
++            .bufferImageHeight = regions2[i].bufferImageHeight,
++            .imageSubresource = regions2[i].imageSubresource,
++            .imageOffset = regions2[i].imageOffset,
++            .imageExtent = regions2[i].imageExtent,
++         };
++      }
++      const uint32_t layers = MAX2(r.imageSubresource.layerCount, 1);
++      const uint32_t w4 = align(r.imageExtent.width, 4), h4 = align(r.imageExtent.height, 4);
++      const uint32_t row_texels = r.bufferRowLength ? r.bufferRowLength : r.imageExtent.width;
++      const uint32_t height_texels = r.bufferImageHeight ? r.bufferImageHeight : r.imageExtent.height;
++      struct vn_dd_bc_job job = {
++         .src = src,
++         .src_offset = r.bufferOffset,
++         .src_row = (VkDeviceSize)DIV_ROUND_UP(row_texels, 4) * block,
++         .slices = r.imageExtent.depth * layers,
++         .width = w4,
++         .height = h4,
++         .src_format = src_format,
++         .dst_format = dst_format,
++         .dst = chunk->ptr + chunk->used,
++         .dst_row = w4 * texel,
++      };
++      job.src_slice = job.src_row * DIV_ROUND_UP(height_texels, 4);
++      job.dst_slice = (VkDeviceSize)job.dst_row * h4;
++      util_dynarray_append(&state->jobs, struct vn_dd_bc_job, job);
++      bytes_in += job.src_slice * job.slices;
++      bytes_out += job.dst_slice * job.slices;
++
++      r.bufferOffset = chunk->used;
++      r.bufferRowLength = w4;
++      r.bufferImageHeight = h4;
++      copy->regions[i] = r;
++      chunk->used += align64(job.dst_slice * job.slices, 16);
++   }
++   copy->staging = chunk->buffer;
++   copy->count = count;
++   bc_stats_add(0, 1, count, bytes_in, bytes_out, 0, 0, 0);
++   return true;
++
++fail:
++   free(copy->regions);
++   copy->regions = NULL;
++   {
++      static int logged;
++      bc_log_once(&logged, "no staging memory for a BC upload: the texture stays empty");
++   }
++   /* leave the copy out: the program's compressed bytes do not fit the image */
++   copy->count = 0;
++   return true;
++}
++
++void
++vn_dd_bc_copy_end(struct vn_dd_bc_copy *copy)
++{
++   free(copy->regions);
++   copy->regions = NULL;
++}
++
++bool
++vn_dd_bc_drop_image_copy(VkImage src, VkImage dst)
++{
++   struct vn_image *s = vn_image_from_handle(src), *d = vn_image_from_handle(dst);
++   const bool sb = s && s->dd_bc_format, db = d && d->dd_bc_format;
++   if (sb == db)
++      return false;
++   static int logged;
++   bc_log_once(&logged, "a copy between a BC image and an uncompressed one is left out");
++   bc_stats_add(0, 0, 0, 0, 0, 0, 1, 0);
++   return true;
++}
++
++bool
++vn_dd_bc_drop_image_to_buffer(VkImage src)
++{
++   struct vn_image *s = vn_image_from_handle(src);
++   if (!s || !s->dd_bc_format)
++      return false;
++   static int logged;
++   bc_log_once(&logged, "a BC image read back to a buffer is left out");
++   bc_stats_add(0, 0, 0, 0, 0, 0, 1, 0);
++   return true;
++}
++
++void
++vn_dd_bc_buffer_bound(const VkBindBufferMemoryInfo *bind)
++{
++   struct vn_buffer *buf = vn_buffer_from_handle(bind->buffer);
++   if (!buf)
++      return;
++   buf->dd_memory = bind->memory;
++   buf->dd_memory_offset = bind->memoryOffset;
++}
++
++/* ---- block-at-a-time decode for S3TC ----
++ *
++ * Mesa's generic path (u_format_s3tc.c) decodes one texel at a time and rebuilds the block's
++ * palette for each of the 16 texels; its own source notes "to be efficient, it would be
++ * necessary to decode 16 pixels at once".  These are the linear formats the driver asks for
++ * (the sRGB cases map here through util_format_linear), so one pass per block is enough.
++ * Anything not listed keeps the generic path.
++ */
++
++static inline void
++bc_expand565(unsigned c, uint8_t *out)
++{
++   const unsigned r5 = (c >> 11) & 0x1f, g6 = (c >> 5) & 0x3f, b5 = c & 0x1f;
++   out[0] = (r5 << 3) | (r5 >> 2);
++   out[1] = (g6 << 2) | (g6 >> 4);
++   out[2] = (b5 << 3) | (b5 >> 2);
++}
++
++/* The 8 alpha values of a BC4/BC5 block or the alpha half of a BC3 block. */
++static inline void
++bc_alpha_palette(const uint8_t *blk, uint8_t pal[8])
++{
++   const unsigned a0 = blk[0], a1 = blk[1];
++   pal[0] = a0;
++   pal[1] = a1;
++   if (a0 > a1) {
++      for (unsigned c = 2; c < 8; c++)
++         pal[c] = (a0 * (8 - c) + a1 * (c - 1)) / 7;
++   } else {
++      for (unsigned c = 2; c < 6; c++)
++         pal[c] = (a0 * (6 - c) + a1 * (c - 1)) / 5;
++      pal[6] = 0;
++      pal[7] = 255;
++   }
++}
++
++static inline uint64_t
++bc_alpha_bits(const uint8_t *blk)
++{
++   uint64_t bits = 0;
++   for (unsigned i = 0; i < 6; i++)
++      bits |= (uint64_t)blk[2 + i] << (8 * i);
++   return bits;
++}
++
++static bool
++bc_decode_s3tc(enum pipe_format fmt, uint8_t *dst, unsigned dst_row, const uint8_t *src,
++               unsigned src_row, unsigned width, unsigned height)
++{
++   const bool dxt1 = fmt == PIPE_FORMAT_DXT1_RGB || fmt == PIPE_FORMAT_DXT1_RGBA;
++   const bool dxt1_rgba = fmt == PIPE_FORMAT_DXT1_RGBA;
++   const bool dxt3 = fmt == PIPE_FORMAT_DXT3_RGBA;
++   const bool dxt5 = fmt == PIPE_FORMAT_DXT5_RGBA;
++   if (!dxt1 && !dxt3 && !dxt5)
++      return false;
++
++   const unsigned block = util_format_get_blocksize(fmt); /* 8 for DXT1, 16 for DXT3/DXT5 */
++   const unsigned bw = width / 4, bh = height / 4;
++
++   for (unsigned by = 0; by < bh; by++) {
++      const uint8_t *s = src + (size_t)by * src_row;
++      uint8_t *d = dst + (size_t)by * 4 * dst_row;
++      for (unsigned bx = 0; bx < bw; bx++, s += block, d += 16) {
++         /* BC2/BC3 always use 4 colors; BC1 uses 3 when color0 <= color1. */
++         const uint8_t *cb = dxt1 ? s : s + 8;
++         const unsigned c0 = cb[0] | (cb[1] << 8);
++         const unsigned c1 = cb[2] | (cb[3] << 8);
++         const bool four = !dxt1 || c0 > c1;
++         const uint32_t cbits = cb[4] | (cb[5] << 8) | (cb[6] << 16) | ((uint32_t)cb[7] << 24);
++
++         uint8_t pal[4][3];
++         bc_expand565(c0, pal[0]);
++         bc_expand565(c1, pal[1]);
++         for (unsigned k = 0; k < 3; k++) {
++            if (four) {
++               pal[2][k] = (pal[0][k] * 2 + pal[1][k]) / 3;
++               pal[3][k] = (pal[0][k] + pal[1][k] * 2) / 3;
++            } else {
++               pal[2][k] = (pal[0][k] + pal[1][k]) / 2;
++               pal[3][k] = 0;
++            }
++         }
++
++         uint8_t apal[8];
++         uint64_t abits = 0;
++         if (dxt5) {
++            bc_alpha_palette(s, apal);
++            abits = bc_alpha_bits(s);
++         }
++         /* BC1_RGBA in 3-color mode is transparent; BC1_RGB has no alpha. */
++         const uint8_t c3_alpha = dxt1_rgba && !four ? 0 : 255;
++
++         for (unsigned j = 0; j < 4; j++) {
++            uint8_t *row = d + (size_t)j * dst_row;
++            for (unsigned i = 0; i < 4; i++) {
++               const unsigned t = j * 4 + i;
++               const unsigned code = (cbits >> (2 * t)) & 3;
++               row[i * 4 + 0] = pal[code][0];
++               row[i * 4 + 1] = pal[code][1];
++               row[i * 4 + 2] = pal[code][2];
++               if (dxt1)
++                  row[i * 4 + 3] = code == 3 ? c3_alpha : 255;
++               else if (dxt3)
++                  row[i * 4 + 3] = (s[t >> 1] >> ((t & 1) * 4) & 0xf) * 17;
++               else
++                  row[i * 4 + 3] = apal[(abits >> (3 * t)) & 7];
++            }
++         }
++      }
++   }
++   return true;
++}
++
++/* BC4/BC5: one 8-byte block per channel, same endpoint scheme as the alpha half of BC3. */
++static bool
++bc_decode_rgtc(enum pipe_format fmt, uint8_t *dst, unsigned dst_row, const uint8_t *src,
++               unsigned src_row, unsigned width, unsigned height)
++{
++   const bool bc5 = fmt == PIPE_FORMAT_RGTC2_UNORM;
++   if (!bc5 && fmt != PIPE_FORMAT_RGTC1_UNORM)
++      return false;
++
++   const unsigned comps = bc5 ? 2 : 1;
++   const unsigned block = util_format_get_blocksize(fmt); /* 8 for BC4, 16 for BC5 */
++   const unsigned bw = width / 4, bh = height / 4;
++
++   for (unsigned by = 0; by < bh; by++) {
++      const uint8_t *s = src + (size_t)by * src_row;
++      uint8_t *d = dst + (size_t)by * 4 * dst_row;
++      for (unsigned bx = 0; bx < bw; bx++, s += block, d += 4 * comps) {
++         for (unsigned ch = 0; ch < comps; ch++) {
++            const uint8_t *blk = s + ch * 8;
++            uint8_t pal[8];
++            bc_alpha_palette(blk, pal);
++            const uint64_t bits = bc_alpha_bits(blk);
++            for (unsigned j = 0; j < 4; j++) {
++               uint8_t *row = d + (size_t)j * dst_row;
++               for (unsigned i = 0; i < 4; i++)
++                  row[i * comps + ch] = pal[(bits >> (3 * (j * 4 + i))) & 7];
++            }
++         }
++      }
++   }
++   return true;
++}
++
++static void
++bc_decode_task(void *job, void *gdata, int thread_index)
++{
++   const struct vn_dd_bc_task *task = job;
++   /* A task is a band at y0 within the slice. util_format_translate is told that with its
++    * dst_y/src_y arguments, but the fast paths always start at their own first block, so the
++    * band offset has to be added to their pointers. y0 is a whole number of 4-texel block rows
++    * (the split rounds the band height down to a multiple of 4). */
++   const unsigned src_y = task->y0 / 4;
++   const uint8_t *src = task->src + (size_t)src_y * task->job.src_row;
++   uint8_t *dst = task->dst + (size_t)task->y0 * task->job.dst_row;
++   if (bc_decode_s3tc(task->job.src_format, dst, task->job.dst_row, src,
++                      (unsigned)task->job.src_row, task->job.width, task->height))
++      return;
++   if (bc_decode_rgtc(task->job.src_format, dst, task->job.dst_row, src,
++                      (unsigned)task->job.src_row, task->job.width, task->height))
++      return;
++   /* src_y is in block rows, not texel rows, because src_row is one block row. */
++   util_format_translate(task->job.dst_format, task->dst, task->job.dst_row, 0, task->y0,
++                         task->job.src_format, task->src, (unsigned)task->job.src_row, 0,
++                         task->y0 / util_format_get_blockheight(task->job.src_format),
++                         task->job.width, task->height);
++}
++
++/* Threads to decode with: one per CPU, or DROIDDECK_VN_BC_THREADS (1 keeps the old
++ * single-threaded path). */
++static unsigned bc_thread_count;
++
++static void
++bc_threads_init(void)
++{
++   int64_t n = debug_get_num_option("DROIDDECK_VN_BC_THREADS", 0);
++   if (n <= 0)
++      n = util_get_cpu_caps()->nr_cpus;
++   bc_thread_count = (unsigned)CLAMP(n, 1, 16);
++}
++
++static unsigned
++bc_threads(void)
++{
++   static once_flag threads_once = ONCE_FLAG_INIT;
++
++   /* Two threads can reach a submit at the same time, so the choice has to be made once. */
++   call_once(&threads_once, bc_threads_init);
++   return bc_thread_count;
++}
++
++/* The decoder threads, made on first use. */
++static void
++bc_decoder_init(void)
++{
++   if (bc_threads() > 1)
++      util_queue_init(&bc_queue, "ddbc", 64, bc_threads(), 0, NULL);
++}
++
++static void
++bc_decode_tasks(struct vn_dd_bc_task *tasks, unsigned count)
++{
++   static once_flag decode_once = ONCE_FLAG_INIT;
++
++   call_once(&decode_once, bc_decoder_init);
++
++   if (util_queue_is_initialized(&bc_queue)) {
++      for (unsigned i = 0; i < count; i++)
++         util_queue_add_job(&bc_queue, &tasks[i], NULL, bc_decode_task, NULL, sizeof(tasks[i]));
++      util_queue_finish(&bc_queue);
++   } else {
++      for (unsigned i = 0; i < count; i++)
++         bc_decode_task(&tasks[i], NULL, 0);
++   }
++}
++
++static void
++bc_decode_cmd(struct vn_command_buffer *cmd)
++{
++   struct vn_dd_bc_cmd *state = cmd->dd_bc;
++   if (!state || !util_dynarray_num_elements(&state->jobs, struct vn_dd_bc_job))
++      return;
++   struct vn_device *dev = vn_device_from_vk(cmd->base.vk.pool->base.device);
++   const int64_t start = os_time_get_nano();
++   uint64_t missing = 0;
++
++   const unsigned n_jobs = util_dynarray_num_elements(&state->jobs, struct vn_dd_bc_job);
++   struct vn_dd_bc_job *jobs = util_dynarray_begin(&state->jobs);
++
++   /* A texture is often uploaded in one slice: split slices so that such an upload still has
++    * work for every thread. */
++   const unsigned threads = bc_threads();
++   const unsigned target = threads * 4;
++   struct vn_dd_bc_task *tasks = NULL;
++   unsigned n_tasks = 0, cap = 0;
++   bool split_failed = false;
++
++   for (unsigned i = 0; i < n_jobs && !split_failed; i++) {
++      struct vn_dd_bc_job *job = &jobs[i];
++      struct vn_buffer *buf = vn_buffer_from_handle(job->src);
++      struct vn_device_memory *mem = buf ? vn_device_memory_from_handle(buf->dd_memory) : NULL;
++      const uint8_t *base = mem && mem->base_bo ? vn_renderer_bo_map(dev->renderer, mem->base_bo) : NULL;
++      const VkDeviceSize start_off = buf ? buf->dd_memory_offset + job->src_offset : 0;
++      const VkDeviceSize need = job->src_slice * job->slices;
++      if (!base || start_off + need > mem->base.vk.size) {
++         missing++;
++         continue;
++      }
++      unsigned rows_per_slice = job->height;
++      if (n_jobs < target && job->slices == 1 && job->height > 4) {
++         rows_per_slice = (job->height / DIV_ROUND_UP(target, n_jobs) / 4) * 4;
++         if (!rows_per_slice)
++            rows_per_slice = job->height;
++      }
++      for (uint32_t s = 0; s < job->slices; s++) {
++         const uint8_t *slice = base + start_off + s * job->src_slice;
++         for (uint32_t y = 0; y < job->height; y += rows_per_slice) {
++            const uint32_t h = MIN2(rows_per_slice, job->height - y);
++            if (n_tasks == cap) {
++               cap = cap ? cap * 2 : 64;
++               struct vn_dd_bc_task *grown = realloc(tasks, cap * sizeof(*tasks));
++               if (!grown) {
++                  split_failed = true;
++                  break;
++               }
++               tasks = grown;
++            }
++            tasks[n_tasks++] = (struct vn_dd_bc_task){
++               .job = *job,
++               .src = slice,
++               .dst = job->dst + s * job->dst_slice,
++               .y0 = y,
++               .height = h,
++            };
++         }
++         if (split_failed)
++            break;
++      }
++   }
++
++   if (!split_failed) {
++      if (n_tasks > 1)
++         bc_decode_tasks(tasks, n_tasks);
++      else if (n_tasks == 1)
++         bc_decode_task(&tasks[0], NULL, 0);
++   } else {
++      /* the split ran out of memory: decode the jobs one slice at a time instead */
++      for (unsigned i = 0; i < n_jobs; i++) {
++         struct vn_dd_bc_job *job = &jobs[i];
++         struct vn_buffer *buf = vn_buffer_from_handle(job->src);
++         struct vn_device_memory *mem = buf ? vn_device_memory_from_handle(buf->dd_memory) : NULL;
++         const uint8_t *base = mem && mem->base_bo ? vn_renderer_bo_map(dev->renderer, mem->base_bo) : NULL;
++         if (!base)
++            continue;
++         const VkDeviceSize start_off = buf->dd_memory_offset + job->src_offset;
++         for (uint32_t s = 0; s < job->slices; s++) {
++            util_format_translate(job->dst_format, job->dst + s * job->dst_slice, job->dst_row, 0, 0,
++                                  job->src_format, base + start_off + s * job->src_slice,
++                                  (unsigned)job->src_row, 0, 0, job->width, job->height);
++         }
++      }
++   }
++   free(tasks);
++
++   if (missing) {
++      static int logged;
++      bc_log_once(&logged, "a BC upload from memory the driver has not mapped: that texture stays empty");
++   }
++   bc_stats_add(0, 0, 0, 0, 0, os_time_get_nano() - start, 0, missing);
++}
++
++void
++vn_dd_bc_submit(uint32_t batch_count,
++                const VkSubmitInfo *batches,
++                const VkSubmitInfo2 *batches2)
++{
++   if (!(vn_dd_emu_global & VN_DD_EMU_BC))
++      return;
++   for (uint32_t i = 0; i < batch_count; i++) {
++      const uint32_t n = batches ? batches[i].commandBufferCount : batches2[i].commandBufferInfoCount;
++      for (uint32_t j = 0; j < n; j++) {
++         VkCommandBuffer h = batches ? batches[i].pCommandBuffers[j]
++                                     : batches2[i].pCommandBufferInfos[j].commandBuffer;
++         struct vn_command_buffer *cmd = vn_command_buffer_from_handle(h);
++         if (cmd)
++            bc_decode_cmd(cmd);
++      }
++   }
++}
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.h b/src/virtio/vulkan/vn_droiddeck_bc.h
+new file mode 100644
+--- /dev/null
++++ b/src/virtio/vulkan/vn_droiddeck_bc.h
+@@ -0,0 +1,97 @@
++/*
++ * DroidDeck: BC (S3TC/RGTC/BPTC) compressed textures for DXVK on a GPU without them (Mali).
++ * BC images are made in an uncompressed format of the same texel count (BC1/2/3/7: RGBA8,
++ * BC4: R8, BC5: RG8, BC6H: RGBA16F; sRGB kept). An upload (vkCmdCopyBufferToImage) into one
++ * copies from a staging buffer of the driver's instead, which is filled at vkQueueSubmit by
++ * decoding the program's compressed data on the CPU. Format queries for BC formats answer
++ * with what the uncompressed format can do for sampling and copies.
++ * Copies that would need the compressed bytes back (image to buffer, BC to uncompressed
++ * images) are left out and logged. Part of DROIDDECK_VN_EMULATE (see vn_droiddeck_emu.h).
++ */
++#ifndef VN_DROIDDECK_BC_H
++#define VN_DROIDDECK_BC_H
++
++#include "vn_common.h"
++
++struct vn_physical_device;
++struct vn_command_buffer;
++
++/* the uncompressed format a BC format is made as on this device, VK_FORMAT_UNDEFINED when
++ * the format is not emulated */
++VkFormat
++vn_dd_bc_substitute(const struct vn_physical_device *physical_dev, VkFormat format);
++
++/* format features a BC format has when emulated (from its substitute's) */
++void
++vn_dd_bc_fix_format_properties(VkFormatProperties2 *props);
++
++/* image (and image format query) create infos: the program's struct is copied with the
++ * substitute format, and a format list in its chain is changed in place until _end */
++struct vn_dd_bc_fix {
++   VkFormat orig;
++   VkImageFormatListCreateInfo *list;
++   const VkFormat *list_formats;
++   uint32_t list_count;
++   VkFormat formats[32];
++};
++
++const VkImageCreateInfo *
++vn_dd_bc_image_info_begin(const struct vn_physical_device *physical_dev,
++                          const VkImageCreateInfo *info,
++                          VkImageCreateInfo *local,
++                          struct vn_dd_bc_fix *fix);
++const VkPhysicalDeviceImageFormatInfo2 *
++vn_dd_bc_format_info_begin(const struct vn_physical_device *physical_dev,
++                           const VkPhysicalDeviceImageFormatInfo2 *info,
++                           VkPhysicalDeviceImageFormatInfo2 *local,
++                           struct vn_dd_bc_fix *fix);
++void
++vn_dd_bc_info_end(struct vn_dd_bc_fix *fix);
++
++/* an image just made from a fixed create info */
++void
++vn_dd_bc_image_created(VkImage image, VkFormat orig);
++
++/* the view format for an image's view */
++VkFormat
++vn_dd_bc_view_format(VkImage image, VkFormat format);
++
++/* vkCmdCopyBufferToImage(2) into an emulated image: regions for a copy from the driver's
++ * staging buffer, recorded by the caller with *staging; false when the image is not
++ * emulated */
++struct vn_dd_bc_copy {
++   VkBuffer staging;
++   uint32_t count;
++   VkBufferImageCopy *regions;
++};
++bool
++vn_dd_bc_copy_begin(VkCommandBuffer cmd_handle,
++                    VkBuffer src,
++                    VkImage dst,
++                    uint32_t count,
++                    const VkBufferImageCopy *regions,
++                    const VkBufferImageCopy2 *regions2,
++                    struct vn_dd_bc_copy *copy);
++void
++vn_dd_bc_copy_end(struct vn_dd_bc_copy *copy);
++
++/* copies that read an emulated image as compressed data: true when to leave out */
++bool
++vn_dd_bc_drop_image_copy(VkImage src, VkImage dst);
++bool
++vn_dd_bc_drop_image_to_buffer(VkImage src);
++
++/* a command buffer's staging memory and pending decodes */
++void
++vn_dd_bc_cmd_reset(struct vn_command_buffer *cmd);
++/* at vkQueueSubmit(2): decode what the command buffers upload */
++void
++vn_dd_bc_submit(uint32_t batch_count,
++                const VkSubmitInfo *batches,
++                const VkSubmitInfo2 *batches2);
++
++/* the memory a buffer is bound to (to read uploads at submit) */
++void
++vn_dd_bc_buffer_bound(const VkBindBufferMemoryInfo *bind);
++
++#endif /* VN_DROIDDECK_BC_H */
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_emu.c b/src/virtio/vulkan/vn_droiddeck_emu.c
+--- a/src/virtio/vulkan/vn_droiddeck_emu.c
++++ b/src/virtio/vulkan/vn_droiddeck_emu.c
+@@ -10,6 +10,8 @@
+ #include <string.h>
+ 
+ #include "vk_util.h"
++#include "util/u_debug.h"
++#include "util/bitscan.h"
+ 
+ #include "vn_instance.h"
+ #include "vn_physical_device.h"
+@@ -56,6 +58,9 @@
+       emu |= VN_DD_EMU_CLIP_DISTANCE;
+    if (all || !f->shaderCullDistance)
+       emu |= VN_DD_EMU_CULL_DISTANCE;
++   /* DROIDDECK_VN_EMULATE_BC=0 leaves BC textures out */
++   if ((all || !f->textureCompressionBC) && debug_get_bool_option("DROIDDECK_VN_EMULATE_BC", true))
++      emu |= VN_DD_EMU_BC;
+ 
+    if (emu & VN_DD_EMU_RBA2)
+       f->robustBufferAccess2 = true;
+@@ -67,15 +72,18 @@
+       f->shaderClipDistance = true;
+    if (emu & VN_DD_EMU_CULL_DISTANCE)
+       f->shaderCullDistance = true;
++   if (emu & VN_DD_EMU_BC)
++      f->textureCompressionBC = true;
+    physical_dev->dd_emu = emu;
+    vn_dd_emu_global = emu;
+ 
+-   vn_droiddeck_log("emulated for DXVK on %s:%s%s%s%s%s%s", physical_dev->base.vk.properties.deviceName,
++   vn_droiddeck_log("emulated for DXVK on %s:%s%s%s%s%s%s%s", physical_dev->base.vk.properties.deviceName,
+                     emu & VN_DD_EMU_RBA2 ? " robustBufferAccess2" : "",
+                     emu & VN_DD_EMU_FILL_MODE ? " fillModeNonSolid" : "",
+                     emu & VN_DD_EMU_MULTI_VIEWPORT ? " multiViewport" : "",
+                     emu & VN_DD_EMU_CLIP_DISTANCE ? " shaderClipDistance" : "",
+                     emu & VN_DD_EMU_CULL_DISTANCE ? " shaderCullDistance" : "",
++                    emu & VN_DD_EMU_BC ? " textureCompressionBC" : "",
+                     emu ? "" : " nothing (the GPU has them all)");
+ }
+ 
+@@ -111,6 +119,8 @@
+          core->shaderClipDistance = VK_FALSE;
+       if (emu & VN_DD_EMU_CULL_DISTANCE)
+          core->shaderCullDistance = VK_FALSE;
++      if (emu & VN_DD_EMU_BC)
++         core->textureCompressionBC = VK_FALSE;
+       /* robustBufferAccess2 asked: the GPU's robustBufferAccess stands in for it */
+       if (saved->rba2 && saved->rba2_saved)
+          core->robustBufferAccess = VK_TRUE;
+@@ -170,11 +180,10 @@
+    return true;
+ }
+ 
+-uint32_t *
+-vn_dd_emu_rewrite_spirv(uint32_t emu, const uint32_t *code, size_t size, size_t *out_size)
++static uint32_t *
++dd_rewrite_standalone(uint32_t emu, const uint32_t *code, size_t size, size_t *out_size)
+ {
+-   if (!(emu & (VN_DD_EMU_CLIP_DISTANCE | VN_DD_EMU_CULL_DISTANCE)) || size < 20 || (size & 3) ||
+-       code[0] != 0x07230203)
++   if (size < 20 || (size & 3) || code[0] != 0x07230203)
+       return NULL;
+    const size_t nwords = size / 4;
+    const uint32_t bound = code[3];
+@@ -215,7 +224,7 @@
+    if (member) {
+       static unsigned notes;
+       if (++notes <= 5)
+-         vn_droiddeck_log("SPIR-V: a clip/cull distance inside an I/O block: left as it is (not handled yet)");
++         vn_droiddeck_log("SPIR-V: a clip/cull distance inside an I/O block after the block pass: left as it is");
+    }
+    if (!any)
+       goto unchanged;
+@@ -353,6 +362,360 @@
+    return NULL;
+ }
+ 
++/* Clip/cull distances as members of an I/O block (gl_PerVertex: DXVK's vertex, geometry and
++ * tessellation shaders): the members are removed from the block type, and access chains to
++ * them go to a Private variable of the member's type instead (one per block member,
++ * zero-initialised); chains to later members get their index lowered. The capabilities go
++ * too. Whole-block values (OpCompositeExtract/Insert on the block type) are counted and left.
++ * Returns a malloc'ed module or NULL when there is nothing to do. */
++enum {
++   DD_OpMemberName = 6,
++   DD_OpTypeInt = 21,
++   DD_OpTypeArray = 28,
++   DD_OpTypeRuntimeArray = 29,
++   DD_OpTypeStruct = 30,
++   DD_OpConstant = 43,
++   DD_OpConstantNull = 46,
++   DD_OpCompositeExtract = 81,
++   DD_OpCompositeInsert = 82,
++};
++
++#define DD_MAX_NEW 256
++
++static uint32_t *
++dd_rewrite_blocks(uint32_t emu, const uint32_t *code, size_t size, size_t *out_size)
++{
++   if (size < 20 || (size & 3) || code[0] != 0x07230203)
++      return NULL;
++   const size_t nwords = size / 4;
++   const uint32_t bound = code[3];
++   const uint32_t version = code[1];
++
++   uint32_t *removed = calloc(bound, sizeof(uint32_t)); /* struct id -> member bits */
++   size_t *def = calloc(bound, sizeof(size_t));          /* id -> word index of its definition */
++   uint32_t *val_type = calloc(bound, sizeof(uint32_t)); /* pointer value -> its pointer type */
++   uint32_t *priv_ptr = calloc(bound, sizeof(uint32_t)); /* pointee -> Private pointer type */
++   uint8_t *is_priv = calloc(bound, 1);                  /* pointer value now Private */
++   if (!removed || !def || !val_type || !priv_ptr || !is_priv)
++      goto none;
++
++   bool any = false;
++   for (size_t i = 5; i < nwords;) {
++      const uint32_t op = code[i] & 0xffff, wc = code[i] >> 16;
++      if (!wc || i + wc > nwords)
++         goto none;
++      switch (op) {
++      case DD_OpTypeInt:
++      case DD_OpTypeArray:
++      case DD_OpTypeRuntimeArray:
++      case DD_OpTypeStruct:
++         if (wc >= 2 && code[i + 1] < bound)
++            def[code[i + 1]] = i;
++         break;
++      case DD_OpTypePointer:
++         if (wc == 4 && code[i + 1] < bound) {
++            def[code[i + 1]] = i;
++            if (code[i + 2] == DD_StoragePrivate && code[i + 3] < bound)
++               priv_ptr[code[i + 3]] = code[i + 1];
++         }
++         break;
++      case DD_OpConstant:
++      case DD_OpVariable:
++         if (wc >= 3 && code[i + 2] < bound) {
++            def[code[i + 2]] = i;
++            val_type[code[i + 2]] = code[i + 1];
++         }
++         break;
++      case DD_OpMemberDecorate:
++         if (wc >= 5 && code[i + 3] == DD_DecorationBuiltIn &&
++             (code[i + 4] == DD_BuiltInClipDistance || code[i + 4] == DD_BuiltInCullDistance) &&
++             code[i + 1] < bound && code[i + 2] < 32) {
++            removed[code[i + 1]] |= 1u << code[i + 2];
++            any = true;
++         }
++         break;
++      default:
++         break;
++      }
++      i += wc;
++   }
++   if (!any)
++      goto none;
++
++   /* new ids: Private pointer types (by pointee), per (struct, member) a variable and its null
++    * initializer, and index constants (by old constant) */
++   uint32_t next = bound;
++   struct { uint32_t pointee, id; } nptr[DD_MAX_NEW];
++   unsigned n_nptr = 0;
++   struct { uint32_t st, m, type, ptr, null_id, var; } pv[32];
++   unsigned n_pv = 0;
++   struct { uint32_t old_const, value, id; } ncon[DD_MAX_NEW];
++   unsigned n_ncon = 0;
++   unsigned composites = 0;
++
++#define DD_PRIV_PTR(pointee_, out_) do { \
++      uint32_t p_ = (pointee_) < bound ? priv_ptr[(pointee_)] : 0; \
++      for (unsigned q_ = 0; !p_ && q_ < n_nptr; q_++) \
++         if (nptr[q_].pointee == (pointee_)) p_ = nptr[q_].id; \
++      if (!p_) { \
++         if (n_nptr == DD_MAX_NEW) goto none; \
++         p_ = next++; nptr[n_nptr].pointee = (pointee_); nptr[n_nptr].id = p_; n_nptr++; \
++      } \
++      (out_) = p_; \
++   } while (0)
++
++   /* chains: what each becomes (by word index) */
++   struct dd_chain { size_t at; uint32_t res_type; uint32_t base; int cut; int idx_pos; uint32_t idx_new; };
++   struct dd_chain *chains = NULL;
++   size_t n_chains = 0, cap_chains = 0;
++   for (size_t i = 5; i < nwords;) {
++      const uint32_t op = code[i] & 0xffff, wc = code[i] >> 16;
++      if ((op == DD_OpCompositeExtract || op == DD_OpCompositeInsert))
++         composites++; /* checked against the block types below, cheaply: counted only */
++      if ((op == DD_OpAccessChain || op == DD_OpInBoundsAccessChain) && wc >= 4 &&
++          code[i + 2] < bound && code[i + 3] < bound) {
++         const uint32_t res = code[i + 2], base = code[i + 3];
++         val_type[res] = code[i + 1];
++         struct dd_chain c = { i, 0, 0, -1, -1, 0 };
++         const uint32_t bt = val_type[base];
++         uint32_t cur = (bt < bound && def[bt]) ? code[def[bt] + 3] : 0;
++         for (uint32_t k = 4; k < wc && cur && cur < bound && def[cur]; k++) {
++            const size_t d = def[cur];
++            const uint32_t top = code[d] & 0xffff;
++            if (top == DD_OpTypeArray || top == DD_OpTypeRuntimeArray) {
++               cur = code[d + 2];
++               continue;
++            }
++            if (top != DD_OpTypeStruct)
++               break;
++            const uint32_t idx = code[i + k];
++            if (idx >= bound || !def[idx] || (code[def[idx]] & 0xffff) != DD_OpConstant)
++               break;
++            const uint32_t m = code[def[idx] + 3];
++            const uint32_t nmem = (code[d] >> 16) - 2;
++            if (m >= nmem)
++               break;
++            const uint32_t bits = removed[cur];
++            if (bits & (1u << m)) {
++               unsigned q = 0;
++               while (q < n_pv && !(pv[q].st == cur && pv[q].m == m))
++                  q++;
++               if (q == n_pv) {
++                  if (n_pv == 32)
++                     goto none;
++                  pv[q].st = cur;
++                  pv[q].m = m;
++                  pv[q].type = code[d + 2 + m];
++                  DD_PRIV_PTR(pv[q].type, pv[q].ptr);
++                  pv[q].null_id = next++;
++                  pv[q].var = next++;
++                  n_pv++;
++               }
++               c.base = pv[q].var;
++               c.cut = (int)k + 1; /* indices after this one stay */
++               break;
++            }
++            if (bits & ((1u << m) - 1)) {
++               const uint32_t value = m - util_bitcount(bits & ((1u << m) - 1));
++               unsigned q = 0;
++               while (q < n_ncon && !(ncon[q].old_const == idx && ncon[q].value == value))
++                  q++;
++               if (q == n_ncon) {
++                  if (n_ncon == DD_MAX_NEW)
++                     goto none;
++                  ncon[q].old_const = idx;
++                  ncon[q].value = value;
++                  ncon[q].id = next++;
++                  n_ncon++;
++               }
++               c.idx_pos = (int)k;
++               c.idx_new = ncon[q].id;
++            }
++            cur = code[d + 2 + m];
++         }
++         if (c.base || is_priv[base]) {
++            is_priv[res] = 1;
++            const uint32_t rt = code[i + 1];
++            DD_PRIV_PTR(rt < bound && def[rt] ? code[def[rt] + 3] : 0, c.res_type);
++         }
++         if (c.base || c.res_type || c.idx_pos >= 0) {
++            if (n_chains == cap_chains) {
++               cap_chains = cap_chains ? cap_chains * 2 : 64;
++               struct dd_chain *nc = realloc(chains, cap_chains * sizeof(*chains));
++               if (!nc)
++                  goto none_chains;
++               chains = nc;
++            }
++            chains[n_chains++] = c;
++         }
++      }
++      i += wc;
++   }
++
++   /* write it out */
++   struct dd_words o = { 0 };
++   uint32_t header[5] = { code[0], code[1], code[2], next, code[4] };
++   if (!dd_push(&o, header, 5))
++      goto fail;
++   size_t ci = 0;
++   for (size_t i = 5; i < nwords;) {
++      const uint32_t op = code[i] & 0xffff, wc = code[i] >> 16;
++      const uint32_t *in = code + i;
++      const size_t at = i;
++      i += wc;
++      if (op == DD_OpCapability &&
++          (((in[1] == DD_CapabilityClipDistance) && (emu & VN_DD_EMU_CLIP_DISTANCE)) ||
++           ((in[1] == DD_CapabilityCullDistance) && (emu & VN_DD_EMU_CULL_DISTANCE))))
++         continue;
++      if ((op == DD_OpMemberDecorate || op == DD_OpMemberName) && wc >= 3 && in[1] < bound &&
++          removed[in[1]] && in[2] < 32) {
++         const uint32_t bits = removed[in[1]];
++         if (bits & (1u << in[2]))
++            continue;
++         if (!dd_push(&o, in, wc))
++            goto fail;
++         o.w[o.n - wc + 2] = in[2] - util_bitcount(bits & ((1u << in[2]) - 1));
++         continue;
++      }
++      if (op == DD_OpEntryPoint && version >= 0x00010400 && n_pv) {
++         /* from SPIR-V 1.4 the interface lists every global variable the entry point uses */
++         if (!dd_push(&o, in, wc))
++            goto fail;
++         for (unsigned q = 0; q < n_pv; q++)
++            if (!dd_push(&o, &pv[q].var, 1))
++               goto fail;
++         o.w[o.n - wc - n_pv] = ((wc + n_pv) << 16) | op;
++         continue;
++      }
++      if (op == DD_OpTypeStruct && wc >= 2 && in[1] < bound && removed[in[1]]) {
++         const uint32_t bits = removed[in[1]];
++         uint32_t buf[64];
++         if (wc > 64)
++            goto fail;
++         uint32_t n = 0;
++         buf[n++] = 0;
++         buf[n++] = in[1];
++         for (uint32_t m = 0; m + 2 < wc; m++)
++            if (!(bits & (1u << m)))
++               buf[n++] = in[2 + m];
++         buf[0] = (n << 16) | op;
++         if (!dd_push(&o, buf, n))
++            goto fail;
++         continue;
++      }
++      if (ci < n_chains && chains[ci].at == at) {
++         const struct dd_chain *c = &chains[ci++];
++         uint32_t buf[64];
++         if (wc > 64)
++            goto fail;
++         uint32_t n = 0;
++         buf[n++] = 0;
++         buf[n++] = c->res_type ? c->res_type : in[1];
++         buf[n++] = in[2];
++         buf[n++] = c->base ? c->base : in[3];
++         for (uint32_t k = c->base ? (uint32_t)c->cut : 4; k < wc; k++)
++            buf[n++] = ((int)k == c->idx_pos) ? c->idx_new : in[k];
++         buf[0] = (n << 16) | op;
++         if (!dd_push(&o, buf, n))
++            goto fail;
++         continue;
++      }
++      if (!dd_push(&o, in, wc))
++         goto fail;
++      /* new declarations right after what they refer to */
++      const uint32_t defined = (op == DD_OpConstant || op == DD_OpVariable) && wc >= 3 ? in[2]
++                               : (wc >= 2 && (op == DD_OpTypeInt || op == DD_OpTypeArray ||
++                                              op == DD_OpTypeRuntimeArray || op == DD_OpTypeStruct ||
++                                              op == DD_OpTypePointer || op == 22 /* OpTypeFloat */ ||
++                                              op == 23 /* OpTypeVector */))
++                                    ? in[1]
++                                    : 0;
++      if (!defined)
++         continue;
++      for (unsigned q = 0; q < n_nptr; q++) {
++         if (nptr[q].pointee == defined) {
++            const uint32_t t[4] = { (4u << 16) | DD_OpTypePointer, nptr[q].id, DD_StoragePrivate, defined };
++            if (!dd_push(&o, t, 4))
++               goto fail;
++            for (unsigned v = 0; v < n_pv; v++) {
++               if (pv[v].type == defined) {
++                  const uint32_t nl[3] = { (3u << 16) | DD_OpConstantNull, defined, pv[v].null_id };
++                  const uint32_t vr[5] = { (5u << 16) | DD_OpVariable, pv[v].ptr, pv[v].var, DD_StoragePrivate,
++                                           pv[v].null_id };
++                  if (!dd_push(&o, nl, 3) || !dd_push(&o, vr, 5))
++                     goto fail;
++               }
++            }
++         }
++      }
++      /* a member type whose Private pointer type existed already */
++      for (unsigned v = 0; v < n_pv; v++) {
++         if (pv[v].ptr < bound && pv[v].ptr == defined) {
++            const uint32_t nl[3] = { (3u << 16) | DD_OpConstantNull, pv[v].type, pv[v].null_id };
++            const uint32_t vr[5] = { (5u << 16) | DD_OpVariable, pv[v].ptr, pv[v].var, DD_StoragePrivate,
++                                     pv[v].null_id };
++            if (!dd_push(&o, nl, 3) || !dd_push(&o, vr, 5))
++               goto fail;
++         }
++      }
++      for (unsigned q = 0; q < n_ncon; q++) {
++         if (ncon[q].old_const == defined) {
++            const uint32_t k[4] = { (4u << 16) | DD_OpConstant, in[1], ncon[q].id, ncon[q].value };
++            if (!dd_push(&o, k, 4))
++               goto fail;
++         }
++      }
++   }
++   free(chains);
++   free(removed); free(def); free(val_type); free(priv_ptr); free(is_priv);
++   {
++      static unsigned notes;
++      if (++notes <= 3 || notes % 100 == 0)
++         vn_droiddeck_log("SPIR-V: clip/cull distances taken out of an I/O block in shader #%u "
++                          "(%u member(s)%s)", notes, n_pv,
++                          composites ? "; the module also has composite extracts/inserts" : "");
++   }
++   *out_size = o.n * 4;
++   return o.w;
++
++fail:
++   free(o.w);
++none_chains:
++   free(chains);
++none:
++   free(removed); free(def); free(val_type); free(priv_ptr); free(is_priv);
++   return NULL;
++#undef DD_PRIV_PTR
++}
++
++uint32_t *
++vn_dd_emu_rewrite_spirv(uint32_t emu, const uint32_t *code, size_t size, size_t *out_size)
++{
++   if (!(emu & (VN_DD_EMU_CLIP_DISTANCE | VN_DD_EMU_CULL_DISTANCE)))
++      return NULL;
++   size_t bsize = 0;
++   uint32_t *blocks = dd_rewrite_blocks(emu, code, size, &bsize);
++   uint32_t *out = dd_rewrite_standalone(emu, blocks ? blocks : code, blocks ? bsize : size, out_size);
++   if (!out && blocks) {
++      *out_size = bsize;
++      /* DROIDDECK_VN_DUMP_SPIRV=<dir>: the rewritten modules, for spirv-val */
++      static unsigned dumps;
++      const char *dir = getenv("DROIDDECK_VN_DUMP_SPIRV");
++      if (dir && *dir) {
++         char path[512];
++         snprintf(path, sizeof(path), "%s/blocks-%u.spv", dir, ++dumps);
++         FILE *f = fopen(path, "wb");
++         if (f) {
++            fwrite(blocks, 1, bsize, f);
++            fclose(f);
++         }
++      }
++      return blocks;
++   }
++   free(blocks);
++   return out;
++}
++
+ /* ---- pipelines ---- */
+ 
+ static void
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_emu.h b/src/virtio/vulkan/vn_droiddeck_emu.h
+--- a/src/virtio/vulkan/vn_droiddeck_emu.h
++++ b/src/virtio/vulkan/vn_droiddeck_emu.h
+@@ -20,6 +20,7 @@
+ #define VN_DD_EMU_MULTI_VIEWPORT (1u << 2)
+ #define VN_DD_EMU_CLIP_DISTANCE (1u << 3)
+ #define VN_DD_EMU_CULL_DISTANCE (1u << 4)
++#define VN_DD_EMU_BC (1u << 5) /* vn_droiddeck_bc.h */
+ 
+ struct vn_physical_device;
+ struct vn_device;
+diff -ruN a/src/virtio/vulkan/vn_image.c b/src/virtio/vulkan/vn_image.c
+--- a/src/virtio/vulkan/vn_image.c
++++ b/src/virtio/vulkan/vn_image.c
+@@ -9,6 +9,7 @@
+  */
+ 
+ #include "vn_image.h"
++#include "vn_droiddeck_bc.h"
+ 
+ #include "venus-protocol/vn_protocol_driver_image.h"
+ #include "venus-protocol/vn_protocol_driver_image_view.h"
+@@ -622,6 +623,13 @@
+    return &local_info->create;
+ }
+ 
++static VkResult
++vn_create_image_impl(VkDevice device,
++                     const VkImageCreateInfo *pCreateInfo,
++                     const VkAllocationCallbacks *pAllocator,
++                     VkImage *pImage);
++
++/* droiddeck: BC images are made in an uncompressed format (vn_droiddeck_bc.h) */
+ VkResult
+ vn_CreateImage(VkDevice device,
+                const VkImageCreateInfo *pCreateInfo,
+@@ -629,6 +637,24 @@
+                VkImage *pImage)
+ {
+    struct vn_device *dev = vn_device_from_handle(device);
++   VkImageCreateInfo dd_local;
++   struct vn_dd_bc_fix dd_fix;
++   const VkImageCreateInfo *info =
++      vn_dd_bc_image_info_begin(dev->physical_device, pCreateInfo, &dd_local, &dd_fix);
++   VkResult result = vn_create_image_impl(device, info, pAllocator, pImage);
++   vn_dd_bc_info_end(&dd_fix);
++   if (result == VK_SUCCESS && dd_fix.orig)
++      vn_dd_bc_image_created(*pImage, dd_fix.orig);
++   return result;
++}
++
++static VkResult
++vn_create_image_impl(VkDevice device,
++                     const VkImageCreateInfo *pCreateInfo,
++                     const VkAllocationCallbacks *pAllocator,
++                     VkImage *pImage)
++{
++   struct vn_device *dev = vn_device_from_handle(device);
+    const VkAllocationCallbacks *alloc =
+       pAllocator ? pAllocator : &dev->base.vk.alloc;
+    const VkExternalMemoryHandleTypeFlagBits renderer_handle_type =
+@@ -923,6 +949,12 @@
+       pAllocator ? pAllocator : &dev->base.vk.alloc;
+ 
+    VkImageViewCreateInfo local_info;
++   VkImageViewCreateInfo dd_bc_info;
++   if (img->dd_bc_format) {
++      dd_bc_info = *pCreateInfo;
++      dd_bc_info.format = vn_dd_bc_view_format(pCreateInfo->image, pCreateInfo->format);
++      pCreateInfo = &dd_bc_info;
++   }
+    if (img->deferred_info && img->deferred_info->from_external_format) {
+       assert(pCreateInfo->format == VK_FORMAT_UNDEFINED);
+ 
+@@ -1089,6 +1121,12 @@
+    vk_free(alloc, conv);
+ }
+ 
++static void
++vn_dd_get_device_image_reqs(struct vn_device *dev,
++                            VkDevice device,
++                            const VkDeviceImageMemoryRequirements *pInfo,
++                            VkMemoryRequirements2 *pMemoryRequirements);
++
+ void
+ vn_GetDeviceImageMemoryRequirements(
+    VkDevice device,
+@@ -1097,6 +1135,27 @@
+ {
+    struct vn_device *dev = vn_device_from_handle(device);
+ 
++   /* droiddeck: BC images are made in an uncompressed format (vn_droiddeck_bc.h) */
++   VkImageCreateInfo dd_local;
++   struct vn_dd_bc_fix dd_fix;
++   VkDeviceImageMemoryRequirements dd_info;
++   const VkImageCreateInfo *dd_ci =
++      vn_dd_bc_image_info_begin(dev->physical_device, pInfo->pCreateInfo, &dd_local, &dd_fix);
++   if (dd_ci != pInfo->pCreateInfo) {
++      dd_info = *pInfo;
++      dd_info.pCreateInfo = dd_ci;
++      pInfo = &dd_info;
++   }
++   vn_dd_get_device_image_reqs(dev, device, pInfo, pMemoryRequirements);
++   vn_dd_bc_info_end(&dd_fix);
++}
++
++static void
++vn_dd_get_device_image_reqs(struct vn_device *dev,
++                            VkDevice device,
++                            const VkDeviceImageMemoryRequirements *pInfo,
++                            VkMemoryRequirements2 *pMemoryRequirements)
++{
+    uint8_t key[SHA1_DIGEST_LENGTH] = { 0 };
+    const bool cacheable =
+       vn_image_get_image_reqs_key(dev, pInfo->pCreateInfo, key);
+diff -ruN a/src/virtio/vulkan/vn_image.h b/src/virtio/vulkan/vn_image.h
+--- a/src/virtio/vulkan/vn_image.h
++++ b/src/virtio/vulkan/vn_image.h
+@@ -65,6 +65,9 @@
+     */
+    struct vn_image_create_deferred_info *deferred_info;
+ 
++   /* droiddeck: the BC format this image stands in for (vn_droiddeck_bc.h) */
++   VkFormat dd_bc_format;
++
+    struct {
+       /* True if this is a swapchain image and VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+        * is a valid layout.  A swapchain image can be created internally
+diff -ruN a/src/virtio/vulkan/vn_physical_device.c b/src/virtio/vulkan/vn_physical_device.c
+--- a/src/virtio/vulkan/vn_physical_device.c
++++ b/src/virtio/vulkan/vn_physical_device.c
+@@ -9,6 +9,7 @@
+  */
+ 
+ #include "vn_physical_device.h"
++#include "vn_droiddeck_bc.h"
+ 
+ #include "vk_enum_to_str.h"
+ #include "vn_droiddeck_emu.h"
+@@ -2204,6 +2205,13 @@
+ {
+    struct vn_physical_device *physical_dev =
+       vn_physical_device_from_handle(physicalDevice);
++   /* droiddeck: BC formats emulated (vn_droiddeck_bc.h) */
++   const VkFormat dd_bc_sub = vn_dd_bc_substitute(physical_dev, format);
++   if (dd_bc_sub) {
++      vn_GetPhysicalDeviceFormatProperties2(physicalDevice, dd_bc_sub, pFormatProperties);
++      vn_dd_bc_fix_format_properties(pFormatProperties);
++      return;
++   }
+    struct vn_ring *ring = physical_dev->instance->ring.ring;
+    VkFormatProperties *props = &pFormatProperties->formatProperties;
+    VkFormatProperties3 *props3 = NULL;
+@@ -2774,11 +2782,43 @@
+    }
+ }
+ 
++static VkResult
++vn_get_image_format_properties2_impl(
++   VkPhysicalDevice physicalDevice,
++   const VkPhysicalDeviceImageFormatInfo2 *pImageFormatInfo,
++   VkImageFormatProperties2 *pImageFormatProperties);
++
++/* droiddeck: BC formats emulated (vn_droiddeck_bc.h) */
+ VkResult
+ vn_GetPhysicalDeviceImageFormatProperties2(
+    VkPhysicalDevice physicalDevice,
+    const VkPhysicalDeviceImageFormatInfo2 *pImageFormatInfo,
+    VkImageFormatProperties2 *pImageFormatProperties)
++{
++   struct vn_physical_device *physical_dev =
++      vn_physical_device_from_handle(physicalDevice);
++   VkPhysicalDeviceImageFormatInfo2 dd_local;
++   struct vn_dd_bc_fix dd_fix;
++   const VkPhysicalDeviceImageFormatInfo2 *info =
++      vn_dd_bc_format_info_begin(physical_dev, pImageFormatInfo, &dd_local, &dd_fix);
++   VkResult result = VK_SUCCESS;
++   /* what a sampled, copied texture needs; nothing else is offered for BC formats */
++   const VkImageUsageFlags bc_usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
++                                      VK_IMAGE_USAGE_TRANSFER_DST_BIT;
++   if (dd_fix.orig && ((pImageFormatInfo->usage & ~bc_usage) ||
++                       pImageFormatInfo->tiling != VK_IMAGE_TILING_OPTIMAL))
++      result = VK_ERROR_FORMAT_NOT_SUPPORTED;
++   else
++      result = vn_get_image_format_properties2_impl(physicalDevice, info, pImageFormatProperties);
++   vn_dd_bc_info_end(&dd_fix);
++   return result;
++}
++
++static VkResult
++vn_get_image_format_properties2_impl(
++   VkPhysicalDevice physicalDevice,
++   const VkPhysicalDeviceImageFormatInfo2 *pImageFormatInfo,
++   VkImageFormatProperties2 *pImageFormatProperties)
+ {
+    struct vn_physical_device *physical_dev =
+       vn_physical_device_from_handle(physicalDevice);
+diff -ruN a/src/virtio/vulkan/vn_queue.c b/src/virtio/vulkan/vn_queue.c
+--- a/src/virtio/vulkan/vn_queue.c
++++ b/src/virtio/vulkan/vn_queue.c
+@@ -9,6 +9,7 @@
+  */
+ 
+ #include "vn_queue.h"
++#include "vn_droiddeck_bc.h"
+ 
+ #include "util/libsync.h"
+ #include "venus-protocol/vn_protocol_driver_event.h"
+@@ -1126,6 +1127,7 @@
+    VN_TRACE_FUNC();
+ 
+    vn_tls_set_async_pipeline_create();
++   vn_dd_bc_submit(submitCount, pSubmits, NULL);
+ 
+    struct vn_queue_submission submit = {
+       .batch_type = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+@@ -1147,6 +1149,7 @@
+    VN_TRACE_FUNC();
+ 
+    vn_tls_set_async_pipeline_create();
++   vn_dd_bc_submit(submitCount, NULL, pSubmits);
+ 
+    struct vn_queue_submission submit = {
+       .batch_type = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,

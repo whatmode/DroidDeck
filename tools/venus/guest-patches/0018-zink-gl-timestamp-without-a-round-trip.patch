@@ -1,0 +1,57 @@
+diff -ru a/src/gallium/drivers/zink/zink_query.c b/src/gallium/drivers/zink/zink_query.c
+--- a/src/gallium/drivers/zink/zink_query.c
++++ b/src/gallium/drivers/zink/zink_query.c
+@@ -7,6 +7,9 @@
+ #include "zink_screen.h"
+ 
+ #include "util/u_dump.h"
++#include "util/os_time.h"
++#include "util/simple_mtx.h"
++#include "util/u_debug.h"
+ #include "util/u_inlines.h"
+ #include "util/u_memory.h"
+ 
+@@ -1494,6 +1497,25 @@
+ {
+    struct zink_screen *screen = zink_screen(pscreen);
+    uint64_t timestamp, deviation;
++   /* droiddeck: GL_TIMESTAMP (Chromium asks every frame) costs a round trip to the GPU
++    * server over the Venus bridge (~0.8 ms on the GL thread, ~50 a second for Steam's UI).
++    * The GPU's clock is read once every DROIDDECK_ZINK_TIMESTAMP_MS (default 1000; 0 always
++    * asks) and advanced by the CPU's monotonic clock in between. */
++   static simple_mtx_t dd_ts_lock = SIMPLE_MTX_INITIALIZER;
++   static uint64_t dd_ts_gpu_ns, dd_ts_cpu_ns;
++   static int64_t dd_ts_ms = -1;
++   if (dd_ts_ms < 0)
++      dd_ts_ms = debug_get_num_option("DROIDDECK_ZINK_TIMESTAMP_MS", 1000);
++   if (dd_ts_ms > 0) {
++      const uint64_t now = os_time_get_nano();
++      simple_mtx_lock(&dd_ts_lock);
++      if (dd_ts_cpu_ns && now - dd_ts_cpu_ns < (uint64_t)dd_ts_ms * 1000000ull) {
++         timestamp = dd_ts_gpu_ns + (now - dd_ts_cpu_ns);
++         simple_mtx_unlock(&dd_ts_lock);
++         return timestamp;
++      }
++      simple_mtx_unlock(&dd_ts_lock);
++   }
+    if (screen->info.have_EXT_calibrated_timestamps) {
+       VkCalibratedTimestampInfoEXT cti = {0};
+       cti.sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT;
+@@ -1517,6 +1539,17 @@
+       timestamp = result.u64;
+    }
+    timestamp_to_nanoseconds(screen, &timestamp);
++   if (dd_ts_ms > 0) {
++      simple_mtx_lock(&dd_ts_lock);
++      /* never go backwards from what was handed out */
++      const uint64_t now = os_time_get_nano();
++      const uint64_t given = dd_ts_cpu_ns ? dd_ts_gpu_ns + (now - dd_ts_cpu_ns) : 0;
++      if (timestamp < given)
++         timestamp = given;
++      dd_ts_gpu_ns = timestamp;
++      dd_ts_cpu_ns = now;
++      simple_mtx_unlock(&dd_ts_lock);
++   }
+    return timestamp;
+ }
+ 

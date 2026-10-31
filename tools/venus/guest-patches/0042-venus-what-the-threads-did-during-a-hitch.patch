@@ -1,0 +1,232 @@
+diff -ruN a/src/virtio/vulkan/vn_common.c b/src/virtio/vulkan/vn_common.c
+--- a/src/virtio/vulkan/vn_common.c	2026-10-31 12:34:22.794671162 +0000
++++ b/src/virtio/vulkan/vn_common.c	2026-10-31 12:35:24.964416331 +0000
+@@ -10,6 +10,7 @@
+ 
+ #include "vn_common.h"
+ #include "vn_droiddeck_prof.h"
++#include "vn_droiddeck_stats.h"
+ 
+ #include <stdio.h>
+ #include <string.h>
+@@ -336,6 +337,7 @@
+    const int64_t now = os_time_get_nano();
+ 
+    vn_dd_prof_present();
++   vn_dd_stats_present();
+    mtx_lock(&vn_dd_stats_mutex);
+    if (last && now > last) {
+       frames++;
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_stats.c b/src/virtio/vulkan/vn_droiddeck_stats.c
+--- a/src/virtio/vulkan/vn_droiddeck_stats.c	2026-10-31 12:34:22.794340174 +0000
++++ b/src/virtio/vulkan/vn_droiddeck_stats.c	2026-10-31 12:35:24.964110825 +0000
+@@ -298,6 +298,187 @@
+    return true;
+ }
+ 
++/* ---- hitches (0042) ----
++ *
++ * Steady driving in Lake still had frames of 0.4-0.9 s that no driver wait explains (the game's
++ * threads never waited on the bridge more than ~30 ms then). For a frame over 200 ms and three
++ * times the usual, this says what the program's four busiest threads did during it, from
++ * /proc/self/task/<tid>/schedstat read at every present: time running, time ready but waiting for a
++ * CPU, and the rest asleep (blocked on something: a lock, I/O, another thread). It also names the
++ * threads that used the most CPU during it (from a once-a-second snapshot of every thread). A main
++ * thread that ran the whole time points at the game's own work or the x86 translator compiling new
++ * code; one asleep at a loading thread; one waiting for a CPU at contention. */
++
++#define DD_SNAP_THREADS 512
++
++struct dd_snap {
++   int64_t at;
++   int count;
++   int tid[DD_SNAP_THREADS];
++   uint64_t ticks[DD_SNAP_THREADS];
++};
++
++static struct {
++   struct dd_snap snap[2];
++   int cur;
++   int64_t last_present;
++   double usual_ms;
++   int tid[DD_TRACK];
++   uint64_t run[DD_TRACK], wait[DD_TRACK];
++   unsigned reported;
++} dd_hitch;
++
++static bool
++dd_thread_ticks(int tid, uint64_t *ticks, char *name, size_t name_size)
++{
++   return dd_read_task(getpid(), tid, ticks, name, name_size);
++}
++
++/* every thread's CPU ticks now, into *s */
++static void
++dd_snap_take(struct dd_snap *s)
++{
++   s->count = 0;
++   s->at = os_time_get_nano();
++   DIR *d = opendir("/proc/self/task");
++   if (!d)
++      return;
++   struct dirent *e;
++   char name[32];
++   while ((e = readdir(d)) && s->count < DD_SNAP_THREADS) {
++      const int tid = atoi(e->d_name);
++      if (tid > 0 && dd_thread_ticks(tid, &s->ticks[s->count], name, sizeof(name)))
++         s->tid[s->count++] = tid;
++   }
++   closedir(d);
++}
++
++static void
++dd_hitch_snapshot(void)
++{
++   struct dd_snap *next = malloc(sizeof(*next));
++   if (!next)
++      return;
++   dd_snap_take(next);
++   simple_mtx_lock(&dd_lock);
++   dd_hitch.cur ^= 1;
++   dd_hitch.snap[dd_hitch.cur] = *next;
++   simple_mtx_unlock(&dd_lock);
++   free(next);
++}
++
++static bool
++dd_schedstat(int tid, uint64_t *run, uint64_t *wait)
++{
++   char path[64];
++   snprintf(path, sizeof(path), "/proc/self/task/%d/schedstat", tid);
++   FILE *f = fopen(path, "re");
++   if (!f)
++      return false;
++   unsigned long long r = 0, w = 0;
++   const bool ok = fscanf(f, "%llu %llu", &r, &w) == 2;
++   fclose(f);
++   *run = r;
++   *wait = w;
++   return ok;
++}
++
++struct dd_busy {
++   int tid;
++   uint64_t delta;
++   char name[32];
++};
++
++static int
++dd_busy_cmp(const void *a, const void *b)
++{
++   const struct dd_busy *x = a, *y = b;
++   return x->delta < y->delta ? 1 : x->delta > y->delta ? -1 : 0;
++}
++
++void
++vn_dd_stats_present(void)
++{
++   if (!dd_place.started)
++      return;
++   const int64_t now = os_time_get_nano();
++   int tids[DD_TRACK];
++   char names[DD_TRACK][32];
++   simple_mtx_lock(&dd_lock);
++   memcpy(tids, dd_place.tid, sizeof(tids));
++   memcpy(names, dd_place.name, sizeof(names));
++   simple_mtx_unlock(&dd_lock);
++   uint64_t run[DD_TRACK] = { 0 }, wait[DD_TRACK] = { 0 };
++   for (int i = 0; i < DD_TRACK; i++)
++      if (tids[i] > 0)
++         dd_schedstat(tids[i], &run[i], &wait[i]);
++   const int64_t start = dd_hitch.last_present;
++   if (start) {
++      const double ms = (now - start) / 1e6;
++      const bool hitch = ms > 200.0 && dd_hitch.usual_ms > 0 && ms > 3.0 * dd_hitch.usual_ms;
++      if (!hitch)
++         dd_hitch.usual_ms = dd_hitch.usual_ms > 0 ? 0.9 * dd_hitch.usual_ms + 0.1 * ms : ms;
++      if (hitch && dd_hitch.reported < 150) {
++         dd_hitch.reported++;
++         char line[1500];
++         int len = snprintf(line, sizeof(line), "hitch: a frame took %.0f ms (usual %.0f):", ms,
++                            dd_hitch.usual_ms);
++         for (int i = 0; i < DD_TRACK && len < (int)sizeof(line) - 160; i++) {
++            if (tids[i] <= 0 || dd_hitch.tid[i] != tids[i])
++               continue;
++            const double r = (run[i] - dd_hitch.run[i]) / 1e6, w = (wait[i] - dd_hitch.wait[i]) / 1e6;
++            const double sleep = ms - r - w;
++            len += snprintf(line + len, sizeof(line) - len,
++                            " %s[%d] ran %.0f, waited for a CPU %.0f, asleep %.0f ms;", names[i],
++                            tids[i], r, w, sleep > 0 ? sleep : 0.0);
++         }
++         /* who used the CPU since the snapshot just before the frame began */
++         struct dd_snap *base = malloc(sizeof(*base)), *now_snap = malloc(sizeof(*now_snap));
++         if (base && now_snap) {
++            simple_mtx_lock(&dd_lock);
++            const struct dd_snap *a = &dd_hitch.snap[dd_hitch.cur], *b = &dd_hitch.snap[dd_hitch.cur ^ 1];
++            *base = (a->at && a->at <= start) ? *a : (b->at && b->at <= start) ? *b : (a->at < b->at ? *a : *b);
++            simple_mtx_unlock(&dd_lock);
++            if (base->at) {
++               dd_snap_take(now_snap);
++               struct dd_busy *busy = calloc(now_snap->count ? now_snap->count : 1, sizeof(*busy));
++               int n = 0;
++               for (int i = 0; busy && i < now_snap->count; i++) {
++                  for (int j = 0; j < base->count; j++) {
++                     if (base->tid[j] == now_snap->tid[i] && now_snap->ticks[i] > base->ticks[j]) {
++                        busy[n].tid = now_snap->tid[i];
++                        busy[n].delta = now_snap->ticks[i] - base->ticks[j];
++                        n++;
++                        break;
++                     }
++                  }
++               }
++               if (busy && n) {
++                  qsort(busy, n, sizeof(*busy), dd_busy_cmp);
++                  const double hz = sysconf(_SC_CLK_TCK) > 0 ? (double)sysconf(_SC_CLK_TCK) : 100.0;
++                  len += snprintf(line + len, sizeof(line) - len, " CPU over the last %.1f s:",
++                                  (now_snap->at - base->at) / 1e9);
++                  for (int i = 0; i < n && i < 6 && len < (int)sizeof(line) - 60; i++) {
++                     uint64_t t;
++                     dd_thread_ticks(busy[i].tid, &t, busy[i].name, sizeof(busy[i].name));
++                     len += snprintf(line + len, sizeof(line) - len, " %s[%d] %.0f ms", busy[i].name,
++                                     busy[i].tid, busy[i].delta * 1000.0 / hz);
++                  }
++               }
++               free(busy);
++            }
++         }
++         free(base);
++         free(now_snap);
++         vn_droiddeck_log("%s", line);
++      }
++   }
++   dd_hitch.last_present = now;
++   memcpy(dd_hitch.tid, tids, sizeof(tids));
++   memcpy(dd_hitch.run, run, sizeof(run));
++   memcpy(dd_hitch.wait, wait, sizeof(wait));
++}
++
+ static int
+ dd_place_thread(void *arg)
+ {
+@@ -321,6 +502,8 @@
+          ok[i] = tids[i] > 0 && dd_task_state(tids[i], &state[i], &cpu[i]);
+       unsigned freq[DD_CPUS] = { 0 }, cap[DD_CPUS] = { 0 };
+       const bool clocks = dd_topo.freq_readable && (tick % 10) == 0;
++      if ((tick % 20) == 10)
++         dd_hitch_snapshot();
+       /* once a second: a pinned thread whose affinity was put back (a cpuset move resets it to
+        * the cpuset's CPUs; so can Wine) is pinned again */
+       if ((tick++ % 20) == 0) {
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_stats.h b/src/virtio/vulkan/vn_droiddeck_stats.h
+--- a/src/virtio/vulkan/vn_droiddeck_stats.h	2026-10-31 12:34:22.794597264 +0000
++++ b/src/virtio/vulkan/vn_droiddeck_stats.h	2026-10-31 12:35:24.964396396 +0000
+@@ -47,4 +47,9 @@
+ void
+ vn_dd_stats_queue_fini(struct vn_queue *queue);
+ 
++/* each presented frame (vn_dd_frame_stats): a frame far longer than the usual is a hitch, and
++ * what the program's busiest threads did during it goes to the log (0042) */
++void
++vn_dd_stats_present(void);
++
+ #endif /* VN_DROIDDECK_STATS_H */

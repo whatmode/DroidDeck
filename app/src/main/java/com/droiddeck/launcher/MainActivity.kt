@@ -149,6 +149,8 @@ class MainActivity : ComponentActivity() {
     private var fsyncFirst by mutableStateOf(false)
     private var gamescopeRealtime by mutableStateOf(false)
     private var gpuClockPin by mutableStateOf(false)
+    private var threadHints by mutableStateOf(true)
+    private var sustainedPerformance by mutableStateOf(false)
     private var prootNoSeccomp by mutableStateOf(false)
     private var prootFastPath by mutableStateOf(true)
     private var guestHostname by mutableStateOf(SessionPrefs.DEFAULT_GUEST_HOSTNAME)
@@ -413,6 +415,7 @@ class MainActivity : ComponentActivity() {
     private var appScale by mutableStateOf(com.droiddeck.launcher.core.AppUiPrefs.DEFAULT_SCALE)
     private var hdrOn by mutableStateOf(false)
     private var fpsLimit by mutableStateOf(0)
+    private var refreshLimit by mutableStateOf(0)
     private var upscaler by mutableStateOf(0)
     private var upscaleSharpness by mutableStateOf(75)
     private var hdrReason by mutableStateOf<String?>(null)
@@ -516,7 +519,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun readGameIntent(request: Intent) {
-        request.getStringExtra(com.droiddeck.launcher.stores.download.StoreDownloadService.EXTRA_NAV)?.let { navRequest = it; request.removeExtra(com.droiddeck.launcher.stores.download.StoreDownloadService.EXTRA_NAV) }
+        request.getStringExtra(EXTRA_NAV)?.let { navRequest = it; request.removeExtra(EXTRA_NAV) }
         shortcutPicker = request.action == Intent.ACTION_CREATE_SHORTCUT
         if (shortcutPicker) {
             steamGames = emptyList()
@@ -604,91 +607,6 @@ class MainActivity : ComponentActivity() {
         return true
     }
 
-    private fun opensEpicLauncher(next: Intent): Boolean =
-        next.getStringExtra(SessionService.EXTRA_PROGRAM) == com.droiddeck.launcher.session.NoSteamLaunch.EPIC ||
-            next.getStringExtra(SessionService.EXTRA_STEAM_URL) == com.droiddeck.launcher.frontend.GameLaunchLink.steamUrl(
-                com.droiddeck.launcher.stores.epic.EpicClient.gameId(com.droiddeck.launcher.stores.epic.EpicClient.shortcutAppId))
-
-    private fun uninstallEpicLauncher() {
-        if (com.droiddeck.launcher.stores.epic.EpicClient.uninstalling) return
-        com.droiddeck.launcher.stores.epic.EpicClient.uninstalling = true
-        pendingSwitch?.takeIf(::opensEpicLauncher)?.let { pendingSwitch = null }
-        switchingTo?.takeIf(::opensEpicLauncher)?.let {
-            switchPoll?.let { poll -> ui.removeCallbacks(poll) }
-            switchPoll = null
-            switchingTo = null
-        }
-        if (SessionState.running) SessionService.stop(this)
-        val app = applicationContext
-        val deadline = android.os.SystemClock.uptimeMillis() + SESSION_SWITCH_WAIT_MS
-        Thread({
-            while ((SessionState.running || SessionState.phase !in SESSION_ENDED) && android.os.SystemClock.uptimeMillis() < deadline) {
-                Thread.sleep(SESSION_SWITCH_POLL_MS)
-            }
-            val ended = !SessionState.running && SessionState.phase in SESSION_ENDED
-            val done = try {
-                ended && com.droiddeck.launcher.stores.epic.EpicClient.uninstall(app)
-            } finally {
-                com.droiddeck.launcher.stores.epic.EpicClient.uninstalling = false
-            }
-            ui.post {
-                if (!isDestroyed) refresh()
-                android.widget.Toast.makeText(app, if (done) R.string.epic_client_uninstalled else R.string.epic_client_uninstall_failed,
-                    android.widget.Toast.LENGTH_LONG).show()
-            }
-        }, "epic-uninstall").start()
-    }
-
-    private fun openEpicLauncher(): Boolean {
-        if (com.droiddeck.launcher.stores.epic.EpicClient.uninstalling) {
-            android.widget.Toast.makeText(this, R.string.epic_client_uninstalling, android.widget.Toast.LENGTH_SHORT).show()
-            return false
-        }
-        if (protons.protonBusyId != null || ProtonExtras.installInProgress || pkgStage != null) {
-            android.widget.Toast.makeText(this, R.string.main_wait_install_game, android.widget.Toast.LENGTH_SHORT).show()
-            return false
-        }
-        if (!com.droiddeck.launcher.stores.epic.EpicClient.launcherRunning(this) && !com.droiddeck.launcher.stores.epic.EpicClient.fexReady(this)) {
-            com.droiddeck.launcher.stores.epic.EpicClient.requestFex(this)
-            android.widget.Toast.makeText(this, R.string.epic_client_needs_fex, android.widget.Toast.LENGTH_LONG).show()
-            if (!SessionState.running) startSteamSession()
-            else if (SessionState.mode == SessionService.MODE_STEAM) startActivity(Intent(this, SessionActivity::class.java)
-                .setAction(SessionService.ACTION_RESUME).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP))
-            return true
-        }
-        if (com.droiddeck.launcher.session.NoSteamLaunch.enabled(this, com.droiddeck.launcher.stores.epic.EpicClient.shortcutAppId)) {
-            com.droiddeck.launcher.stores.epic.EpicClient.launcherEntry(this, Library.EPIC_LAUNCHER_NAME)?.let { return launchWithoutSteam(it, false) }
-        }
-        val launcher = Intent(this, SessionActivity::class.java)
-            .putExtra(SessionActivity.EXTRA_RETURN_HOME, false)
-            .putExtra(SessionService.EXTRA_STEAM_URL, com.droiddeck.launcher.frontend.GameLaunchLink.steamUrl(
-                com.droiddeck.launcher.stores.epic.EpicClient.gameId(com.droiddeck.launcher.stores.epic.EpicClient.shortcutAppId)))
-        if (SessionState.running && SessionState.mode == SessionService.MODE_STEAM && !SessionState.stopRequested) {
-            val app = applicationContext
-            val shortcut = com.droiddeck.launcher.stores.epic.EpicClient.shortcutAppId
-            val listed = com.droiddeck.launcher.frontend.AddedGames.inSteam(app, shortcut)
-            if (listed && !SessionService.launchGame(this, com.droiddeck.launcher.stores.epic.EpicClient.gameId(shortcut))) {
-                android.widget.Toast.makeText(this, R.string.game_link_failed, android.widget.Toast.LENGTH_LONG).show()
-                return false
-            }
-            startActivity(Intent(this, SessionActivity::class.java).setAction(SessionService.ACTION_RESUME)
-                .putExtra(SessionActivity.EXTRA_RETURN_HOME, false)
-                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP))
-            if (!listed) Thread({
-                com.droiddeck.launcher.frontend.AddedGamesPublisher.republish(app)
-                val id = com.droiddeck.launcher.stores.epic.EpicClient.steamLauncherId(app) ?: shortcut
-                ui.post { SessionService.launchGame(app, com.droiddeck.launcher.stores.epic.EpicClient.gameId(id)) }
-            }, "epic-launcher-open").start()
-            return true
-        }
-        if (SessionState.running) {
-            if (SessionState.stopRequested) android.widget.Toast.makeText(this, R.string.game_link_session_busy, android.widget.Toast.LENGTH_LONG).show()
-            else pendingSwitch = launcher
-            return true
-        }
-        return startSessionOrWait(launcher)
-    }
-
     private fun startSessionOrWait(next: Intent): Boolean {
         val started = startSession(next, steamSession = next.hasExtra(SessionService.EXTRA_STEAM_URL))
         if (!started && (busy || LinuxRuntimeInstaller.isBusy())) android.widget.Toast.makeText(this, R.string.main_wait_install_game, android.widget.Toast.LENGTH_SHORT).show()
@@ -718,7 +636,6 @@ class MainActivity : ComponentActivity() {
                 }
                 switchPoll = null
                 switchingTo = null
-                if (com.droiddeck.launcher.stores.epic.EpicClient.uninstalling && opensEpicLauncher(next)) return
                 startSessionOrWait(next)
             }
         }
@@ -839,7 +756,6 @@ class MainActivity : ComponentActivity() {
                         storesShowMature = storesShowMature,
                         storesSort = storesSort,
                         storesView = storesView,
-                        storeDownloadsActive = com.droiddeck.launcher.stores.StoresState.activeDownloads,
                     ),
                     FrontEndActions(
                         onPlay = { playSteam() },
@@ -858,11 +774,9 @@ class MainActivity : ComponentActivity() {
                             if (shortcutPicker) chooseGameShortcut(g)
                             else {
                                 com.droiddeck.launcher.frontend.AutoComponents.beforeLaunch(this, g)
-                                com.droiddeck.launcher.stores.StoreLaunch.prepare(this, g) { launchGame(g) }
+                                launchGame(g)
                             }
                         },
-                        onEpicLauncher = { openEpicLauncher() },
-                        onUninstallEpicLauncher = { uninstallEpicLauncher() },
                         onGameShortcut = { g -> com.droiddeck.launcher.frontend.GameShortcuts.pin(this, g) },
                         onExportGameFile = { g -> pickGameExport(g) },
                         onSyncGameFiles = { pickGameExport(null) },
@@ -1159,7 +1073,7 @@ class MainActivity : ComponentActivity() {
                     onClose = { placementCheck = null },
                 )
                 if (showResetSettings) com.droiddeck.launcher.ui.ResetSettingsDialog(
-                    onConfirm = { gameProfiles -> resetSettings(gameProfiles) },
+                    onConfirm = { resetSettings() },
                     onDismiss = { showResetSettings = false },
                 )
                 flood?.let { f -> com.droiddeck.launcher.ui.LaunchFlood(f.from, onProgress = { floodProgress = it }) { launchFlooded(f) } }
@@ -1190,7 +1104,6 @@ class MainActivity : ComponentActivity() {
             SessionPrefs.setMicAsked(this)
         }
         if (wanted.isNotEmpty()) requestPermissions(wanted.toTypedArray(), 1)
-        Thread({ com.droiddeck.launcher.stores.StoreAccounts.encryptAll(this) }, "store-credentials").start()
         if (!SessionState.running) Thread({
             com.droiddeck.launcher.session.LogMigration.run(this)
             com.droiddeck.launcher.frontend.GamesFolderMigration.run(this)
@@ -1281,8 +1194,6 @@ class MainActivity : ComponentActivity() {
         orientation = SessionPrefs.orientation(this)
         requestedOrientation = orientation
         refreshWifiDiscovery()
-        com.droiddeck.launcher.stores.StoresState.refresh(this)
-        com.droiddeck.launcher.stores.StoresState.libraryListener = { refreshAddedGames(); refresh() }
         com.droiddeck.launcher.ui.Motion.refresh(this)
         com.droiddeck.launcher.ui.QuitFlood.take()?.let { c ->
             returning = ReturningFlood(c, com.droiddeck.launcher.ui.LaunchOrigin.takeReturn())
@@ -1347,7 +1258,6 @@ class MainActivity : ComponentActivity() {
         unregisterReceiver(wifiLocationReceiver)
         unregisterReceiver(mediaReceiver)
         ui.removeCallbacks(mediaRefresh)
-        com.droiddeck.launcher.stores.StoresState.libraryListener = null
         displayManager.unregisterDisplayListener(secondScreenDisplayListener)
         flood = null
         returning = null
@@ -1484,7 +1394,6 @@ class MainActivity : ComponentActivity() {
             onRefresh = { components.refreshComponentCatalog() },
             onImport = { pickComponent.launch(InAppFilePicker.buildIntent(this, WCP_EXT, getString(R.string.comp_pick_wcp))) },
             onBack = { if (!com.droiddeck.launcher.ui.Hops.back { showComponents = false }) showComponents = false },
-            games = steamGames,
             generalFexPreset = fexPreset,
             onGeneralFexPreset = { id -> SessionPrefs.setFexPreset(this, id); fexPreset = id },
             gpu = drivers.state(),
@@ -1582,7 +1491,7 @@ class MainActivity : ComponentActivity() {
             ModeSettings(
                 mode = mode, resolution = resolution,
                 panelSize = com.droiddeck.launcher.session.SessionDisplay.panelSize(this),
-                hdr = hdrOn, hdrReason = hdrReason, fpsLimit = fpsLimit,
+                hdr = hdrOn, hdrReason = hdrReason, fpsLimit = fpsLimit, refreshLimit = refreshLimit,
                 upscaler = upscaler, upscaleSharpness = upscaleSharpness,
                 gpuDrivers = drivers.summary(),
                 touchMode = touchMode,
@@ -1647,6 +1556,7 @@ class MainActivity : ComponentActivity() {
                 onHdr = { on -> SessionPrefs.setHdr(this, mode, on); hdrOn = on },
                 onGpuDrivers = { openComponents(focusContent = true, tab = com.droiddeck.launcher.ui.GPU_TAB) },
                 onFpsLimit = { fps -> SessionPrefs.setFpsLimit(this, mode, fps); fpsLimit = fps },
+                onRefreshLimit = { hz -> SessionPrefs.setRefreshLimit(this, mode, hz); refreshLimit = hz },
                 onUpscaler = { m -> SessionPrefs.setUpscaler(this, m); upscaler = m },
                 onUpscaleSharpness = { pct -> SessionPrefs.setUpscaleSharpness(this, pct); upscaleSharpness = pct },
                 onTouch = { t -> SessionPrefs.setTouchMode(this, t); touchMode = t },
@@ -1731,6 +1641,8 @@ class MainActivity : ComponentActivity() {
             fsyncFirst = fsyncFirst,
             gamescopeRealtime = gamescopeRealtime,
             gpuClockPin = gpuClockPin,
+            threadHints = threadHints,
+            sustainedPerformance = sustainedPerformance,
             prootNoSeccomp = prootNoSeccomp, prootFastPath = prootFastPath, guestHostname = guestHostname, phantomWarning = phantomWarning,
             onClientOverride = { on -> SessionPrefs.setClientCpusOverride(this, on); clientOverride = on },
             onTuSysmem = { on -> SessionPrefs.setTuSysmem(this, on); tuSysmem = on },
@@ -1743,6 +1655,8 @@ class MainActivity : ComponentActivity() {
             onFsyncFirst = { on -> SessionPrefs.setFsyncFirst(this, on); fsyncFirst = on },
             onGamescopeRealtime = { on -> SessionPrefs.setGamescopeRealtime(this, on); gamescopeRealtime = on },
             onGpuClockPin = { on -> SessionPrefs.setGpuClockPin(this, on); gpuClockPin = on },
+            onThreadHints = { on -> SessionPrefs.setGameThreadHints(this, on); threadHints = on },
+            onSustainedPerformance = { on -> SessionPrefs.setSustainedPerformance(this, on); sustainedPerformance = on },
             onProotNoSeccomp = { on -> SessionPrefs.setProotNoSeccomp(this, on); prootNoSeccomp = on },
             onProotFastPath = { on -> SessionPrefs.setProotFastPath(this, on); prootFastPath = on },
             onGuestHostname = { name -> SessionPrefs.setGuestHostname(this, name) },
@@ -1838,6 +1752,7 @@ class MainActivity : ComponentActivity() {
         loadBootMovie()
         hdrOn = SessionPrefs.hdr(this, mode)
         fpsLimit = SessionPrefs.fpsLimit(this, mode)
+        refreshLimit = SessionPrefs.refreshLimit(this, mode)
         upscaler = SessionPrefs.upscaler(this)
         upscaleSharpness = SessionPrefs.upscaleSharpness(this)
         hdrReason = com.droiddeck.launcher.wayland.HdrSupport.probe(this).reason
@@ -1900,6 +1815,8 @@ class MainActivity : ComponentActivity() {
         fsyncFirst = SessionPrefs.fsyncFirst(this)
         gamescopeRealtime = SessionPrefs.gamescopeRealtime(this)
         gpuClockPin = SessionPrefs.gpuClockPin(this)
+        threadHints = SessionPrefs.gameThreadHints(this)
+        sustainedPerformance = SessionPrefs.sustainedPerformance(this)
         prootNoSeccomp = SessionPrefs.prootNoSeccomp(this)
         prootFastPath = SessionPrefs.prootFastPath(this)
         guestHostname = SessionPrefs.guestHostname(this)
@@ -2063,11 +1980,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun resetSettings(gameProfiles: Boolean) {
+    private fun resetSettings() {
         if (SessionState.running) return
-        val scopes = steamGames.map { it.profileKey }
         Thread({
-            val ok = com.droiddeck.launcher.session.SettingsReset.resetAll(this, gameProfiles, scopes)
+            val ok = com.droiddeck.launcher.session.SettingsReset.resetAll(this)
             ui.post {
                 if (isDestroyed) return@post
                 com.droiddeck.launcher.core.AppLanguage.setChosen(this, com.droiddeck.launcher.core.AppLanguage.SYSTEM)
@@ -2118,6 +2034,8 @@ class MainActivity : ComponentActivity() {
     }
 
     companion object {
+        /** A screen to open, from a notification or another part of the app (e.g. "components"). */
+        const val EXTRA_NAV = "droiddeck.nav"
         private const val TAG = "MainActivity"
         private const val MEDIA_SETTLE_MS = 1500L
         private const val SESSION_SWITCH_WAIT_MS = 30_000L

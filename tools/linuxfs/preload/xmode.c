@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+void *bl_next_symbol(const char *library, const char *name) __attribute__((visibility("hidden")));
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,13 +25,13 @@ static int following(void) {
 int XChangeProperty(Display *dpy, Window w, Atom property, Atom type, int format, int mode,
                     const unsigned char *data, int nelements) {
   static change_property_fn real;
-  if (!real) real = (change_property_fn)dlsym(RTLD_NEXT, "XChangeProperty");
+  if (!real) real = (change_property_fn)bl_next_symbol("libX11.so.6", "XChangeProperty");
   if (!real) return 0;
   if (following() && format == 32 && nelements == 4 && data) {
     static intern_atom_fn intern;
     static Display *atom_dpy;
     static Atom mode_control;
-    if (!intern) intern = (intern_atom_fn)dlsym(RTLD_NEXT, "XInternAtom");
+    if (!intern) intern = (intern_atom_fn)bl_next_symbol("libX11.so.6", "XInternAtom");
     if (intern && atom_dpy != dpy) {
       mode_control = intern(dpy, "GAMESCOPE_XWAYLAND_MODE_CONTROL", 1);
       atom_dpy = dpy;

@@ -325,8 +325,6 @@ class SessionService : Service() {
         SessionArtifacts.finishAbandoned(this)
         VacDiagnostics.arm(this)
         com.droiddeck.launcher.agent.AgentGuest.reset(this)
-        com.droiddeck.launcher.stores.gog.GogComet.begin()
-        com.droiddeck.launcher.stores.StoreLaunchRequests.start(this)
 
         val sessionDir = openSessionFolder()
         val sessionLog = File(sessionDir, "session.log")
@@ -343,7 +341,6 @@ class SessionService : Service() {
                 .onFailure { Log.w(TAG, "forced components", it) }
         }
         addClientEnvironment(guest, steamHere)
-        if (steamHere) guest.add("BL_EPIC_APP_ID=" + com.droiddeck.launcher.stores.epic.EpicClient.shortcutAppId)
         val fastPathAt = guest.size
 
         val pulse = startAudio(guest, sessionDir)
@@ -371,12 +368,6 @@ class SessionService : Service() {
         }
         val noSteamGame = noSteamGame()
         if (noSteamGame) guest.add("BL_PIN_CORES=0")
-        if ((steamHere || SessionState.program == NoSteamLaunch.EPIC) && com.droiddeck.launcher.stores.epic.EpicClient.read(this).installed) {
-            runCatching { com.droiddeck.launcher.stores.epic.EpicClientLibrary.sync(this) }
-                .onFailure { Log.w(TAG, "Epic library sync failed", it) }
-            runCatching { com.droiddeck.launcher.stores.epic.EpicClient.prepareInstallDir(this) }
-                .onFailure { Log.w(TAG, "Epic install directory setup failed", it) }
-        }
         if (steamHere || noSteamGame) {
             val added = com.droiddeck.launcher.frontend.AddedGames.scan(this)
             val listing = com.droiddeck.launcher.frontend.AddedGames.writeListing(this, added)
@@ -575,6 +566,12 @@ class SessionService : Service() {
         )
         LinuxVulkanDriver.resolveIcdPath(this, linuxDriverId)
             ?.let { guest.add(LinuxVulkanDriver.ENV + "=" + it) }
+        if (com.droiddeck.launcher.gpu.VenusBridge.isVenus(this, linuxDriverId)) {
+            val up = com.droiddeck.launcher.gpu.VenusBridge.start(this, SessionState.logDirectory?.let { File(it, "venus-server.log") })
+            Log.i(TAG, "venus bridge: server " + if (up) "up" else "NOT running")
+            guest.add("VN_DEBUG=vtest,init,result")
+            guest.add("BL_VENUS=" + if (up) "1" else "0")
+        }
         tuDebug(linuxDriverId)?.let { guest.add("TU_DEBUG=$it") }
         com.droiddeck.launcher.gpu.TpUbwcHint.forThisDevice()?.let { guest.add("${com.droiddeck.launcher.gpu.TpUbwcHint.ENV}=$it") }
         if (SessionPrefs.zinkLazy(this)) {
@@ -603,6 +600,17 @@ class SessionService : Service() {
         if (SessionState.mode == MODE_STEAM && SessionPrefs.zramCompression(this) &&
             com.droiddeck.launcher.core.ZramSupport.supported()) guest.add("BL_ZRAM=1")
         guest.add("BANNER_AUDIO_DIRECT_DECAY=0")
+
+        // The driver's own settings come from the driver's zip -- its root env file, then the GL
+        // part's -- and not from this APK. A knob that belongs to the driver is stated there and
+        // nowhere else, so it changes by shipping a driver rather than by an APK build. Applied
+        // after the app's own lines, so a driver line replaces an app default of the same name,
+        // but before the user's droiddeck-env and the agent, which stay the way to A/B a driver
+        // knob on the device without building another driver.
+        LinuxVulkanDriverManager(this).applyDriverEnvironment(linuxDriverId, guest).let { env ->
+            if (env.isNotEmpty()) Log.i(TAG, "driver environment: " + env.joinToString(" "))
+        }
+
         extraEnv().forEach { guest.add(it) }
         com.droiddeck.launcher.agent.AgentEnv.beginSession(this).forEach { guest.add(it) }
         val clientPinned = steamHere && SessionPrefs.clientCpusOverride(this)
@@ -705,6 +713,8 @@ class SessionService : Service() {
         runtimeDir: File,
     ): ArrayList<String> {
         val binds = ArrayList<String>()
+        if (com.droiddeck.launcher.gpu.VenusBridge.running)
+            binds.add(com.droiddeck.launcher.gpu.VenusBridge.socket(this).path + ":" + com.droiddeck.launcher.gpu.VenusBridge.GUEST_SOCKET)
         if (controllersOn) binds.add(fakeInputDir.path + ":/dev/input")
         if (controllersOn) binds.addAll(deckBinds)
         val battery = BatteryComponent(
@@ -789,13 +799,6 @@ class SessionService : Service() {
                 Log.i(TAG, "added games: ${root.host} -> ${root.guest}")
             } else {
                 Log.w(TAG, "added games: ${root.host} is not a readable folder this session")
-            }
-        }
-        for ((host, guest) in com.droiddeck.launcher.stores.StoreInstallRoot.externalRoots(this)) {
-            if (host.isDirectory && host.canRead()) {
-                File(LinuxRuntime.rootDir(this), guest.removePrefix("/")).mkdirs()
-                binds.add(host.path + ":" + guest)
-                Log.i(TAG, "store games: $host -> $guest")
             }
         }
         binds.addAll(com.droiddeck.launcher.runtime.UserApps.binds(this))
@@ -1083,8 +1086,7 @@ class SessionService : Service() {
         launchWatcher?.stopWatching()
         listOf("steam-sleep", "steam-sleep-state", "steam-sleep-ready", "steam-wake", "steam-wake.tmp",
             "steam-native-sleep", "steam-native-sleep.tmp", "steam-native-ready", "steam-native-ready.tmp",
-            RUN_STATUS, "$RUN_STATUS.tmp", "epic-game", "epic-game.tmp", com.droiddeck.launcher.stores.epic.EpicClient.PLAYING,
-            com.droiddeck.launcher.stores.epic.EpicClient.OPEN, com.droiddeck.launcher.stores.epic.EpicClient.FOCUSED_APP
+            RUN_STATUS, "$RUN_STATUS.tmp", "epic-game", "epic-game.tmp",
         ).forEach { File(dir, it).delete() }
         val gen = sessionGen
         @Suppress("DEPRECATION")
@@ -1362,8 +1364,6 @@ class SessionService : Service() {
             pipTask = false
             SessionState.guestPid = -1
             com.droiddeck.launcher.agent.AgentGuest.stop()
-            com.droiddeck.launcher.stores.StoreLaunchRequests.stop()
-            Thread({ com.droiddeck.launcher.stores.CloudSaves.uploadAllDirty(applicationContext, "session-end", running = false) }, "cloud-session-end").start()
             runCatching { com.droiddeck.launcher.agent.AgentEnv.endSession(this) }
                 .onFailure { Log.w(TAG, "clearing the agent's session environment", it) }
             releaseLocks()
@@ -1402,6 +1402,7 @@ class SessionService : Service() {
 
     private fun stopSession(status: Int) {
         cancelQueuedSteamGame()
+        com.droiddeck.launcher.gpu.VenusBridge.stop()
         completeNativeSleep()
         val (ended, endedArch) = synchronized(stopLock) {
             if (!SessionState.running) return
@@ -1451,7 +1452,6 @@ class SessionService : Service() {
             if (prootPid > 1 || auxiliary.isNotEmpty()) {
                 Thread({
                     if (prootPid > 1 && steamClientMayRun) askSteamToExit(prootPid)
-                    com.droiddeck.launcher.stores.gog.GogComet.end(stoppedSession)
                     auxiliary.forEach { (pid, started) -> teardown(pid, started) }
                     if (prootPid > 1) teardown(prootPid)
                     killGuestLeftovers()
@@ -1460,7 +1460,6 @@ class SessionService : Service() {
                 }, "session-teardown").start()
             } else {
                 Thread({
-                    com.droiddeck.launcher.stores.gog.GogComet.end(stoppedSession)
                     finishSessionStop(status, stoppedGen)
                     if (launcherEnded) importLauncherGames()
                 }, "gog-session-stop").start()
@@ -1471,8 +1470,6 @@ class SessionService : Service() {
     }
 
     private fun importLauncherGames() {
-        runCatching { com.droiddeck.launcher.stores.epic.EpicClientLibrary.importClientGames(this) }
-            .onFailure { Log.w(TAG, "client library scan failed: ${it.javaClass.simpleName}") }
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {

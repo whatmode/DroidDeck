@@ -1,0 +1,16 @@
+diff --git a/src/venus/vkr_physical_device.c b/src/venus/vkr_physical_device.c
+index 3bd9579..b417ff9 100644
+--- a/src/venus/vkr_physical_device.c
++++ b/src/venus/vkr_physical_device.c
+@@ -56,6 +56,11 @@ vkr_android_dma_heap_init_once(void)
+    if (!heap || !heap[0])
+       heap = "/dev/dma_heap/system";
+    android_dma_heap_fd = open(heap, O_RDONLY | O_CLOEXEC);
++   if (android_dma_heap_fd < 0 && strcmp(heap, "/dev/dma_heap/system")) {
++      vkr_log("failed to open dma-heap %s: %s; using /dev/dma_heap/system", heap, strerror(errno));
++      heap = "/dev/dma_heap/system";
++      android_dma_heap_fd = open(heap, O_RDONLY | O_CLOEXEC);
++   }
+    if (android_dma_heap_fd < 0)
+       vkr_log("failed to open dma-heap %s: %s", heap, strerror(errno));
+    else

@@ -18,6 +18,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
   pull-requests: write
 
@@ -31,9 +32,92 @@ env:
   PRELOAD_CACHE_VERSION: v6
 
 jobs:
+  # The APK is built from app/ and the tools/ app/build.gradle reads, so a branch that only
+  # touches driver-side tools (tools/venus, tools/panvk, mali-gl/patches, ...) has nothing for it
+  # to compile. paths-ignore cannot express that on a pull_request: it evaluates the whole PR
+  # diff, so once a PR has touched app/ every later push rebuilds the APK however small it is.
+  # This job answers the question the event cannot, and build/sign/announce are skipped when the
+  # answer is "no APK work here". It is the only check that runs in that case, and it passes, so
+  # a required "Build APK" check still goes green.
+  changes:
+    name: Which files changed
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    outputs:
+      apk: ${{ steps.which.outputs.apk }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decide whether the APK has anything to build
+        id: which
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # main and manual runs always build: a push to main publishes a signed release, and a
+          # manual run is an explicit request for the APK. The gate is for pull requests, where a
+          # driver-only change has nothing for the APK to compile.
+          if [ "${{ github.event_name }}" != pull_request ]; then
+            echo "apk=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The base is the newest commit of this branch whose APK actually built, so a change
+          # to app/ keeps asking for an APK until one is built from it. Diffing only the push
+          # (the old base) lost that: a newer push cancels the running build (concurrency below),
+          # and when the newer push touched only driver or test files its run skipped the APK,
+          # so the app change never got one. Runs of this workflow on the branch (pull request
+          # or manual) count when their "Build APK" job succeeded and their commit is an
+          # ancestor of HEAD; with none, the whole-PR diff against the target is used.
+          base="${{ github.event.pull_request.base.sha }}"
+          range="$base...HEAD"
+          built=""
+          runs=$(gh api "repos/${{ github.repository }}/actions/workflows/build.yml/runs?branch=${{ github.head_ref }}&status=success&per_page=30" \
+                   --jq '.workflow_runs[] | "\(.id) \(.head_sha)"' 2>/dev/null || true)
+          while read -r run sha; do
+            [ -n "$run" ] || continue
+            git merge-base --is-ancestor "$sha" HEAD 2>/dev/null || continue
+            job=$(gh api "repos/${{ github.repository }}/actions/runs/$run/jobs" \
+                    --jq '.jobs[] | select(.name == "Build APK") | .conclusion' 2>/dev/null || true)
+            if [ "$job" = success ]; then
+              built="$sha"
+              break
+            fi
+          done <<<"$runs"
+          if [ -n "$built" ]; then
+            base="$built"
+            range="$built..HEAD"
+            echo "Last APK built from this branch: ${built:0:12}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No APK built from this branch yet; using the whole pull request" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          changed=$(git diff --name-only "$range")
+          echo "Changed since $base:" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "$changed" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # This is an allowlist of paths the APK does not read, and everything else builds. An
+          # unknown or newly added directory therefore builds the APK rather than quietly skipping
+          # it, which is the safe way round. Each entry is a driver-side input: tools/venus and
+          # mali-gl/patches feed the driver builds, tools/panvk and tools/comet build the Mali
+          # drivers, tools/ea is the EA launcher shim, docs and .github are documentation and CI.
+          # mali-gl/release.env is deliberately not here - the APK downloads that runtime.
+          # tools/tests/glx is the bridge's end-to-end check (Venus GLX check runs it), and
+          # test_venus_guest_env.py checks tools/venus/guest-env (Venus bridge build runs it).
+          if grep -qvE '^(tools/(venus|panvk|comet|ea)/|tools/tests/glx/|tools/tests/test_venus_guest_env\.py$|mali-gl/patches/|docs/|\.github/|.*\.md$)' <<<"$changed"; then
+            echo "apk=true" >> "$GITHUB_OUTPUT"
+            echo "Files the APK is built from changed; building it." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "apk=false" >> "$GITHUB_OUTPUT"
+            echo "Only driver-side files changed; the APK has nothing to build." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   build:
     name: Build APK
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    needs: changes
+    if: ${{ needs.changes.outputs.apk == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     outputs:
@@ -186,7 +270,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: app/src/main/assets/linuxfs
-          key: preloads-${{ env.PRELOAD_CACHE_VERSION }}-${{ hashFiles('app/src/main/cpp/fakeinput_steam.cpp', 'app/src/main/cpp/adrenotools/src/hook/kgsl.h', 'tools/quest/*', 'tools/linuxfs/preload/*.c', 'tools/linuxfs/build-x86-preloads.sh', 'tools/linuxfs/fex/*', 'tools/linuxfs/clipboard/*.c', 'tools/linuxfs/ssbs/*.c', 'tools/proot/fastpath/*.c', 'tools/linuxfs/overlay/usr/local/bin/*', 'tools/linuxfs/overlay/usr/bin/**', 'tools/linuxfs/desktop/*', 'tools/gamescope/release.env', 'mali-gl/release.env', 'tools/ea/release.env', 'tools/ffmpeg/*', 'tools/vklayers/*', 'tools/wlroots/release.env', 'tools/linuxfs/uruntime.env', 'tools/linuxfs/licenses/*', 'tools/mangoapp/*', 'tools/msitools/**', 'tools/comet/**', 'tools/linuxfs/debian-image.env', 'tools/vr/**') }}
+          key: preloads-${{ env.PRELOAD_CACHE_VERSION }}-${{ hashFiles('app/src/main/cpp/fakeinput_steam.cpp', 'app/src/main/cpp/adrenotools/src/hook/kgsl.h', 'tools/quest/*', 'tools/linuxfs/preload/*.c', 'tools/linuxfs/audit/*.c', 'tools/linuxfs/build-x86-preloads.sh', 'tools/linuxfs/fex/*', 'tools/linuxfs/clipboard/*.c', 'tools/linuxfs/ssbs/*.c', 'tools/proot/fastpath/*.c', 'tools/linuxfs/overlay/usr/local/bin/*', 'tools/linuxfs/overlay/usr/bin/**', 'tools/linuxfs/desktop/*', 'tools/gamescope/release.env', 'mali-gl/release.env', 'tools/ffmpeg/*', 'tools/vklayers/*', 'tools/wlroots/release.env', 'tools/linuxfs/uruntime.env', 'tools/linuxfs/licenses/*', 'tools/mangoapp/*', 'tools/msitools/**', 'tools/linuxfs/debian-image.env', 'tools/vr/**') }}
 
       - name: Build libfakeinput.so and libblsession.so (glibc aarch64)
         if: steps.preloads.outputs.cache-hit != 'true'
@@ -208,6 +292,10 @@ jobs:
           aarch64-linux-gnu-gcc -shared -fPIC -O2 -Wall -pthread \
             -o "$D/libblfastpath.so" tools/proot/fastpath/fastpath.c -ldl
           aarch64-linux-gnu-strip --strip-unneeded "$D/libblfastpath.so"
+          # Steam client GL audit (glxaudit.c): a library of its own, with no constructors, so an
+          # audited process it declines unloads it cleanly.
+          aarch64-linux-gnu-gcc -shared -fPIC -O2 -Wall -o "$D/libblglxaudit.so" tools/linuxfs/audit/glxaudit.c -ldl
+          aarch64-linux-gnu-strip --strip-unneeded "$D/libblglxaudit.so"
           aarch64-linux-gnu-gcc -shared -fPIC -O2 -Wall -nostdlib -ffreestanding -fno-stack-protector \
             -fno-tree-loop-distribute-patterns -Wl,-z,defs -o "$D/libblaudit.so" tools/proot/fastpath/audit.c
           aarch64-linux-gnu-strip --strip-unneeded "$D/libblaudit.so"
@@ -240,16 +328,6 @@ jobs:
             echo "${MALI_GL_SHA256}  mali-gl-runtime.tar.gz" | sha256sum -c -
             install -Dm644 mali-gl-runtime.tar.gz "$D/opt/mali-gl.tgz"
             rm mali-gl-runtime.tar.gz
-          fi
-          if [ -f tools/ea/release.env ]; then
-            . tools/ea/release.env
-            gh release download "${EA_TAG}" -R "${EA_REPO:-${GITHUB_REPOSITORY}}" -p droiddeck-ea-aarch64.tar.gz -O droiddeck-ea.tar.gz
-            echo "${EA_SHA256}  droiddeck-ea.tar.gz" | sha256sum -c -
-            mkdir -p ea-unpack && tar xzf droiddeck-ea.tar.gz -C ea-unpack
-            for f in droiddeck-ea maxima-bootstrap droiddeck-ea-wine; do
-              install -Dm755 "ea-unpack/droiddeck-ea/bin/$f" "$D/usr/local/lib/droiddeck-ea/$f"
-            done
-            rm -rf ea-unpack droiddeck-ea.tar.gz
           fi
           bash tools/ffmpeg/build.sh "$D/usr/local/lib/droiddeck-ffmpeg" aarch64-linux-gnu-
           . tools/linuxfs/uruntime.env
@@ -426,6 +504,25 @@ jobs:
           export NDK="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-$ANDROID_NDK_ROOT}}"
           tools/proot/build.sh app/src/main/jniLibs/arm64-v8a
 
+      - name: Venus bridge server (vtest + Venus on Android's Vulkan driver)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Built by venus-bridge-build.yml; the app starts it when the selected Linux driver is
+          # the venus ICD. Executables have to be lib*.so in the APK to be runnable.
+          if gh release download venus-bridge-latest -R "$GITHUB_REPOSITORY" -p 'venus-server-android-arm64.tar.gz' -O venus.tgz; then
+            mkdir -p venus-unpack && tar xzf venus.tgz -C venus-unpack
+            J=app/src/main/jniLibs/arm64-v8a
+            install -m755 venus-unpack/venus-server/virgl_test_server "$J/libvenus_server.so"
+            [ -f venus-unpack/venus-server/virgl_render_server ] && install -m755 venus-unpack/venus-server/virgl_render_server "$J/libvenus_render_server.so"
+            install -m755 venus-unpack/venus-server/libvirglrenderer.so venus-unpack/venus-server/libepoxy.so "$J/"
+            rm -rf venus-unpack venus.tgz
+            ls -la "$J" | grep -E "venus|virgl|epoxy"
+          else
+            echo "::warning::no venus-bridge-latest release; the APK has no Venus server"
+          fi
+
       - name: Check the preloads
         run: |
           set -euo pipefail
@@ -455,33 +552,6 @@ jobs:
             -ldl -o /tmp/test-presenter-shutdown
           timeout 10 /tmp/test-presenter-shutdown
 
-      - name: Rust toolchain for the store engines (aarch64-linux-android)
-        id: rust
-        run: |
-          set -euo pipefail
-          rustup target add aarch64-linux-android
-          echo "rustc=$(rustc -V | awk '{print $2}')" >> "$GITHUB_OUTPUT"
-          rustc -V; cargo -V
-
-      - name: Cache cargo registry and the store engines' target
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            ~/.cargo/bin/cargo-ndk
-            app/src/main/rust/stores/target
-          key: stores-${{ steps.rust.outputs.rustc }}-${{ hashFiles('app/src/main/rust/stores/Cargo.lock') }}
-          restore-keys: |
-            stores-${{ steps.rust.outputs.rustc }}-
-
-      - name: cargo-ndk
-        run: |
-          set -euo pipefail
-          command -v cargo-ndk >/dev/null || cargo install cargo-ndk --locked
-          cargo ndk --version
-
       - name: Cache the CMake build tree
         uses: actions/cache@v4
         with:
@@ -491,13 +561,6 @@ jobs:
           key: cxx-${{ env.NDK_VERSION }}-${{ hashFiles('app/src/main/cpp/**', 'tools/vr/src/xr_*.h') }}
           restore-keys: |
             cxx-${{ env.NDK_VERSION }}-
-
-      - name: Build GOG Galaxy companion
-        if: steps.preloads.outputs.cache-hit != 'true'
-        run: |
-          rustup toolchain install 1.90.0 --profile minimal
-          rustup target add --toolchain 1.90.0 aarch64-unknown-linux-gnu
-          RUSTUP_TOOLCHAIN=1.90.0 bash tools/comet/build.sh
 
       - name: Build
         id: build
@@ -522,30 +585,12 @@ jobs:
           echo "::error title=tail::$(tail -40 /tmp/build.log | enc)"
           echo "::error title=errors::$(grep -nE "^e: |What went wrong|FAILED|Exception|ValueError|Missing|stale|changed since" /tmp/build.log | tail -30 | enc)"
 
-      - name: Check the store engines' library
+      - name: Check the APK's native libraries
         run: |
           set -euo pipefail
           NDK="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-$ANDROID_NDK_ROOT}}"
           python3 tools/release/check_android_libraries.py app/build/outputs/apk/release/app-release.apk \
             --readelf "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
-          git diff --stat -- app/src/main/rust/stores/Cargo.lock
-          git diff --exit-code -- app/src/main/rust/stores/Cargo.lock \
-            || { echo "::error::Cargo.lock changed during the build; commit the regenerated lockfile (uploaded as stores-cargo-lock)"; exit 1; }
-
-      - name: Store engines host unit tests
-        timeout-minutes: 10
-        continue-on-error: true
-        run: |
-          cd app/src/main/rust/stores
-          cargo test --locked 2>&1 | tail -60
-
-      - name: Upload the regenerated Cargo.lock
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: stores-cargo-lock
-          path: app/src/main/rust/stores/Cargo.lock
-          if-no-files-found: ignore
 
       - name: Steam import and game environment tests
         run: python3 -m unittest discover -s tools/tests -p 'test_*.py'
@@ -556,6 +601,15 @@ jobs:
           set -o pipefail
           mkdir -p app/build
           ./gradlew testReleaseUnitTest --console=plain --info --stacktrace -Drobolectric.logging=stderr -PndkVersion="$NDK_VERSION" 2>&1 | tee app/build/unit-tests.log
+
+      - name: Report failed unit tests as annotations
+        if: failure() && steps.unit-tests.outcome == 'failure'
+        run: |
+          [ -f app/build/unit-tests.log ] || exit 0
+          enc() { sed 's/%/%25/g' | cut -c1-300 | awk '{printf "%s%%0A", $0}'; }
+          echo "::error title=failed tests::$(grep -E ' FAILED$|^e: ' app/build/unit-tests.log | head -25 | enc)"
+          echo "::error title=first failure::$(grep -A25 -m1 -E ' FAILED$' app/build/unit-tests.log | enc)"
+          echo "::error title=compile::$(grep -E '^e: |What went wrong' -A3 app/build/unit-tests.log | head -30 | enc)"
 
       - name: Upload unit test diagnostics
         id: unit-test-diagnostics

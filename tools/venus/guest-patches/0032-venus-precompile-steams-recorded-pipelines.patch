@@ -1,0 +1,269 @@
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_emu.c b/src/virtio/vulkan/vn_droiddeck_emu.c
+--- a/src/virtio/vulkan/vn_droiddeck_emu.c	2026-10-30 23:53:57.685153978 +0000
++++ b/src/virtio/vulkan/vn_droiddeck_emu.c	2026-10-30 23:53:58.194404388 +0000
+@@ -44,7 +44,10 @@
+    /* only for the D3D translators: GL (Zink, Steam's UI) and native Vulkan programs see the
+     * GPU as it is */
+    const char *engine = physical_dev->instance->base.vk.app_info.engine_name;
+-   if (!all && !(engine && (!strncmp(engine, "DXVK", 4) || !strncmp(engine, "vkd3d", 5))))
++   /* DROIDDECK_VN_EMULATE_AS_DXVK: the driver's own pipeline precompile (vn_droiddeck_pcache.c)
++    * replays a DXVK game's pipelines and must make them exactly as the game would */
++   const bool as_dxvk = debug_get_bool_option("DROIDDECK_VN_EMULATE_AS_DXVK", false);
++   if (!all && !as_dxvk && !(engine && (!strncmp(engine, "DXVK", 4) || !strncmp(engine, "vkd3d", 5))))
+       return;
+    /* robustBufferAccess2 rides on the GPU's robustness2 extension (nullDescriptor) */
+    if ((all || !f->robustBufferAccess2) && physical_dev->base.vk.supported_extensions.EXT_robustness2 &&
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_pcache.c b/src/virtio/vulkan/vn_droiddeck_pcache.c
+--- a/src/virtio/vulkan/vn_droiddeck_pcache.c	2026-10-30 23:53:57.725797186 +0000
++++ b/src/virtio/vulkan/vn_droiddeck_pcache.c	2026-10-30 23:54:33.141799291 +0000
+@@ -10,7 +10,10 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <glob.h>
++#include <spawn.h>
+ #include <sys/stat.h>
++#include <sys/wait.h>
+ #include <unistd.h>
+ 
+ #include "util/os_time.h"
+@@ -21,6 +24,8 @@
+ #include "vn_device.h"
+ #include "vn_physical_device.h"
+ 
++extern char **environ;
++
+ #define PCACHE_MAX_BYTES (512u << 20)
+ 
+ struct vn_dd_pcache {
+@@ -234,8 +239,12 @@
+ pcache_save(struct vn_device *dev, struct vn_dd_pcache *pc, const char *why)
+ {
+    const uint32_t created = p_atomic_xchg(&pc->created, 0);
+-   if (!created)
++   if (!created) {
++      /* nothing new here, but another process (the precompile below) may have saved: take its
++       * pipelines into this process's cache now, not at the next launch */
++      pcache_merge_file(dev, pc);
+       return;
++   }
+    VkDevice device = vn_device_to_handle(dev);
+    const int64_t t0 = os_time_get_nano();
+    if (pcache_merge_file(dev, pc))
+@@ -286,6 +295,207 @@
+    return 0;
+ }
+ 
++/* ---- compiling the game's recorded pipelines before it needs them ----
++ *
++ * Steam records every pipeline a game makes (its fossilize layer) into
++ * <shadercache>/fozpipelinesv6/<...>/steamapp_pipeline_cache.foz, and merges in the ones other
++ * players recorded (steam_pipeline_cache.foz). On a Steam Deck it replays them with
++ * fossilize_replay into Mesa's disk cache. Here Steam replays only when it downloads a new set,
++ * and Mali has no disk cache to fill, so DROIDDECK_VN_PRECOMPILE (on by default) runs the replay
++ * itself: the first device of a game whose databases changed since the last complete run starts
++ * fossilize_replay in the background, on the same cache file. Its pipelines are saved every 20 s
++ * and the game merges them in as they come, so a place the game has not drawn yet is compiled
++ * before it gets there. The run's output goes to droiddeck-venus/precompile.log; a run that
++ * finishes writes precompile-<uuid>.done and is not repeated for the same databases. */
++
++static int
++pcache_reap(void *arg)
++{
++   const pid_t pid = (pid_t)(intptr_t)arg;
++   int status;
++   while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
++      ;
++   return 0;
++}
++
++static bool
++pcache_read_text(const char *path, char *out, size_t size)
++{
++   FILE *f = fopen(path, "re");
++   if (!f)
++      return false;
++   const size_t n = fread(out, 1, size - 1, f);
++   fclose(f);
++   out[n] = 0;
++   return true;
++}
++
++static void
++pcache_log_tail(const char *path)
++{
++   char buf[4096];
++   if (!pcache_read_text(path, buf, sizeof(buf)))
++      return;
++   /* the last three lines */
++   int lines = 0;
++   char *p = buf + strlen(buf);
++   while (p > buf && lines < 4) {
++      p--;
++      if (*p == '\n')
++         lines++;
++   }
++   for (char *line = strtok(p, "\n"); line; line = strtok(NULL, "\n"))
++      vn_droiddeck_log("precompile: last run: %.200s", line);
++}
++
++static void
++pcache_precompile(const char *steam_dir, const char *ddir, const char *uuid_hex)
++{
++   if (!debug_get_bool_option("DROIDDECK_VN_PRECOMPILE", true) ||
++       getenv("DROIDDECK_VN_PRECOMPILE_CHILD"))
++      return;
++   char tool[512] = "";
++   const char *roots[3] = { getenv("STEAM_COMPAT_CLIENT_INSTALL_PATH"), NULL, "/root/.local/share/Steam" };
++   char home_steam[400] = "";
++   const char *home = getenv("HOME");
++   if (home && *home) {
++      snprintf(home_steam, sizeof(home_steam), "%s/.local/share/Steam", home);
++      roots[1] = home_steam;
++   }
++   for (int i = 0; i < 3 && !tool[0]; i++) {
++      if (!roots[i] || !*roots[i])
++         continue;
++      snprintf(tool, sizeof(tool), "%s/steamrtarm64/fossilize_replay", roots[i]);
++      if (access(tool, X_OK) != 0)
++         tool[0] = 0;
++   }
++   if (!tool[0]) {
++      vn_droiddeck_log("precompile: no fossilize_replay found; pipelines compile as the game meets them");
++      return;
++   }
++   char pattern[600];
++   glob_t g = { 0 };
++   snprintf(pattern, sizeof(pattern), "%s/fozpipelinesv6/*/steamapp_pipeline_cache.foz", steam_dir);
++   glob(pattern, 0, NULL, &g);
++   snprintf(pattern, sizeof(pattern), "%s/fozpipelinesv6/*/steam_pipeline_cache.foz", steam_dir);
++   glob(pattern, g.gl_pathc ? GLOB_APPEND : 0, NULL, &g);
++   if (!g.gl_pathc) {
++      vn_droiddeck_log("precompile: Steam has recorded no pipelines for this game yet (%s/fozpipelinesv6)",
++                       steam_dir);
++      globfree(&g);
++      return;
++   }
++   /* what the databases are now: a run is repeated only when they change */
++   char sig[1024];
++   int len = snprintf(sig, sizeof(sig), "%s", uuid_hex);
++   off_t total = 0;
++   for (size_t i = 0; i < g.gl_pathc && len < (int)sizeof(sig) - 64; i++) {
++      struct stat st;
++      if (stat(g.gl_pathv[i], &st) == 0) {
++         len += snprintf(sig + len, sizeof(sig) - len, " %lld:%lld", (long long)st.st_size,
++                         (long long)st.st_mtim.tv_sec);
++         total += st.st_size;
++      }
++   }
++   char done[600], started[600], logpath[600], text[1100];
++   snprintf(done, sizeof(done), "%s/precompile-%s.done", ddir, uuid_hex);
++   snprintf(started, sizeof(started), "%s/precompile-%s.started", ddir, uuid_hex);
++   snprintf(logpath, sizeof(logpath), "%s/precompile.log", ddir);
++   if (pcache_read_text(done, text, sizeof(text)) && !strcmp(text, sig)) {
++      vn_droiddeck_log("precompile: done for these databases (%zu, %.1f MiB)", g.gl_pathc,
++                       total / 1048576.0);
++      globfree(&g);
++      return;
++   }
++   if (pcache_read_text(started, text, sizeof(text))) {
++      char *nl = strchr(text, '\n');
++      const int pid = nl ? atoi(nl + 1) : 0;
++      char proc[64];
++      snprintf(proc, sizeof(proc), "/proc/%d", pid);
++      if (nl && pid > 0 && access(proc, F_OK) == 0) {
++         *nl = 0;
++         if (!strcmp(text, sig)) {
++            vn_droiddeck_log("precompile: still running (pid %d)", pid);
++            globfree(&g);
++            return;
++         }
++      }
++      pcache_log_tail(logpath);
++   }
++
++   /* sh writes the pid it runs as, runs the replay, and marks the databases done on success */
++   static const char script[] =
++      "printf '%s\\n%s' \"$DD_SIG\" \"$$\" > \"$DD_STARTED\"; "
++      "tool=\"$1\"; shift; n=; command -v nice >/dev/null 2>&1 && n='nice -n 10'; "
++      "$n \"$tool\" --num-threads 2 \"$@\" > \"$DD_LOG\" 2>&1; rc=$?; "
++      "echo \"exit $rc\" >> \"$DD_LOG\"; "
++      "[ $rc = 0 ] && printf '%s' \"$DD_SIG\" > \"$DD_DONE\"; rm -f \"$DD_STARTED\"";
++   char **argv = calloc(g.gl_pathc + 6, sizeof(char *));
++   size_t envc = 0;
++   while (environ[envc])
++      envc++;
++   char **envp = calloc(envc + 8, sizeof(char *));
++   if (!argv || !envp) {
++      free(argv);
++      free(envp);
++      globfree(&g);
++      return;
++   }
++   size_t a = 0;
++   argv[a++] = (char *)"sh";
++   argv[a++] = (char *)"-c";
++   argv[a++] = (char *)script;
++   argv[a++] = (char *)"droiddeck-precompile";
++   argv[a++] = tool;
++   for (size_t i = 0; i < g.gl_pathc; i++)
++      argv[a++] = g.gl_pathv[i];
++   argv[a] = NULL;
++   size_t e = 0;
++   for (size_t i = 0; i < envc; i++) {
++      const char *v = environ[i];
++      if (!strncmp(v, "LD_PRELOAD=", 11) || !strncmp(v, "MESA_SHADER_CACHE_DIR=", 22) ||
++          !strncmp(v, "MESA_GLSL_CACHE_DIR=", 20) || !strncmp(v, "DD_", 3))
++         continue;
++      envp[e++] = (char *)v;
++   }
++   char e_dir[600], e_sig[1100], e_started[620], e_done[620], e_log[620];
++   snprintf(e_dir, sizeof(e_dir), "MESA_SHADER_CACHE_DIR=%s", steam_dir);
++   snprintf(e_sig, sizeof(e_sig), "DD_SIG=%s", sig);
++   snprintf(e_started, sizeof(e_started), "DD_STARTED=%s", started);
++   snprintf(e_done, sizeof(e_done), "DD_DONE=%s", done);
++   snprintf(e_log, sizeof(e_log), "DD_LOG=%s", logpath);
++   envp[e++] = e_dir;
++   envp[e++] = e_sig;
++   envp[e++] = e_started;
++   envp[e++] = e_done;
++   envp[e++] = e_log;
++   envp[e++] = (char *)"DROIDDECK_VN_PRECOMPILE_CHILD=1";
++   envp[e++] = (char *)"DROIDDECK_VN_EMULATE_AS_DXVK=1";
++   envp[e] = NULL;
++   /* claimed before the spawn, under this process's pid, so this program's second device does
++    * not start another run; the run overwrites it with its own pid */
++   FILE *claim = fopen(started, "we");
++   if (claim) {
++      fprintf(claim, "%s\n%d", sig, (int)getpid());
++      fclose(claim);
++   }
++   pid_t pid = 0;
++   const int r = posix_spawn(&pid, "/bin/sh", NULL, NULL, argv, envp);
++   if (r == 0) {
++      thrd_t reaper;
++      if (thrd_create(&reaper, pcache_reap, (void *)(intptr_t)pid) == thrd_success)
++         thrd_detach(reaper);
++      vn_droiddeck_log("precompile: fossilize_replay started (pid %d) over %zu database(s), %.1f MiB; "
++                       "its pipelines join this game's cache as they compile (DROIDDECK_VN_PRECOMPILE=0 "
++                       "turns it off)", (int)pid, g.gl_pathc, total / 1048576.0);
++   } else {
++      vn_droiddeck_log("precompile: could not start %s (%s)", tool, strerror(r));
++   }
++   free(argv);
++   free(envp);
++   globfree(&g);
++}
++
+ void
+ vn_dd_pcache_init(struct vn_device *dev)
+ {
+@@ -333,6 +543,8 @@
+    pc->thread_started = thrd_create(&pc->thread, pcache_thread, dev) == thrd_success;
+    vn_droiddeck_log("pipeline cache: %s, %zu bytes loaded (DROIDDECK_VN_PIPELINE_CACHE=0 turns it off)",
+                     pc->path, size);
++   if (pcache_steam_dir())
++      pcache_precompile(pcache_steam_dir(), dir, uuid_hex);
+ }
+ 
+ void

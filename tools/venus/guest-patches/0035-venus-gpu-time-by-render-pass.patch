@@ -1,0 +1,1272 @@
+diff -ruN a/src/virtio/vulkan/meson.build b/src/virtio/vulkan/meson.build
+--- a/src/virtio/vulkan/meson.build	2026-10-31 01:38:39.880887018 +0000
++++ b/src/virtio/vulkan/meson.build	2026-10-31 01:43:05.095048039 +0000
+@@ -64,6 +64,7 @@
+   'vn_droiddeck_bc.c',
+   'vn_droiddeck_emu.c',
+   'vn_droiddeck_pcache.c',
++  'vn_droiddeck_prof.c',
+   'vn_droiddeck_stats.c',
+   'vn_feedback.c',
+   'vn_host_copy.c',
+diff -ruN a/src/virtio/vulkan/vn_command_buffer.c b/src/virtio/vulkan/vn_command_buffer.c
+--- a/src/virtio/vulkan/vn_command_buffer.c	2026-10-31 01:38:39.861857146 +0000
++++ b/src/virtio/vulkan/vn_command_buffer.c	2026-10-31 01:43:05.097710394 +0000
+@@ -27,6 +27,8 @@
+ static void
+ vn_cmd_submit(struct vn_command_buffer *cmd);
+ 
++#define VN_DD_COUNTS(commandBuffer) (&vn_command_buffer_from_handle(commandBuffer)->dd_counts)
++
+ #define VN_CMD_ENQUEUE(cmd_name, commandBuffer, ...)                         \
+    do {                                                                      \
+       struct vn_command_buffer *_cmd =                                       \
+@@ -749,6 +751,7 @@
+    }
+ 
+    vn_dd_bc_cmd_reset(cmd);
++   vn_dd_prof_cmd_reset(cmd);
+ }
+ 
+ void
+@@ -1060,6 +1063,8 @@
+ 
+    cmd->base.vk.state = MESA_VK_COMMAND_BUFFER_STATE_RECORDING;
+ 
++   vn_dd_prof_begin(cmd, pBeginInfo);
++
+    const VkCommandBufferInheritanceInfo *inheritance_info =
+       pBeginInfo->pInheritanceInfo;
+ 
+@@ -1129,6 +1134,8 @@
+    if (cmd->base.vk.state != MESA_VK_COMMAND_BUFFER_STATE_RECORDING)
+       return vn_error(instance, VK_ERROR_OUT_OF_HOST_MEMORY);
+ 
++   vn_dd_prof_end(cmd);
++
+    cmd_size = vn_sizeof_vkEndCommandBuffer(commandBuffer);
+    if (!vn_cs_encoder_reserve(&cmd->cs, cmd_size)) {
+       cmd->base.vk.state = MESA_VK_COMMAND_BUFFER_STATE_INVALID;
+@@ -1308,6 +1315,7 @@
+            uint32_t firstVertex,
+            uint32_t firstInstance)
+ {
++   vn_dd_count_draw(VN_DD_COUNTS(commandBuffer), 1);
+    VN_CMD_ENQUEUE(vkCmdDraw, commandBuffer, vertexCount, instanceCount,
+                   firstVertex, firstInstance);
+ }
+@@ -1318,6 +1326,8 @@
+ {
+    vn_cmd_begin_rendering(vn_command_buffer_from_handle(commandBuffer),
+                           pRenderingInfo);
++   vn_dd_prof_pass_begin(vn_command_buffer_from_handle(commandBuffer),
++                         pRenderingInfo, NULL);
+ 
+    VN_CMD_ENQUEUE(vkCmdBeginRendering, commandBuffer, pRenderingInfo);
+ }
+@@ -1328,6 +1338,7 @@
+    VN_CMD_ENQUEUE(vkCmdEndRendering, commandBuffer);
+ 
+    vn_cmd_end_rendering(vn_command_buffer_from_handle(commandBuffer));
++   vn_dd_prof_pass_end(vn_command_buffer_from_handle(commandBuffer));
+ }
+ 
+ void
+@@ -1338,6 +1349,7 @@
+                   int32_t vertexOffset,
+                   uint32_t firstInstance)
+ {
++   vn_dd_count_draw(VN_DD_COUNTS(commandBuffer), 1);
+    VN_CMD_ENQUEUE(vkCmdDrawIndexed, commandBuffer, indexCount, instanceCount,
+                   firstIndex, vertexOffset, firstInstance);
+ }
+@@ -1349,6 +1361,7 @@
+                    uint32_t drawCount,
+                    uint32_t stride)
+ {
++   vn_dd_count_draw(VN_DD_COUNTS(commandBuffer), MAX2(drawCount, 1));
+    VN_CMD_ENQUEUE(vkCmdDrawIndirect, commandBuffer, buffer, offset, drawCount,
+                   stride);
+ }
+@@ -1360,6 +1373,7 @@
+                           uint32_t drawCount,
+                           uint32_t stride)
+ {
++   vn_dd_count_draw(VN_DD_COUNTS(commandBuffer), MAX2(drawCount, 1));
+    VN_CMD_ENQUEUE(vkCmdDrawIndexedIndirect, commandBuffer, buffer, offset,
+                   drawCount, stride);
+ }
+@@ -1373,6 +1387,7 @@
+                         uint32_t maxDrawCount,
+                         uint32_t stride)
+ {
++   vn_dd_count_draw(VN_DD_COUNTS(commandBuffer), 1);
+    VN_CMD_ENQUEUE(vkCmdDrawIndirectCount, commandBuffer, buffer, offset,
+                   countBuffer, countBufferOffset, maxDrawCount, stride);
+ }
+@@ -1386,6 +1401,7 @@
+                                uint32_t maxDrawCount,
+                                uint32_t stride)
+ {
++   vn_dd_count_draw(VN_DD_COUNTS(commandBuffer), 1);
+    VN_CMD_ENQUEUE(vkCmdDrawIndexedIndirectCount, commandBuffer, buffer,
+                   offset, countBuffer, countBufferOffset, maxDrawCount,
+                   stride);
+@@ -1397,6 +1413,7 @@
+                uint32_t groupCountY,
+                uint32_t groupCountZ)
+ {
++   vn_dd_count_op(VN_DD_COUNTS(commandBuffer), VN_DD_OP_DISPATCH);
+    VN_CMD_ENQUEUE(vkCmdDispatch, commandBuffer, groupCountX, groupCountY,
+                   groupCountZ);
+ }
+@@ -1406,6 +1423,7 @@
+                        VkBuffer buffer,
+                        VkDeviceSize offset)
+ {
++   vn_dd_count_op(VN_DD_COUNTS(commandBuffer), VN_DD_OP_DISPATCH);
+    VN_CMD_ENQUEUE(vkCmdDispatchIndirect, commandBuffer, buffer, offset);
+ }
+ 
+@@ -1416,6 +1434,7 @@
+                  uint32_t regionCount,
+                  const VkBufferCopy *pRegions)
+ {
++   vn_dd_count_op(VN_DD_COUNTS(commandBuffer), VN_DD_OP_COPY);
+    VN_CMD_ENQUEUE(vkCmdCopyBuffer, commandBuffer, srcBuffer, dstBuffer,
+                   regionCount, pRegions);
+ }
+@@ -1424,6 +1443,7 @@
+ vn_CmdCopyBuffer2(VkCommandBuffer commandBuffer,
+                   const VkCopyBufferInfo2 *pCopyBufferInfo)
+ {
++   vn_dd_count_op(VN_DD_COUNTS(commandBuffer), VN_DD_OP_COPY);
+    VN_CMD_ENQUEUE(vkCmdCopyBuffer2, commandBuffer, pCopyBufferInfo);
+ }
+ 
+@@ -1436,6 +1456,7 @@
+                 uint32_t regionCount,
+                 const VkImageCopy *pRegions)
+ {
++   vn_dd_count_op(VN_DD_COUNTS(commandBuffer), VN_DD_OP_COPY);
+    if (vn_dd_bc_drop_image_copy(srcImage, dstImage))
+       return;
+    VN_CMD_ENQUEUE(vkCmdCopyImage, commandBuffer, srcImage, srcImageLayout,
+@@ -1446,6 +1467,7 @@
+ vn_CmdCopyImage2(VkCommandBuffer commandBuffer,
+                  const VkCopyImageInfo2 *pCopyImageInfo)
+ {
++   vn_dd_count_op(VN_DD_COUNTS(commandBuffer), VN_DD_OP_COPY);
+    if (vn_dd_bc_drop_image_copy(pCopyImageInfo->srcImage, pCopyImageInfo->dstImage))
+       return;
+    VN_CMD_ENQUEUE(vkCmdCopyImage2, commandBuffer, pCopyImageInfo);
+@@ -1461,6 +1483,7 @@
+                 const VkImageBlit *pRegions,
+                 VkFilter filter)
+ {
++   vn_dd_count_op(VN_DD_COUNTS(commandBuffer), VN_DD_OP_BLIT);
+    VN_CMD_ENQUEUE(vkCmdBlitImage, commandBuffer, srcImage, srcImageLayout,
+                   dstImage, dstImageLayout, regionCount, pRegions, filter);
+ }
+@@ -1469,6 +1492,7 @@
+ vn_CmdBlitImage2(VkCommandBuffer commandBuffer,
+                  const VkBlitImageInfo2 *pBlitImageInfo)
+ {
++   vn_dd_count_op(VN_DD_COUNTS(commandBuffer), VN_DD_OP_BLIT);
+    VN_CMD_ENQUEUE(vkCmdBlitImage2, commandBuffer, pBlitImageInfo);
+ }
+ 
+@@ -1480,6 +1504,7 @@
+                         uint32_t regionCount,
+                         const VkBufferImageCopy *pRegions)
+ {
++   vn_dd_count_op(VN_DD_COUNTS(commandBuffer), VN_DD_OP_COPY);
+    struct vn_dd_bc_copy dd_bc;
+    if (vn_dd_bc_copy_begin(commandBuffer, srcBuffer, dstImage, regionCount, pRegions, NULL,
+                            &dd_bc)) {
+@@ -1498,6 +1523,7 @@
+    VkCommandBuffer commandBuffer,
+    const VkCopyBufferToImageInfo2 *pCopyBufferToImageInfo)
+ {
++   vn_dd_count_op(VN_DD_COUNTS(commandBuffer), VN_DD_OP_COPY);
+    const VkCopyBufferToImageInfo2 *info = pCopyBufferToImageInfo;
+    struct vn_dd_bc_copy dd_bc;
+    if (vn_dd_bc_copy_begin(commandBuffer, info->srcBuffer, info->dstImage, info->regionCount,
+@@ -1520,6 +1546,7 @@
+                         uint32_t regionCount,
+                         const VkBufferImageCopy *pRegions)
+ {
++   vn_dd_count_op(VN_DD_COUNTS(commandBuffer), VN_DD_OP_COPY);
+    if (vn_dd_bc_drop_image_to_buffer(srcImage))
+       return;
+    VN_CMD_ENQUEUE(vkCmdCopyImageToBuffer, commandBuffer, srcImage,
+@@ -1531,6 +1558,7 @@
+    VkCommandBuffer commandBuffer,
+    const VkCopyImageToBufferInfo2 *pCopyImageToBufferInfo)
+ {
++   vn_dd_count_op(VN_DD_COUNTS(commandBuffer), VN_DD_OP_COPY);
+    if (vn_dd_bc_drop_image_to_buffer(pCopyImageToBufferInfo->srcImage))
+       return;
+    VN_CMD_ENQUEUE(vkCmdCopyImageToBuffer2, commandBuffer,
+@@ -1544,6 +1572,7 @@
+                    VkDeviceSize dataSize,
+                    const void *pData)
+ {
++   vn_dd_count_op(VN_DD_COUNTS(commandBuffer), VN_DD_OP_UPDATE);
+    VN_CMD_ENQUEUE(vkCmdUpdateBuffer, commandBuffer, dstBuffer, dstOffset,
+                   dataSize, pData);
+ }
+@@ -1555,6 +1584,7 @@
+                  VkDeviceSize size,
+                  uint32_t data)
+ {
++   vn_dd_count_op(VN_DD_COUNTS(commandBuffer), VN_DD_OP_UPDATE);
+    VN_CMD_ENQUEUE(vkCmdFillBuffer, commandBuffer, dstBuffer, dstOffset, size,
+                   data);
+ }
+@@ -1567,6 +1597,7 @@
+                       uint32_t rangeCount,
+                       const VkImageSubresourceRange *pRanges)
+ {
++   vn_dd_count_op(VN_DD_COUNTS(commandBuffer), VN_DD_OP_CLEAR);
+    VN_CMD_ENQUEUE(vkCmdClearColorImage, commandBuffer, image, imageLayout,
+                   pColor, rangeCount, pRanges);
+ }
+@@ -1579,6 +1610,7 @@
+                              uint32_t rangeCount,
+                              const VkImageSubresourceRange *pRanges)
+ {
++   vn_dd_count_op(VN_DD_COUNTS(commandBuffer), VN_DD_OP_CLEAR);
+    VN_CMD_ENQUEUE(vkCmdClearDepthStencilImage, commandBuffer, image,
+                   imageLayout, pDepthStencil, rangeCount, pRanges);
+ }
+@@ -1590,6 +1622,7 @@
+                        uint32_t rectCount,
+                        const VkClearRect *pRects)
+ {
++   vn_dd_count_op(VN_DD_COUNTS(commandBuffer), VN_DD_OP_CLEAR);
+    VN_CMD_ENQUEUE(vkCmdClearAttachments, commandBuffer, attachmentCount,
+                   pAttachments, rectCount, pRects);
+ }
+@@ -1603,6 +1636,7 @@
+                    uint32_t regionCount,
+                    const VkImageResolve *pRegions)
+ {
++   vn_dd_count_op(VN_DD_COUNTS(commandBuffer), VN_DD_OP_RESOLVE);
+    VN_CMD_ENQUEUE(vkCmdResolveImage, commandBuffer, srcImage, srcImageLayout,
+                   dstImage, dstImageLayout, regionCount, pRegions);
+ }
+@@ -1611,6 +1645,7 @@
+ vn_CmdResolveImage2(VkCommandBuffer commandBuffer,
+                     const VkResolveImageInfo2 *pResolveImageInfo)
+ {
++   vn_dd_count_op(VN_DD_COUNTS(commandBuffer), VN_DD_OP_RESOLVE);
+    VN_CMD_ENQUEUE(vkCmdResolveImage2, commandBuffer, pResolveImageInfo);
+ }
+ 
+@@ -1744,6 +1779,7 @@
+                       uint32_t imageMemoryBarrierCount,
+                       const VkImageMemoryBarrier *pImageMemoryBarriers)
+ {
++   vn_dd_count_op(VN_DD_COUNTS(commandBuffer), VN_DD_OP_BARRIER);
+    struct vn_command_buffer *cmd =
+       vn_command_buffer_from_handle(commandBuffer);
+ 
+@@ -1761,6 +1797,7 @@
+ vn_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
+                        const VkDependencyInfo *pDependencyInfo)
+ {
++   vn_dd_count_op(VN_DD_COUNTS(commandBuffer), VN_DD_OP_BARRIER);
+    struct vn_command_buffer *cmd =
+       vn_command_buffer_from_handle(commandBuffer);
+ 
+@@ -1885,6 +1922,7 @@
+                            VkDeviceSize stride,
+                            VkQueryResultFlags flags)
+ {
++   vn_dd_count_op(VN_DD_COUNTS(commandBuffer), VN_DD_OP_QUERY);
+    VN_CMD_ENQUEUE(vkCmdCopyQueryPoolResults, commandBuffer, queryPool,
+                   firstQuery, queryCount, dstBuffer, dstOffset, stride,
+                   flags);
+@@ -1922,6 +1960,8 @@
+       vn_framebuffer_from_handle(pRenderPassBegin->framebuffer),
+       pRenderPassBegin);
+ 
++   vn_dd_prof_pass_begin(cmd, NULL, pRenderPassBegin);
++
+    VN_CMD_ENQUEUE(vkCmdBeginRenderPass, commandBuffer, pRenderPassBegin,
+                   contents);
+ }
+@@ -1940,6 +1980,7 @@
+    VN_CMD_ENQUEUE(vkCmdEndRenderPass, commandBuffer);
+ 
+    vn_cmd_end_render_pass(vn_command_buffer_from_handle(commandBuffer));
++   vn_dd_prof_pass_end(vn_command_buffer_from_handle(commandBuffer));
+ }
+ 
+ void
+@@ -1955,6 +1996,8 @@
+       vn_framebuffer_from_handle(pRenderPassBegin->framebuffer),
+       pRenderPassBegin);
+ 
++   vn_dd_prof_pass_begin(cmd, NULL, pRenderPassBegin);
++
+    VN_CMD_ENQUEUE(vkCmdBeginRenderPass2, commandBuffer, pRenderPassBegin,
+                   pSubpassBeginInfo);
+ }
+@@ -1977,6 +2020,7 @@
+    VN_CMD_ENQUEUE(vkCmdEndRenderPass2, commandBuffer, pSubpassEndInfo);
+ 
+    vn_cmd_end_render_pass(vn_command_buffer_from_handle(commandBuffer));
++   vn_dd_prof_pass_end(vn_command_buffer_from_handle(commandBuffer));
+ }
+ 
+ void
+@@ -1993,6 +2037,9 @@
+       struct vn_command_buffer *secondary_cmd =
+          vn_command_buffer_from_handle(pCommandBuffers[i]);
+       vn_cmd_merge_query_records(primary_cmd, secondary_cmd);
++      primary_cmd->dd_counts.draws += secondary_cmd->dd_counts.draws;
++      primary_cmd->dd_counts.dispatches += secondary_cmd->dd_counts.dispatches;
++      primary_cmd->dd_counts.ops |= secondary_cmd->dd_counts.ops | VN_DD_OP_SECONDARY;
+    }
+ }
+ 
+@@ -2011,6 +2058,7 @@
+                    uint32_t groupCountY,
+                    uint32_t groupCountZ)
+ {
++   vn_dd_count_op(VN_DD_COUNTS(commandBuffer), VN_DD_OP_DISPATCH);
+    VN_CMD_ENQUEUE(vkCmdDispatchBase, commandBuffer, baseGroupX, baseGroupY,
+                   baseGroupZ, groupCountX, groupCountY, groupCountZ);
+ }
+@@ -2093,6 +2141,7 @@
+                                uint32_t counterOffset,
+                                uint32_t vertexStride)
+ {
++   vn_dd_count_draw(VN_DD_COUNTS(commandBuffer), 1);
+    VN_CMD_ENQUEUE(vkCmdDrawIndirectByteCountEXT, commandBuffer, instanceCount,
+                   firstInstance, counterBuffer, counterBufferOffset,
+                   counterOffset, vertexStride);
+@@ -2271,6 +2320,7 @@
+                    uint32_t firstInstance,
+                    uint32_t stride)
+ {
++   vn_dd_count_draw(VN_DD_COUNTS(commandBuffer), drawCount);
+    VN_CMD_ENQUEUE(vkCmdDrawMultiEXT, commandBuffer, drawCount, pVertexInfo,
+                   instanceCount, firstInstance, stride);
+ }
+@@ -2284,6 +2334,7 @@
+                           uint32_t stride,
+                           const int32_t *pVertexOffset)
+ {
++   vn_dd_count_draw(VN_DD_COUNTS(commandBuffer), drawCount);
+    VN_CMD_ENQUEUE(vkCmdDrawMultiIndexedEXT, commandBuffer, drawCount,
+                   pIndexInfo, instanceCount, firstInstance, stride,
+                   pVertexOffset);
+diff -ruN a/src/virtio/vulkan/vn_command_buffer.h b/src/virtio/vulkan/vn_command_buffer.h
+--- a/src/virtio/vulkan/vn_command_buffer.h	2026-10-31 01:38:39.863937652 +0000
++++ b/src/virtio/vulkan/vn_command_buffer.h	2026-10-31 01:43:05.100375840 +0000
+@@ -12,6 +12,7 @@
+ #define VN_COMMAND_BUFFER_H
+ 
+ #include "vn_common.h"
++#include "vn_droiddeck_prof.h"
+ 
+ #include "vn_cs.h"
+ 
+@@ -80,6 +81,11 @@
+ 
+    /* droiddeck: staging memory and decodes of BC uploads (vn_droiddeck_bc.h) */
+    struct vn_dd_bc_cmd *dd_bc;
++
++   /* droiddeck: what it recorded since the last boundary, and its pass timing when it is one of
++    * the profiled (vn_droiddeck_prof.h) */
++   struct vn_dd_cmd_counts dd_counts;
++   struct vn_dd_prof_cmd *dd_prof;
+ };
+ VK_DEFINE_HANDLE_CASTS(vn_command_buffer,
+                        base.vk.base,
+diff -ruN a/src/virtio/vulkan/vn_common.c b/src/virtio/vulkan/vn_common.c
+--- a/src/virtio/vulkan/vn_common.c	2026-10-31 01:38:39.882878731 +0000
++++ b/src/virtio/vulkan/vn_common.c	2026-10-31 01:43:05.102818408 +0000
+@@ -9,6 +9,7 @@
+  */
+ 
+ #include "vn_common.h"
++#include "vn_droiddeck_prof.h"
+ 
+ #include <stdio.h>
+ #include <string.h>
+@@ -313,18 +314,32 @@
+  * which waits for the queue to go idle when the renderer has no implicit or explicit fencing).
+  * Every 10 s the averages go to droiddeck_vulkan.txt. This is the measurement the 24->60 fps
+  * work needs: if the wait is most of the frame, the fix is pipelining, not the CPU work. */
++static int
++vn_dd_float_cmp(const void *a, const void *b)
++{
++   const float x = *(const float *)a, y = *(const float *)b;
++   return x < y ? -1 : x > y;
++}
++
+ void
+ vn_dd_frame_stats(int64_t present_wait_ns)
+ {
+    static int64_t last, since;
+    static uint64_t frames, wait_total;
+    static unsigned reports;
++   /* the frame times of the window, for how even they are: a steady 9 fps and 20 fps with
++    * hitches can have the same average */
++   static float times[4096];
++   static unsigned time_count;
+    const int64_t now = os_time_get_nano();
+ 
++   vn_dd_prof_present();
+    mtx_lock(&vn_dd_stats_mutex);
+    if (last && now > last) {
+       frames++;
+       wait_total += present_wait_ns > 0 ? (uint64_t)present_wait_ns : 0;
++      if (time_count < ARRAY_SIZE(times))
++         times[time_count++] = (float)((now - last) / 1e6);
+    }
+    last = now;
+    if (!since)
+@@ -332,11 +347,24 @@
+    if (now - since >= 10000000000ll) {
+       if (frames && ++reports <= 2000) {
+          const double span = (double)(now - since);
+-         vn_droiddeck_log("frames: %.1f fps (%.2f ms/frame); present GPU wait %.2f ms/frame",
++         float median = 0, p95 = 0, max = 0;
++         unsigned hitches = 0;
++         if (time_count) {
++            qsort(times, time_count, sizeof(times[0]), vn_dd_float_cmp);
++            median = times[time_count / 2];
++            p95 = times[MIN2(time_count - 1, time_count * 95 / 100)];
++            max = times[time_count - 1];
++            for (unsigned i = 0; i < time_count; i++)
++               hitches += times[i] > 2.0f * median && times[i] > 25.0f;
++         }
++         vn_droiddeck_log("frames: %.1f fps (%.2f ms/frame); present GPU wait %.2f ms/frame; "
++                          "frame times median %.1f, 95%% %.1f, max %.1f ms, %u over twice the "
++                          "median",
+                           frames * 1e9 / span, span / 1e6 / frames,
+-                          (double)wait_total / 1e6 / frames);
++                          (double)wait_total / 1e6 / frames, median, p95, max, hitches);
+       }
+       frames = wait_total = 0;
++      time_count = 0;
+       since = now;
+    }
+    mtx_unlock(&vn_dd_stats_mutex);
+diff -ruN a/src/virtio/vulkan/vn_device.c b/src/virtio/vulkan/vn_device.c
+--- a/src/virtio/vulkan/vn_device.c	2026-10-31 01:38:39.875985731 +0000
++++ b/src/virtio/vulkan/vn_device.c	2026-10-31 01:43:05.104819786 +0000
+@@ -11,6 +11,7 @@
+ #include "vn_device.h"
+ #include "vn_droiddeck_stats.h"
+ #include "vn_droiddeck_pcache.h"
++#include "vn_droiddeck_prof.h"
+ 
+ #include <string.h>
+ 
+@@ -678,6 +679,7 @@
+    if (!dev)
+       return;
+ 
++   vn_dd_prof_device_fini(dev);
+    vn_dd_pcache_fini(dev);
+ 
+    vn_image_reqs_cache_fini(dev);
+diff -ruN a/src/virtio/vulkan/vn_device.h b/src/virtio/vulkan/vn_device.h
+--- a/src/virtio/vulkan/vn_device.h	2026-10-31 01:38:39.879002118 +0000
++++ b/src/virtio/vulkan/vn_device.h	2026-10-31 01:43:05.106536836 +0000
+@@ -47,6 +47,9 @@
+ 
+    /* DroidDeck: the device's own pipeline cache, kept on disk (vn_droiddeck_pcache.c) */
+    struct vn_dd_pcache *dd_pcache;
++
++   /* DroidDeck: timestamp pools for the render-pass profile (vn_droiddeck_prof.c) */
++   struct vn_dd_prof_dev *dd_prof;
+ };
+ VK_DEFINE_HANDLE_CASTS(vn_device,
+                        base.vk.base,
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck_bc.c
+--- a/src/virtio/vulkan/vn_droiddeck_bc.c	2026-10-31 01:38:39.872563217 +0000
++++ b/src/virtio/vulkan/vn_droiddeck_bc.c	2026-10-31 01:43:05.108058431 +0000
+@@ -1305,6 +1305,7 @@
+          vn_CmdBindDescriptorSets(cmd_handle, VK_PIPELINE_BIND_POINT_COMPUTE, bc_gpu_dev.layout, 0,
+                                   1, &chunk->set, 1, &dyn);
+          vn_CmdDispatch(cmd_handle, groups, 1, 1);
++         vn_dd_count_op(&vn_command_buffer_from_handle(cmd_handle)->dd_counts, VN_DD_OP_BC);
+       }
+    }
+ 
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_prof.c b/src/virtio/vulkan/vn_droiddeck_prof.c
+--- a/src/virtio/vulkan/vn_droiddeck_prof.c	1970-01-01 00:00:00.000000000 +0000
++++ b/src/virtio/vulkan/vn_droiddeck_prof.c	2026-10-31 01:43:05.110917499 +0000
+@@ -0,0 +1,650 @@
++/*
++ * DroidDeck: where a game's GPU time goes, render pass by render pass (see the header).
++ * SPDX-License-Identifier: MIT
++ */
++
++#include "vn_droiddeck_prof.h"
++
++#include <inttypes.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "util/os_time.h"
++#include "util/simple_mtx.h"
++#include "util/u_debug.h"
++#include "vk_enum_to_str.h"
++
++#include "vn_command_buffer.h"
++#include "vn_device.h"
++#include "vn_image.h"
++#include "vn_instance.h"
++#include "vn_physical_device.h"
++
++#define DD_QUERIES 128   /* timestamps a command buffer can have: 63 passes */
++#define DD_POOLS_MAX 96  /* query pools per device, in use or waiting for the GPU */
++#define DD_PENDING_MAX 96
++#define DD_KINDS 192
++#define DD_TOP 10
++#define DD_REPORTS_MAX 120
++
++enum { DD_SEG_BETWEEN, DD_SEG_PASS };
++
++struct dd_seg {
++   uint16_t q0, q1;
++   uint8_t kind;
++   struct vn_dd_cmd_counts counts;
++   uint64_t key;
++   char desc[168];
++};
++
++struct dd_pool {
++   VkQueryPool pool;
++   /* the first timestamp of its last use: a recycled pool reads back its old results until the
++    * GPU runs the new command buffer's reset, so results that start the same are not new */
++   uint64_t last_ts0;
++   struct dd_pool *next;
++};
++
++struct vn_dd_prof_cmd {
++   struct vn_device *dev;
++   struct dd_pool *pool;
++   uint32_t queries;  /* written so far */
++   uint32_t open_q;   /* the timestamp the open span started at */
++   bool in_pass, ended, full;
++   struct dd_seg pass; /* the open pass's description */
++   uint32_t seg_count, seg_cap;
++   struct dd_seg *segs;
++};
++
++struct vn_dd_prof_dev {
++   struct dd_pool *free;
++   uint32_t pools;
++};
++
++struct dd_kind {
++   uint64_t key;
++   uint64_t ns, max_ns, count, draws;
++   uint8_t type;
++   char desc[168];
++};
++
++static simple_mtx_t dd_lock = SIMPLE_MTX_INITIALIZER;
++static struct {
++   int64_t period_start;
++   uint64_t frames, cmds, cmd_ns, pass_ns, between_ns, passes, dropped;
++   uint32_t kind_count;
++   struct dd_kind kinds[DD_KINDS];
++   struct vn_dd_prof_cmd *pending[DD_PENDING_MAX];
++   uint32_t pending_count;
++   unsigned reports;
++} dd;
++
++static int64_t
++dd_interval_ns(void)
++{
++   static int64_t v = -1;
++   if (v < 0)
++      v = debug_get_num_option("DROIDDECK_VN_STATS_MS", 10000) * 1000000ll;
++   return v;
++}
++
++static int64_t
++dd_window_ns(void)
++{
++   static int64_t v = -1;
++   if (v < 0) {
++      v = debug_get_num_option("DROIDDECK_VN_PASS_STATS_MS", 2000) * 1000000ll;
++      if (!debug_get_bool_option("DROIDDECK_VN_STATS", true))
++         v = 0;
++   }
++   return v;
++}
++
++/* under dd_lock */
++static bool
++dd_window_active(int64_t now)
++{
++   if (!dd.period_start)
++      dd.period_start = now;
++   return now - dd.period_start < dd_window_ns();
++}
++
++static bool
++dd_program_profiled(struct vn_device *dev)
++{
++   const char *engine = dev->instance->base.vk.app_info.engine_name;
++   /* GL through Zink has its own reports; the precompile's replay is not a frame */
++   if (engine && !strcmp(engine, "mesa zink"))
++      return false;
++   return !debug_get_bool_option("DROIDDECK_VN_PRECOMPILE_CHILD", false);
++}
++
++/* ---- pools ---- */
++
++static struct dd_pool *
++dd_pool_get(struct vn_device *dev)
++{
++   simple_mtx_lock(&dd_lock);
++   if (!dev->dd_prof)
++      dev->dd_prof = calloc(1, sizeof(*dev->dd_prof));
++   struct vn_dd_prof_dev *pd = dev->dd_prof;
++   struct dd_pool *p = NULL;
++   if (pd && pd->free) {
++      p = pd->free;
++      pd->free = p->next;
++   } else if (pd && pd->pools < DD_POOLS_MAX) {
++      pd->pools++;
++      simple_mtx_unlock(&dd_lock);
++      p = calloc(1, sizeof(*p));
++      const VkQueryPoolCreateInfo info = {
++         .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
++         .queryType = VK_QUERY_TYPE_TIMESTAMP,
++         .queryCount = DD_QUERIES,
++      };
++      if (!p || vn_CreateQueryPool(vn_device_to_handle(dev), &info, NULL, &p->pool) != VK_SUCCESS) {
++         free(p);
++         simple_mtx_lock(&dd_lock);
++         pd->pools--;
++         simple_mtx_unlock(&dd_lock);
++         return NULL;
++      }
++      return p;
++   }
++   simple_mtx_unlock(&dd_lock);
++   return p;
++}
++
++/* under dd_lock */
++static void
++dd_pool_put_locked(struct vn_device *dev, struct dd_pool *p)
++{
++   if (!p)
++      return;
++   if (!dev->dd_prof) {
++      vn_DestroyQueryPool(vn_device_to_handle(dev), p->pool, NULL);
++      free(p);
++      return;
++   }
++   p->next = dev->dd_prof->free;
++   dev->dd_prof->free = p;
++}
++
++static void
++dd_prof_free(struct vn_dd_prof_cmd *p)
++{
++   if (!p)
++      return;
++   free(p->segs);
++   free(p);
++}
++
++/* ---- recording ---- */
++
++static void
++dd_timestamp(struct vn_command_buffer *cmd, struct vn_dd_prof_cmd *p)
++{
++   vn_CmdWriteTimestamp(vn_command_buffer_to_handle(cmd), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
++                        p->pool->pool, p->queries);
++   p->queries++;
++}
++
++static struct dd_seg *
++dd_seg_push(struct vn_dd_prof_cmd *p)
++{
++   if (p->seg_count == p->seg_cap) {
++      const uint32_t cap = p->seg_cap ? p->seg_cap * 2 : 16;
++      struct dd_seg *segs = realloc(p->segs, cap * sizeof(*segs));
++      if (!segs)
++         return NULL;
++      p->segs = segs;
++      p->seg_cap = cap;
++   }
++   return &p->segs[p->seg_count++];
++}
++
++static uint64_t
++dd_hash(uint64_t h, const void *data, size_t size)
++{
++   const uint8_t *b = data;
++   if (!h)
++      h = 1469598103934665603ull;
++   for (size_t i = 0; i < size; i++) {
++      h ^= b[i];
++      h *= 1099511628211ull;
++   }
++   return h;
++}
++
++/* close the open span at a new timestamp, as a pass or the work between passes */
++static void
++dd_close_span(struct vn_command_buffer *cmd, struct vn_dd_prof_cmd *p, bool pass)
++{
++   const uint32_t q0 = p->open_q;
++   dd_timestamp(cmd, p);
++   p->open_q = p->queries - 1;
++   struct dd_seg *s = dd_seg_push(p);
++   if (!s) {
++      p->full = true;
++      return;
++   }
++   if (pass) {
++      *s = p->pass;
++   } else {
++      memset(s, 0, sizeof(*s));
++      s->kind = DD_SEG_BETWEEN;
++   }
++   s->q0 = q0;
++   s->q1 = p->open_q;
++   s->counts = cmd->dd_counts;
++   memset(&cmd->dd_counts, 0, sizeof(cmd->dd_counts));
++   if (!pass) {
++      const uint32_t ops = s->counts.ops & ~VN_DD_OP_SECONDARY;
++      s->key = dd_hash(0, "between", 7);
++      s->key = dd_hash(s->key, &ops, sizeof(ops));
++   }
++}
++
++void
++vn_dd_prof_begin(struct vn_command_buffer *cmd, const VkCommandBufferBeginInfo *info)
++{
++   memset(&cmd->dd_counts, 0, sizeof(cmd->dd_counts));
++   if (cmd->base.vk.level != VK_COMMAND_BUFFER_LEVEL_PRIMARY ||
++       !(info->flags & VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT) ||
++       (info->flags & VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT) || !dd_window_ns())
++      return;
++   struct vn_device *dev = vn_device_from_vk(cmd->base.vk.pool->base.device);
++   const VkQueueFamilyProperties *qf =
++      cmd->base.vk.pool->queue_family_index < dev->physical_device->queue_family_count
++         ? &dev->physical_device->queue_family_properties[cmd->base.vk.pool->queue_family_index]
++               .queueFamilyProperties
++         : NULL;
++   if (!qf || !qf->timestampValidBits || !dd_program_profiled(dev))
++      return;
++   simple_mtx_lock(&dd_lock);
++   const bool active = dd_window_active(os_time_get_nano()) && dd.pending_count < DD_PENDING_MAX;
++   simple_mtx_unlock(&dd_lock);
++   if (!active)
++      return;
++   struct vn_dd_prof_cmd *p = calloc(1, sizeof(*p));
++   if (!p)
++      return;
++   p->dev = dev;
++   p->pool = dd_pool_get(dev);
++   if (!p->pool) {
++      free(p);
++      return;
++   }
++   vn_CmdResetQueryPool(vn_command_buffer_to_handle(cmd), p->pool->pool, 0, DD_QUERIES);
++   dd_timestamp(cmd, p);
++   p->open_q = 0;
++   cmd->dd_prof = p;
++}
++
++static char
++dd_load(VkAttachmentLoadOp op)
++{
++   switch (op) {
++   case VK_ATTACHMENT_LOAD_OP_LOAD: return 'L';
++   case VK_ATTACHMENT_LOAD_OP_CLEAR: return 'C';
++   case VK_ATTACHMENT_LOAD_OP_DONT_CARE: return 'D';
++   default: return 'N';
++   }
++}
++
++static char
++dd_store(VkAttachmentStoreOp op)
++{
++   switch (op) {
++   case VK_ATTACHMENT_STORE_OP_STORE: return 'S';
++   case VK_ATTACHMENT_STORE_OP_DONT_CARE: return 'D';
++   default: return 'N';
++   }
++}
++
++static const char *
++dd_format(VkFormat format)
++{
++   const char *s = vk_Format_to_str(format);
++   return s && !strncmp(s, "VK_FORMAT_", 10) ? s + 10 : "?";
++}
++
++static const struct vn_image *
++dd_view_image(VkImageView view)
++{
++   return view ? vn_image_view_from_handle(view)->image : NULL;
++}
++
++static void
++dd_describe_rendering(struct dd_seg *s, const VkRenderingInfo *r)
++{
++   size_t len = 0;
++   const size_t cap = sizeof(s->desc);
++   uint32_t samples = 1;
++   len += snprintf(s->desc + len, cap - len, "%ux%u", r->renderArea.extent.width,
++                   r->renderArea.extent.height);
++   if (r->layerCount > 1)
++      len += snprintf(s->desc + len, cap - len, "x%u", r->layerCount);
++   for (uint32_t i = 0; i < r->colorAttachmentCount && len < cap; i++) {
++      const VkRenderingAttachmentInfo *a = &r->pColorAttachments[i];
++      const struct vn_image *img = dd_view_image(a->imageView);
++      if (!img)
++         continue;
++      samples = MAX2(samples, (uint32_t)img->base.vk.samples);
++      len += snprintf(s->desc + len, cap - len, " %s %c%c%s", dd_format(img->base.vk.format),
++                      dd_load(a->loadOp), dd_store(a->storeOp),
++                      a->resolveImageView ? "+resolve" : "");
++   }
++   const VkRenderingAttachmentInfo *d = r->pDepthAttachment, *st = r->pStencilAttachment;
++   const struct vn_image *dimg = d ? dd_view_image(d->imageView) : NULL;
++   const struct vn_image *simg = st ? dd_view_image(st->imageView) : NULL;
++   if (dimg && len < cap) {
++      samples = MAX2(samples, (uint32_t)dimg->base.vk.samples);
++      len += snprintf(s->desc + len, cap - len, " %s %c%c", dd_format(dimg->base.vk.format),
++                      dd_load(d->loadOp), dd_store(d->storeOp));
++      if (simg == dimg && len < cap)
++         len += snprintf(s->desc + len, cap - len, "/%c%c", dd_load(st->loadOp), dd_store(st->storeOp));
++   }
++   if (simg && simg != dimg && len < cap)
++      len += snprintf(s->desc + len, cap - len, " stencil %s %c%c", dd_format(simg->base.vk.format),
++                      dd_load(st->loadOp), dd_store(st->storeOp));
++   if (len < cap)
++      len += snprintf(s->desc + len, cap - len, ", %u sample%s%s%s", samples, samples > 1 ? "s" : "",
++                      (r->flags & VK_RENDERING_RESUMING_BIT) ? ", resumed" : "",
++                      (r->flags & VK_RENDERING_SUSPENDING_BIT) ? ", suspended" : "");
++}
++
++void
++vn_dd_prof_pass_begin(struct vn_command_buffer *cmd,
++                      const VkRenderingInfo *rendering,
++                      const VkRenderPassBeginInfo *render_pass)
++{
++   struct vn_dd_prof_cmd *p = cmd->dd_prof;
++   if (!p || p->ended || p->full || p->in_pass)
++      return;
++   if (p->queries + 3 > DD_QUERIES) {
++      p->full = true;
++      return;
++   }
++   dd_close_span(cmd, p, false);
++   if (p->full)
++      return;
++   memset(&p->pass, 0, sizeof(p->pass));
++   p->pass.kind = DD_SEG_PASS;
++   if (rendering) {
++      dd_describe_rendering(&p->pass, rendering);
++   } else {
++      snprintf(p->pass.desc, sizeof(p->pass.desc), "%ux%u (render pass object)",
++               render_pass->renderArea.extent.width, render_pass->renderArea.extent.height);
++   }
++   p->pass.key = dd_hash(0, p->pass.desc, strlen(p->pass.desc));
++   p->in_pass = true;
++}
++
++void
++vn_dd_prof_pass_end(struct vn_command_buffer *cmd)
++{
++   struct vn_dd_prof_cmd *p = cmd->dd_prof;
++   if (!p || p->ended || !p->in_pass)
++      return;
++   p->in_pass = false;
++   dd_close_span(cmd, p, true);
++}
++
++void
++vn_dd_prof_end(struct vn_command_buffer *cmd)
++{
++   struct vn_dd_prof_cmd *p = cmd->dd_prof;
++   if (!p || p->ended)
++      return;
++   if (p->full) {
++      /* the rest goes uncounted by kind, but the command buffer's total stays right */
++      if (p->queries < DD_QUERIES)
++         dd_timestamp(cmd, p);
++   } else if (!p->in_pass && p->queries < DD_QUERIES) {
++      dd_close_span(cmd, p, false);
++   }
++   p->ended = true;
++}
++
++void
++vn_dd_prof_cmd_reset(struct vn_command_buffer *cmd)
++{
++   struct vn_dd_prof_cmd *p = cmd->dd_prof;
++   memset(&cmd->dd_counts, 0, sizeof(cmd->dd_counts));
++   if (!p)
++      return;
++   cmd->dd_prof = NULL;
++   simple_mtx_lock(&dd_lock);
++   dd_pool_put_locked(p->dev, p->pool);
++   simple_mtx_unlock(&dd_lock);
++   dd_prof_free(p);
++}
++
++/* ---- results ---- */
++
++static void
++dd_between_desc(char *out, size_t cap, uint32_t ops)
++{
++   static const struct {
++      uint32_t bit;
++      const char *name;
++   } names[] = {
++      { VN_DD_OP_BC, "BC decodes" },      { VN_DD_OP_DISPATCH, "dispatches" },
++      { VN_DD_OP_COPY, "copies" },        { VN_DD_OP_BLIT, "blits" },
++      { VN_DD_OP_CLEAR, "clears" },       { VN_DD_OP_RESOLVE, "resolves" },
++      { VN_DD_OP_UPDATE, "buffer fills" }, { VN_DD_OP_QUERY, "queries" },
++      { VN_DD_OP_BARRIER, "barriers" },
++   };
++   size_t len = snprintf(out, cap, "between passes:");
++   bool any = false;
++   for (unsigned i = 0; i < ARRAY_SIZE(names) && len < cap; i++) {
++      if (ops & names[i].bit) {
++         len += snprintf(out + len, cap - len, "%s %s", any ? "," : "", names[i].name);
++         any = true;
++      }
++   }
++   if (!any && len < cap)
++      snprintf(out + len, cap - len, " nothing recorded");
++}
++
++/* under dd_lock */
++static void
++dd_add(const struct dd_seg *s, uint64_t ns)
++{
++   struct dd_kind *k = NULL;
++   for (uint32_t i = 0; i < dd.kind_count; i++) {
++      if (dd.kinds[i].key == s->key) {
++         k = &dd.kinds[i];
++         break;
++      }
++   }
++   if (!k) {
++      if (dd.kind_count == DD_KINDS) {
++         dd.dropped++;
++         return;
++      }
++      k = &dd.kinds[dd.kind_count++];
++      memset(k, 0, sizeof(*k));
++      k->key = s->key;
++      k->type = s->kind;
++      if (s->kind == DD_SEG_PASS)
++         memcpy(k->desc, s->desc, sizeof(k->desc));
++      else
++         dd_between_desc(k->desc, sizeof(k->desc), s->counts.ops & ~VN_DD_OP_SECONDARY);
++   }
++   k->ns += ns;
++   k->count++;
++   k->draws += s->counts.draws;
++   if (ns > k->max_ns)
++      k->max_ns = ns;
++   if (s->kind == DD_SEG_PASS) {
++      dd.pass_ns += ns;
++      dd.passes++;
++   } else {
++      dd.between_ns += ns;
++   }
++}
++
++/* under dd_lock: true when the GPU was done with it (and it was counted) */
++static bool
++dd_collect_locked(struct vn_dd_prof_cmd *p)
++{
++   uint64_t ts[DD_QUERIES];
++   if (vn_GetQueryPoolResults(vn_device_to_handle(p->dev), p->pool->pool, 0, p->queries,
++                              sizeof(ts), ts, sizeof(ts[0]), VK_QUERY_RESULT_64_BIT) != VK_SUCCESS ||
++       ts[0] == p->pool->last_ts0)
++      return false;
++   p->pool->last_ts0 = ts[0];
++   const double period = p->dev->physical_device->base.vk.properties.timestampPeriod;
++   const uint64_t mask = p->dev->physical_device
++                               ->queue_family_properties[0]
++                               .queueFamilyProperties.timestampValidBits >= 64
++                            ? ~0ull
++                            : (1ull << p->dev->physical_device->queue_family_properties[0]
++                                          .queueFamilyProperties.timestampValidBits) -
++                                 1;
++   if (p->queries >= 2) {
++      const uint64_t span = (ts[p->queries - 1] - ts[0]) & mask;
++      const uint64_t ns = (uint64_t)(span * period);
++      if (ns < 10000000000ull) {
++         dd.cmds++;
++         dd.cmd_ns += ns;
++      }
++   }
++   for (uint32_t i = 0; i < p->seg_count; i++) {
++      const struct dd_seg *s = &p->segs[i];
++      if (s->q1 >= p->queries)
++         continue;
++      const uint64_t ns = (uint64_t)(((ts[s->q1] - ts[s->q0]) & mask) * period);
++      if (ns < 10000000000ull)
++         dd_add(s, ns);
++   }
++   return true;
++}
++
++static int
++dd_kind_cmp(const void *a, const void *b)
++{
++   const struct dd_kind *x = a, *y = b;
++   return x->ns < y->ns ? 1 : x->ns > y->ns ? -1 : 0;
++}
++
++/* under dd_lock */
++static void
++dd_report_locked(int64_t now)
++{
++   const double secs = (now - dd.period_start) / 1e9;
++   const uint64_t frames = dd.frames;
++   if (dd.cmds && dd.reports < DD_REPORTS_MAX) {
++      dd.reports++;
++      const double per = frames ? (double)frames : MAX2(dd_window_ns() / 1e9, 0.001);
++      const char *unit = frames ? "frame" : "s";
++      const double total = dd.pass_ns + dd.between_ns;
++      vn_droiddeck_log("gpu passes over %.1f s of %.0f (%" PRIu64 " frames, %" PRIu64 " command "
++                       "buffers): %.1f ms measured = %.1f ms/%s; render passes %.1f ms (%.0f%%) "
++                       "in %" PRIu64 ", between passes %.1f ms (%.0f%%)%s",
++                       dd_window_ns() / 1e9, secs, frames, dd.cmds, dd.cmd_ns / 1e6,
++                       dd.cmd_ns / 1e6 / per, unit, dd.pass_ns / 1e6,
++                       total ? dd.pass_ns * 100.0 / total : 0.0, dd.passes, dd.between_ns / 1e6,
++                       total ? dd.between_ns * 100.0 / total : 0.0,
++                       dd.dropped ? " (some kinds not kept)" : "");
++      qsort(dd.kinds, dd.kind_count, sizeof(dd.kinds[0]), dd_kind_cmp);
++      for (uint32_t i = 0; i < dd.kind_count && i < DD_TOP; i++) {
++         const struct dd_kind *k = &dd.kinds[i];
++         if (k->type == DD_SEG_PASS)
++            vn_droiddeck_log("gpu passes %u: %.2f ms/%s (%.0f%%), %.1f per %s, %.0f draws each, "
++                             "max %.2f ms: %s",
++                             i + 1, k->ns / 1e6 / per, unit, total ? k->ns * 100.0 / total : 0.0,
++                             k->count / per, unit, (double)k->draws / k->count, k->max_ns / 1e6,
++                             k->desc);
++         else
++            vn_droiddeck_log("gpu passes %u: %.2f ms/%s (%.0f%%), %.1f per %s, max %.2f ms: %s",
++                             i + 1, k->ns / 1e6 / per, unit, total ? k->ns * 100.0 / total : 0.0,
++                             k->count / per, unit, k->max_ns / 1e6, k->desc);
++      }
++   }
++   dd.frames = dd.cmds = dd.cmd_ns = dd.pass_ns = dd.between_ns = dd.passes = dd.dropped = 0;
++   dd.kind_count = 0;
++   dd.period_start = now;
++}
++
++void
++vn_dd_prof_submit(uint32_t count, const VkSubmitInfo *batches, const VkSubmitInfo2 *batches2)
++{
++   if (!dd_window_ns())
++      return;
++   simple_mtx_lock(&dd_lock);
++   for (uint32_t i = 0; i < count; i++) {
++      const uint32_t n = batches ? batches[i].commandBufferCount : batches2[i].commandBufferInfoCount;
++      for (uint32_t j = 0; j < n; j++) {
++         VkCommandBuffer handle =
++            batches ? batches[i].pCommandBuffers[j] : batches2[i].pCommandBufferInfos[j].commandBuffer;
++         struct vn_command_buffer *cmd = vn_command_buffer_from_handle(handle);
++         struct vn_dd_prof_cmd *p = cmd ? cmd->dd_prof : NULL;
++         if (!p || !p->ended)
++            continue;
++         cmd->dd_prof = NULL;
++         if (dd.pending_count < DD_PENDING_MAX) {
++            dd.pending[dd.pending_count++] = p;
++         } else {
++            /* cannot happen (vn_dd_prof_begin stops first); its pool stays with the GPU */
++            dd_prof_free(p);
++         }
++      }
++   }
++   for (uint32_t i = 0; i < dd.pending_count;) {
++      struct vn_dd_prof_cmd *p = dd.pending[i];
++      if (dd_collect_locked(p)) {
++         dd_pool_put_locked(p->dev, p->pool);
++         dd_prof_free(p);
++         dd.pending[i] = dd.pending[--dd.pending_count];
++      } else {
++         i++;
++      }
++   }
++   const int64_t now = os_time_get_nano();
++   if (dd.period_start && now - dd.period_start >= dd_interval_ns())
++      dd_report_locked(now);
++   simple_mtx_unlock(&dd_lock);
++}
++
++void
++vn_dd_prof_present(void)
++{
++   if (!dd_window_ns())
++      return;
++   simple_mtx_lock(&dd_lock);
++   if (dd.period_start && dd_window_active(os_time_get_nano()))
++      dd.frames++;
++   simple_mtx_unlock(&dd_lock);
++}
++
++void
++vn_dd_prof_device_fini(struct vn_device *dev)
++{
++   simple_mtx_lock(&dd_lock);
++   for (uint32_t i = 0; i < dd.pending_count;) {
++      struct vn_dd_prof_cmd *p = dd.pending[i];
++      if (p->dev == dev) {
++         dd_collect_locked(p);
++         vn_DestroyQueryPool(vn_device_to_handle(dev), p->pool->pool, NULL);
++         free(p->pool);
++         dd_prof_free(p);
++         dd.pending[i] = dd.pending[--dd.pending_count];
++      } else {
++         i++;
++      }
++   }
++   struct vn_dd_prof_dev *pd = dev->dd_prof;
++   dev->dd_prof = NULL;
++   simple_mtx_unlock(&dd_lock);
++   if (!pd)
++      return;
++   for (struct dd_pool *p = pd->free, *next; p; p = next) {
++      next = p->next;
++      vn_DestroyQueryPool(vn_device_to_handle(dev), p->pool, NULL);
++      free(p);
++   }
++   free(pd);
++}
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_prof.h b/src/virtio/vulkan/vn_droiddeck_prof.h
+--- a/src/virtio/vulkan/vn_droiddeck_prof.h	1970-01-01 00:00:00.000000000 +0000
++++ b/src/virtio/vulkan/vn_droiddeck_prof.h	2026-10-31 01:43:05.112236858 +0000
+@@ -0,0 +1,92 @@
++/*
++ * DroidDeck: where a game's GPU time goes, render pass by render pass.
++ *
++ * The 10 s "gpu over" report (vn_droiddeck_stats.h) says how busy the GPU is; Lake on the Pixel
++ * 9 Pro XL has it 96-99% busy at 8-10 fps, about 100 ms of GPU work per frame at 1602x720. This
++ * says what that work is: for a window of every report period (DROIDDECK_VN_PASS_STATS_MS,
++ * default 2000 ms of every 10 s; 0 turns it off) each primary command buffer recorded once
++ * (ONE_TIME_SUBMIT, as DXVK's are) gets a timestamp before and after every render pass, and at
++ * its start and end. When the GPU is done, each span is added to its kind:
++ *   a render pass by its size, attachments (format, load op, store op) and samples, with its
++ *   draws (those in secondary command buffers too);
++ *   the work between passes by what it holds: dispatches, copies, blits, clears, resolves, BC
++ *   decodes, barriers.
++ * The heaviest kinds go to droiddeck_vulkan.txt as ms per frame and % of the measured time, e.g.
++ *   gpu passes 1: 41.2 ms/frame (44%), 1.0 per frame, 312 draws each: 1602x720 R16G16B16A16_SFLOAT
++ *     load C store S, D24_UNORM_S8_UINT load C store D, 1 sample
++ * The timestamps go in between passes only, where a tiler has nothing in flight to cut.
++ */
++#ifndef VN_DROIDDECK_PROF_H
++#define VN_DROIDDECK_PROF_H
++
++#include "vn_common.h"
++
++struct vn_command_buffer;
++struct vn_device;
++struct vn_dd_prof_cmd;
++
++/* what a command buffer recorded since the last boundary; kept by every command buffer (cheap
++ * counters), read by the profile of a primary and added from secondaries at vkCmdExecuteCommands */
++#define VN_DD_OP_DISPATCH (1u << 0)
++#define VN_DD_OP_COPY (1u << 1)
++#define VN_DD_OP_BLIT (1u << 2)
++#define VN_DD_OP_CLEAR (1u << 3)
++#define VN_DD_OP_RESOLVE (1u << 4)
++#define VN_DD_OP_BC (1u << 5)
++#define VN_DD_OP_BARRIER (1u << 6)
++#define VN_DD_OP_UPDATE (1u << 7)
++#define VN_DD_OP_QUERY (1u << 8)
++#define VN_DD_OP_SECONDARY (1u << 9)
++
++struct vn_dd_cmd_counts {
++   uint32_t draws;
++   uint32_t dispatches;
++   uint32_t ops;
++};
++
++static inline void
++vn_dd_count_draw(struct vn_dd_cmd_counts *c, uint32_t n)
++{
++   c->draws += n;
++}
++
++static inline void
++vn_dd_count_op(struct vn_dd_cmd_counts *c, uint32_t op)
++{
++   c->ops |= op;
++   if (op == VN_DD_OP_DISPATCH)
++      c->dispatches++;
++}
++
++/* vkBeginCommandBuffer (after the reset) / vkEndCommandBuffer (before it is encoded) */
++void
++vn_dd_prof_begin(struct vn_command_buffer *cmd, const VkCommandBufferBeginInfo *info);
++void
++vn_dd_prof_end(struct vn_command_buffer *cmd);
++
++/* around a render pass in a primary: before vkCmdBeginRendering/RenderPass is encoded, after
++ * vkCmdEndRendering/RenderPass is */
++void
++vn_dd_prof_pass_begin(struct vn_command_buffer *cmd,
++                      const VkRenderingInfo *rendering,
++                      const VkRenderPassBeginInfo *render_pass);
++void
++vn_dd_prof_pass_end(struct vn_command_buffer *cmd);
++
++/* the command buffer was reset or freed: an unsubmitted profile gives its timestamps back */
++void
++vn_dd_prof_cmd_reset(struct vn_command_buffer *cmd);
++
++/* a submission: profiles of its command buffers wait for the GPU, finished ones are counted */
++void
++vn_dd_prof_submit(uint32_t count, const VkSubmitInfo *batches, const VkSubmitInfo2 *batches2);
++
++/* vkQueuePresentKHR: frames in the window */
++void
++vn_dd_prof_present(void);
++
++/* vkDestroyDevice */
++void
++vn_dd_prof_device_fini(struct vn_device *dev);
++
++#endif /* VN_DROIDDECK_PROF_H */
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_stats.c b/src/virtio/vulkan/vn_droiddeck_stats.c
+--- a/src/virtio/vulkan/vn_droiddeck_stats.c	2026-10-31 01:38:39.866122184 +0000
++++ b/src/virtio/vulkan/vn_droiddeck_stats.c	2026-10-31 01:43:05.109602654 +0000
+@@ -20,6 +20,7 @@
+ #include "vn_instance.h"
+ #include "vn_physical_device.h"
+ #include "vn_queue.h"
++#include "vn_droiddeck_prof.h"
+ 
+ #define DD_SLOTS 48
+ 
+@@ -374,6 +375,7 @@
+    dd_stats.cmds += cmds;
+    simple_mtx_unlock(&dd_lock);
+    dd_tick();
++   vn_dd_prof_submit(count, b1, b2);
+    if (first < 0)
+       return;
+ 

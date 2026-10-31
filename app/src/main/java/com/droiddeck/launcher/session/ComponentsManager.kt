@@ -6,7 +6,6 @@ import android.content.Context
 import android.util.Log
 import com.droiddeck.launcher.core.Downloader
 import com.droiddeck.launcher.core.FileUtils
-import com.droiddeck.launcher.core.GameEnvironment
 import com.droiddeck.launcher.gpu.GpuInfo
 import com.droiddeck.launcher.runtime.LinuxRuntime
 import com.github.luben.zstd.ZstdInputStream
@@ -110,7 +109,6 @@ object ComponentsManager {
         return runCatching { JSONObject(stateFile(context).readText()) }.getOrElse { JSONObject() }.apply {
             if (!has("active")) put("active", JSONObject())
             if (!has("queued")) put("queued", JSONObject())
-            if (!has("profiles")) put("profiles", JSONObject())
         }
     }
 
@@ -170,51 +168,6 @@ object ComponentsManager {
     }
 
     private fun JSONObject.sub(key: String): JSONObject = optJSONObject(key) ?: JSONObject().also { put(key, it) }
-
-    private fun rememberProfiledComponent(state: JSONObject, comp: String) {
-        val profiled = state.optJSONArray("profiledComponents")?.let { values ->
-            (0 until values.length()).mapNotNull { values.optString(it).takeIf(COMPONENTS::contains) }
-        }.orEmpty().toMutableSet()
-        if (profiled.add(comp)) state.put("profiledComponents", JSONArray(profiled.sorted()))
-    }
-
-    fun gameComponents(context: Context, scope: String): Map<String, String> = synchronized(lock) {
-        val profile = loadState(context).sub("profiles").optJSONObject(scope) ?: return emptyMap()
-        COMPONENTS.mapNotNull { comp -> profile.optString(comp).takeIf(String::isNotEmpty)?.let { comp to it } }.toMap()
-    }
-
-    fun setGameComponent(context: Context, scope: String, comp: String, file: String?) = synchronized(lock) {
-        require(scope.matches(Regex("[1-9][0-9]{0,9}")) && scope.toLong() <= 4294967295L)
-        require(comp in COMPONENTS)
-        val state = loadState(context)
-        val profiles = state.sub("profiles")
-        val profile = profiles.optJSONObject(scope) ?: JSONObject().also { profiles.put(scope, it) }
-        if (file == null) {
-            if (profile.optString(comp).isNotEmpty()) rememberProfiledComponent(state, comp)
-            profile.remove(comp)
-            if (profile.length() == 0) profiles.remove(scope)
-        } else {
-            val name = safeName(file)
-            val wcp = File(packagesDir(context), name)
-            require(packageInfo(context, wcp).comp == comp)
-            for (proton in protons(context)) ensureOriginal(context, proton, comp, state)
-            rememberProfiledComponent(state, comp)
-            profile.put(comp, name)
-        }
-        saveState(context, state)
-    }
-
-    fun clearGameComponents(context: Context, scope: String) = synchronized(lock) {
-        require(GameEnvironment.validScope(scope))
-        val state = loadState(context)
-        val profiles = state.sub("profiles")
-        profiles.optJSONObject(scope)?.let { profile ->
-            COMPONENTS.filter { profile.optString(it).isNotEmpty() }
-                .forEach { rememberProfiledComponent(state, it) }
-        }
-        profiles.remove(scope)
-        saveState(context, state)
-    }
 
     private fun migratePlugin(context: Context) {
         val marker = File(dataDir(context), ".plugin-imported")
@@ -584,40 +537,11 @@ object ComponentsManager {
             }.takeIf { it.second.isFile }
         }
 
-        val profiles = state.sub("profiles")
-        val profiledComponents = buildSet {
-            state.optJSONArray("profiledComponents")?.let { stored ->
-                for (index in 0 until stored.length()) {
-                    stored.optString(index).takeIf(COMPONENTS::contains)?.let(::add)
-                }
-            }
-            for (scope in profiles.keys()) {
-                val profile = profiles.optJSONObject(scope) ?: continue
-                COMPONENTS.filterTo(this) { profile.optString(it).isNotEmpty() }
-            }
-        }
         val active = state.sub("active")
         for (p in all) for (comp in COMPONENTS) {
             val entry = active.optJSONObject(p.id)?.optJSONObject(comp)
             val selected = entry?.takeIf { it.optString("protonVersion") == p.version }?.let { choice(p, comp, it) }
             if (selected != null) append("*", p, comp, selected.first, selected.second)
-            else if (comp in profiledComponents) {
-                ensureOriginal(context, p, comp, state)
-                val original = originalFile(context, p, comp)
-                check(original.isFile) { context.getString(R.string.cmgr_original_missing) }
-                append("*", p, comp, "original-${p.id}-${safeName(p.version)}-$comp", original)
-            }
-        }
-        for (scope in profiles.keys()) {
-            val profile = profiles.optJSONObject(scope) ?: continue
-            for (comp in COMPONENTS) {
-                val file = profile.optString(comp)
-                if (file.isEmpty()) continue
-                val wcp = File(packagesDir(context), file)
-                if (!wcp.isFile) continue
-                val key = safeName(file.removeSuffix(".wcp"))
-                for (p in all) append(scope, p, comp, key, wcp)
-            }
         }
         return PreparedLaunchState(lines.toString(), keep)
     }
@@ -724,11 +648,6 @@ object ComponentsManager {
                 for (comp in comps.keys()) comps.optJSONObject(comp)?.optString("file")?.takeIf { it.isNotEmpty() }?.let(names::add)
             }
         }
-        val profiles = state.optJSONObject("profiles")
-        for (scope in profiles?.keys() ?: emptyList<String>().iterator()) {
-            val profile = profiles?.optJSONObject(scope) ?: continue
-            COMPONENTS.forEach { comp -> profile.optString(comp).takeIf { it.isNotEmpty() }?.let(names::add) }
-        }
         return names
     }
 
@@ -780,11 +699,6 @@ object ComponentsManager {
         for (pid in active.keys()) {
             val comps = active.optJSONObject(pid) ?: continue
             for (comp in comps.keys()) check(comps.optJSONObject(comp)?.optString("file") != name) { context.getString(R.string.cmgr_package_in_use, name, pid) }
-        }
-        val profiles = state.sub("profiles")
-        for (scope in profiles.keys()) {
-            val profile = profiles.optJSONObject(scope) ?: continue
-            check(COMPONENTS.none { profile.optString(it) == name }) { context.getString(R.string.cmgr_package_in_use, name, scope) }
         }
         val f = File(packagesDir(context), name)
         check(f.isFile) { context.getString(R.string.cmgr_package_not_stored, name) }

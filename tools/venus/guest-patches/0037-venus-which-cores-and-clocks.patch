@@ -1,0 +1,390 @@
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_stats.c b/src/virtio/vulkan/vn_droiddeck_stats.c
+--- a/src/virtio/vulkan/vn_droiddeck_stats.c	2026-10-31 09:04:17.944052891 +0000
++++ b/src/virtio/vulkan/vn_droiddeck_stats.c	2026-10-31 09:05:28.328278188 +0000
+@@ -6,12 +6,14 @@
+ #include "vn_droiddeck_stats.h"
+ 
+ #include <dirent.h>
++#include <sched.h>
+ #include <inttypes.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <unistd.h>
+ 
++#include "c11/threads.h"
+ #include "util/os_time.h"
+ #include "util/simple_mtx.h"
+ #include "util/u_debug.h"
+@@ -117,6 +119,350 @@
+    return x->delta < y->delta ? 1 : x->delta > y->delta ? -1 : 0;
+ }
+ 
++/* ---- where this program's busiest threads run, and at what clocks (0037) ----
++ *
++ * Phones mix core types (Tensor G4: 4 A520, 3 A720, 1 X4) and cap clocks when hot. A game's main
++ * thread on a small core, or the big cores capped, looks like "the game is slow" in every other
++ * report. A thread samples, 20 times a second, which CPU each of the program's four busiest threads
++ * is running on (/proc/self/task/<tid>/stat: state R, field 39), and twice a second each CPU's
++ * clock and its cap (cpufreq scaling_cur_freq / scaling_max_freq). The report groups CPUs into
++ * clusters by core type (/proc/cpuinfo "CPU part") and top clock. DROIDDECK_VN_CPU_PLACE=0 turns
++ * it off. */
++
++#define DD_CPUS 16
++#define DD_TRACK 4
++
++static struct {
++   int count;
++   char kind[DD_CPUS][12];
++   unsigned max_khz[DD_CPUS];
++   int cluster[DD_CPUS]; /* index of the cluster's first CPU */
++   bool freq_readable;
++   char cpuset[96];
++} dd_topo;
++
++static struct {
++   bool started, stop;
++   int tid[DD_TRACK];
++   char name[DD_TRACK][32];
++   uint64_t on_cpu[DD_TRACK][DD_CPUS];
++   uint64_t samples[DD_TRACK], running[DD_TRACK];
++   char affinity[DD_TRACK][32];
++   uint64_t freq_sum[DD_CPUS], freq_n[DD_CPUS];
++   unsigned cap_min[DD_CPUS];
++} dd_place;
++
++static unsigned
++dd_read_uint(const char *path)
++{
++   FILE *f = fopen(path, "re");
++   if (!f)
++      return 0;
++   unsigned v = 0;
++   if (fscanf(f, "%u", &v) != 1)
++      v = 0;
++   fclose(f);
++   return v;
++}
++
++static const char *
++dd_core_name(unsigned part)
++{
++   switch (part) {
++   case 0xd05: return "A55";
++   case 0xd0b: return "A76";
++   case 0xd0d: return "A77";
++   case 0xd41: return "A78";
++   case 0xd44: return "X1";
++   case 0xd46: return "A510";
++   case 0xd47: return "A710";
++   case 0xd48: return "X2";
++   case 0xd4d: return "A715";
++   case 0xd4e: return "X3";
++   case 0xd80: return "A520";
++   case 0xd81: return "A720";
++   case 0xd82: return "X4";
++   case 0xd85: return "X925";
++   case 0xd87: return "A725";
++   default: return NULL;
++   }
++}
++
++static void
++dd_topo_init(void)
++{
++   int n = (int)sysconf(_SC_NPROCESSORS_CONF);
++   dd_topo.count = n < 1 ? 1 : MIN2(n, DD_CPUS);
++   for (int c = 0; c < dd_topo.count; c++)
++      snprintf(dd_topo.kind[c], sizeof(dd_topo.kind[c]), "?");
++   FILE *f = fopen("/proc/cpuinfo", "re");
++   if (f) {
++      char line[256];
++      int cpu = -1;
++      while (fgets(line, sizeof(line), f)) {
++         unsigned v;
++         if (sscanf(line, "processor : %u", &v) == 1 || sscanf(line, "processor\t: %u", &v) == 1)
++            cpu = (int)v;
++         else if (cpu >= 0 && cpu < dd_topo.count && strstr(line, "CPU part") &&
++                  sscanf(strchr(line, ':') + 1, "%x", &v) == 1) {
++            const char *name = dd_core_name(v);
++            if (name)
++               snprintf(dd_topo.kind[cpu], sizeof(dd_topo.kind[cpu]), "%s", name);
++            else
++               snprintf(dd_topo.kind[cpu], sizeof(dd_topo.kind[cpu]), "0x%x", v);
++         }
++      }
++      fclose(f);
++   }
++   for (int c = 0; c < dd_topo.count; c++) {
++      char path[96];
++      snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", c);
++      dd_topo.max_khz[c] = dd_read_uint(path);
++      if (dd_topo.max_khz[c])
++         dd_topo.freq_readable = true;
++      dd_topo.cluster[c] = c;
++      for (int d = 0; d < c; d++) {
++         if (!strcmp(dd_topo.kind[d], dd_topo.kind[c]) && dd_topo.max_khz[d] == dd_topo.max_khz[c]) {
++            dd_topo.cluster[c] = dd_topo.cluster[d];
++            break;
++         }
++      }
++      dd_place.cap_min[c] = ~0u;
++   }
++   f = fopen("/proc/self/cpuset", "re");
++   if (f) {
++      if (fgets(dd_topo.cpuset, sizeof(dd_topo.cpuset), f))
++         dd_topo.cpuset[strcspn(dd_topo.cpuset, "\n")] = 0;
++      fclose(f);
++   }
++   if (!dd_topo.cpuset[0])
++      snprintf(dd_topo.cpuset, sizeof(dd_topo.cpuset), "unreadable");
++}
++
++/* "cpu 0-3" for a cluster */
++static int
++dd_cluster_span(int first, char *out, size_t size)
++{
++   int lo = -1, hi = -1, n = 0;
++   for (int c = 0; c < dd_topo.count; c++) {
++      if (dd_topo.cluster[c] != first)
++         continue;
++      if (lo < 0)
++         lo = c;
++      hi = c;
++      n++;
++   }
++   if (lo == hi)
++      snprintf(out, size, "%d", lo);
++   else if (hi - lo + 1 == n)
++      snprintf(out, size, "%d-%d", lo, hi);
++   else
++      snprintf(out, size, "%d..%d", lo, hi);
++   return n;
++}
++
++static bool
++dd_task_state(int tid, char *state, int *cpu)
++{
++   char path[64], buf[600];
++   snprintf(path, sizeof(path), "/proc/self/task/%d/stat", tid);
++   FILE *f = fopen(path, "re");
++   if (!f)
++      return false;
++   size_t n = fread(buf, 1, sizeof(buf) - 1, f);
++   fclose(f);
++   buf[n] = 0;
++   char *p = strrchr(buf, ')');
++   if (!p || p[1] != ' ')
++      return false;
++   p += 2;
++   *state = *p;
++   /* field 3 is the state; the processor is field 39 */
++   for (int field = 3; field < 39; field++) {
++      p = strchr(p, ' ');
++      if (!p)
++         return false;
++      p++;
++   }
++   *cpu = atoi(p);
++   return true;
++}
++
++static int
++dd_place_thread(void *arg)
++{
++   (void)arg;
++   unsigned tick = 0;
++   for (;;) {
++      struct timespec ts = { 0, 50 * 1000 * 1000 };
++      nanosleep(&ts, NULL);
++      simple_mtx_lock(&dd_lock);
++      if (dd_place.stop) {
++         simple_mtx_unlock(&dd_lock);
++         return 0;
++      }
++      int tids[DD_TRACK];
++      memcpy(tids, dd_place.tid, sizeof(tids));
++      simple_mtx_unlock(&dd_lock);
++      char state[DD_TRACK];
++      int cpu[DD_TRACK];
++      bool ok[DD_TRACK];
++      for (int i = 0; i < DD_TRACK; i++)
++         ok[i] = tids[i] > 0 && dd_task_state(tids[i], &state[i], &cpu[i]);
++      unsigned freq[DD_CPUS] = { 0 }, cap[DD_CPUS] = { 0 };
++      const bool clocks = dd_topo.freq_readable && (tick++ % 10) == 0;
++      if (clocks) {
++         for (int c = 0; c < dd_topo.count; c++) {
++            char path[96];
++            snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq", c);
++            freq[c] = dd_read_uint(path);
++            snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_max_freq", c);
++            cap[c] = dd_read_uint(path);
++         }
++      }
++      simple_mtx_lock(&dd_lock);
++      for (int i = 0; i < DD_TRACK; i++) {
++         if (!ok[i] || dd_place.tid[i] != tids[i])
++            continue;
++         dd_place.samples[i]++;
++         if (state[i] == 'R' && cpu[i] >= 0 && cpu[i] < dd_topo.count) {
++            dd_place.running[i]++;
++            dd_place.on_cpu[i][cpu[i]]++;
++         }
++      }
++      if (clocks) {
++         for (int c = 0; c < dd_topo.count; c++) {
++            if (freq[c]) {
++               dd_place.freq_sum[c] += freq[c];
++               dd_place.freq_n[c]++;
++            }
++            if (cap[c] && cap[c] < dd_place.cap_min[c])
++               dd_place.cap_min[c] = cap[c];
++         }
++      }
++      simple_mtx_unlock(&dd_lock);
++   }
++}
++
++/* report the window that ends now and track these threads (the program's busiest) next */
++static void
++dd_place_report(double secs, const int *tids, char names[][32], int count)
++{
++   static int on = -1;
++   if (on < 0)
++      on = debug_get_bool_option("DROIDDECK_VN_CPU_PLACE", true);
++   if (!on)
++      return;
++   if (!dd_place.started) {
++      dd_topo_init();
++      char line[700];
++      int len = snprintf(line, sizeof(line), "cpu cores:");
++      for (int c = 0; c < dd_topo.count && len < (int)sizeof(line) - 80; c++) {
++         if (dd_topo.cluster[c] != c)
++            continue;
++         char span[16];
++         dd_cluster_span(c, span, sizeof(span));
++         len += snprintf(line + len, sizeof(line) - len, " cpu %s %s %.2f GHz;", span, dd_topo.kind[c],
++                         dd_topo.max_khz[c] / 1e6);
++      }
++      snprintf(line + len, sizeof(line) - len, " clocks %s; cpuset %s (DROIDDECK_VN_CPU_PLACE=0 turns this off)",
++               dd_topo.freq_readable ? "readable" : "not readable", dd_topo.cpuset);
++      vn_droiddeck_log("%s", line);
++      thrd_t t;
++      simple_mtx_lock(&dd_lock);
++      dd_place.started = true;
++      simple_mtx_unlock(&dd_lock);
++      if (thrd_create(&t, dd_place_thread, NULL) == thrd_success)
++         thrd_detach(t);
++   } else {
++      char line[1400];
++      simple_mtx_lock(&dd_lock);
++      int len = snprintf(line, sizeof(line), "cpu placement over %.0f s:", secs);
++      for (int i = 0; i < DD_TRACK && len < (int)sizeof(line) - 200; i++) {
++         if (dd_place.tid[i] <= 0 || !dd_place.samples[i])
++            continue;
++         len += snprintf(line + len, sizeof(line) - len, " %s[%d] running in %.0f%% of samples:",
++                         dd_place.name[i], dd_place.tid[i],
++                         dd_place.running[i] * 100.0 / dd_place.samples[i]);
++         for (int c = 0; c < dd_topo.count && len < (int)sizeof(line) - 60; c++) {
++            if (dd_topo.cluster[c] != c)
++               continue;
++            uint64_t n = 0;
++            for (int d = 0; d < dd_topo.count; d++)
++               if (dd_topo.cluster[d] == c)
++                  n += dd_place.on_cpu[i][d];
++            if (n && dd_place.running[i])
++               len += snprintf(line + len, sizeof(line) - len, " %s %.0f%%", dd_topo.kind[c],
++                               n * 100.0 / dd_place.running[i]);
++         }
++         len += snprintf(line + len, sizeof(line) - len, " (allowed %s);", dd_place.affinity[i]);
++      }
++      if (dd_topo.freq_readable && len < (int)sizeof(line) - 100) {
++         len += snprintf(line + len, sizeof(line) - len, " clocks:");
++         for (int c = 0; c < dd_topo.count && len < (int)sizeof(line) - 80; c++) {
++            if (dd_topo.cluster[c] != c)
++               continue;
++            uint64_t sum = 0, k = 0;
++            unsigned cap = ~0u;
++            for (int d = 0; d < dd_topo.count; d++) {
++               if (dd_topo.cluster[d] != c)
++                  continue;
++               sum += dd_place.freq_sum[d];
++               k += dd_place.freq_n[d];
++               cap = MIN2(cap, dd_place.cap_min[d]);
++            }
++            len += snprintf(line + len, sizeof(line) - len, " %s avg %.2f GHz", dd_topo.kind[c],
++                            k ? sum / (double)k / 1e6 : 0.0);
++            if (cap != ~0u && cap < dd_topo.max_khz[c])
++               len += snprintf(line + len, sizeof(line) - len, " (capped to %.2f of %.2f)",
++                               cap / 1e6, dd_topo.max_khz[c] / 1e6);
++            len += snprintf(line + len, sizeof(line) - len, ",");
++         }
++      }
++      simple_mtx_unlock(&dd_lock);
++      if (len > 0 && line[len - 1] == ',')
++         line[len - 1] = 0;
++      vn_droiddeck_log("%s", line);
++   }
++   /* the next window's threads */
++   simple_mtx_lock(&dd_lock);
++   memset(dd_place.on_cpu, 0, sizeof(dd_place.on_cpu));
++   memset(dd_place.samples, 0, sizeof(dd_place.samples));
++   memset(dd_place.running, 0, sizeof(dd_place.running));
++   memset(dd_place.freq_sum, 0, sizeof(dd_place.freq_sum));
++   memset(dd_place.freq_n, 0, sizeof(dd_place.freq_n));
++   for (int c = 0; c < DD_CPUS; c++)
++      dd_place.cap_min[c] = ~0u;
++   for (int i = 0; i < DD_TRACK; i++) {
++      dd_place.tid[i] = i < count ? tids[i] : 0;
++      if (i < count) {
++         snprintf(dd_place.name[i], sizeof(dd_place.name[i]), "%s", names[i]);
++         cpu_set_t set;
++         CPU_ZERO(&set);
++         int len = 0;
++         dd_place.affinity[i][0] = 0;
++         if (sched_getaffinity(tids[i], sizeof(set), &set) == 0) {
++            for (int c = 0; c < dd_topo.count && len < (int)sizeof(dd_place.affinity[i]) - 4; c++) {
++               if (!CPU_ISSET(c, &set))
++                  continue;
++               int e = c;
++               while (e + 1 < dd_topo.count && CPU_ISSET(e + 1, &set))
++                  e++;
++               len += snprintf(dd_place.affinity[i] + len, sizeof(dd_place.affinity[i]) - len, "%s%d",
++                               len ? "," : "", c);
++               if (e > c)
++                  len += snprintf(dd_place.affinity[i] + len, sizeof(dd_place.affinity[i]) - len,
++                                  "-%d", e);
++               c = e;
++            }
++         }
++         if (!dd_place.affinity[i][0])
++            snprintf(dd_place.affinity[i], sizeof(dd_place.affinity[i]), "?");
++      }
++   }
++   simple_mtx_unlock(&dd_lock);
++}
++
+ static void
+ dd_cpu_report(double secs)
+ {
+@@ -202,8 +548,19 @@
+                       sorted[i].name, sorted[i].tid, sorted[i].delta / hz / secs * 100.0);
+       shown++;
+    }
+-   free(sorted);
+    vn_droiddeck_log("%s", line);
++   int track[DD_TRACK];
++   char track_names[DD_TRACK][32];
++   int tracked = 0;
++   for (int i = 0; i < count && tracked < DD_TRACK && sorted[i].delta; i++) {
++      if (sorted[i].pid != self)
++         continue;
++      track[tracked] = sorted[i].tid;
++      snprintf(track_names[tracked], sizeof(track_names[tracked]), "%s", sorted[i].name);
++      tracked++;
++   }
++   free(sorted);
++   dd_place_report(secs, track, track_names, tracked);
+ }
+ 
+ static void

@@ -1,0 +1,122 @@
+diff -ru a/src/virtio/vulkan/vn_common.c b/src/virtio/vulkan/vn_common.c
+--- a/src/virtio/vulkan/vn_common.c
++++ b/src/virtio/vulkan/vn_common.c
+@@ -298,6 +298,41 @@
+    mtx_unlock(&vn_dd_stats_mutex);
+ }
+ 
++/* droiddeck: the frame rate, and how much of each frame is the GPU drain before presenting.
++ * One call per present: the interval since the last present is the frame time, and
++ * present_wait_ns is what the present path itself blocked on the GPU (see vn_queue_wsi_present,
++ * which waits for the queue to go idle when the renderer has no implicit or explicit fencing).
++ * Every 10 s the averages go to droiddeck_vulkan.txt. This is the measurement the 24->60 fps
++ * work needs: if the wait is most of the frame, the fix is pipelining, not the CPU work. */
++void
++vn_dd_frame_stats(int64_t present_wait_ns)
++{
++   static int64_t last, since;
++   static uint64_t frames, wait_total;
++   static unsigned reports;
++   const int64_t now = os_time_get_nano();
++
++   mtx_lock(&vn_dd_stats_mutex);
++   if (last && now > last) {
++      frames++;
++      wait_total += present_wait_ns > 0 ? (uint64_t)present_wait_ns : 0;
++   }
++   last = now;
++   if (!since)
++      since = now;
++   if (now - since >= 10000000000ll) {
++      if (frames && ++reports <= 120) {
++         const double span = (double)(now - since);
++         vn_droiddeck_log("frames: %.1f fps (%.2f ms/frame); present GPU wait %.2f ms/frame",
++                          frames * 1e9 / span, span / 1e6 / frames,
++                          (double)wait_total / 1e6 / frames);
++      }
++      frames = wait_total = 0;
++      since = now;
++   }
++   mtx_unlock(&vn_dd_stats_mutex);
++}
++
+ /* droiddeck: who waits. For fence and ring waits (a program's vkWaitForFences, or a call that
+  * needs the server's reply), the call stack is kept with its count and time, and the stacks
+  * that waited longest are written to droiddeck_vulkan.txt every 10 s as library+offset frames
+diff -ru a/src/virtio/vulkan/vn_common.h b/src/virtio/vulkan/vn_common.h
+--- a/src/virtio/vulkan/vn_common.h
++++ b/src/virtio/vulkan/vn_common.h
+@@ -317,6 +317,11 @@
+ void
+ vn_droiddeck_log(const char *format, ...) PRINTFLIKE(1, 2);
+ 
++/* DroidDeck: one call per present, to report the frame rate and the GPU wait inside the frame
++ * (see vn_common.c). present_wait_ns is the time the present path blocked on the GPU, or 0. */
++void
++vn_dd_frame_stats(int64_t present_wait_ns);
++
+ void
+ vn_log(struct vn_instance *instance, const char *format, ...)
+    PRINTFLIKE(2, 3);
+diff -ru a/src/virtio/vulkan/vn_queue.c b/src/virtio/vulkan/vn_queue.c
+--- a/src/virtio/vulkan/vn_queue.c
++++ b/src/virtio/vulkan/vn_queue.c
+@@ -12,6 +12,8 @@
+ #include "vn_droiddeck_bc.h"
+ 
+ #include "util/libsync.h"
++#include "util/os_time.h"
++#include "util/u_debug.h"
+ #include "venus-protocol/vn_protocol_driver_event.h"
+ #include "venus-protocol/vn_protocol_driver_fence.h"
+ #include "venus-protocol/vn_protocol_driver_queue.h"
+@@ -986,6 +988,7 @@
+ {
+    struct vk_queue *queue_vk = vk_queue_from_handle(submit->queue_handle);
+    struct vn_device *dev = vn_device_from_vk(queue_vk->base.device);
++   int64_t present_wait_ns = 0;
+ 
+    if (!submit->wsi_mem)
+       return;
+@@ -1022,8 +1025,40 @@
+                    "forcing vkQueueWaitIdle before presenting");
+       }
+ 
+-      vn_QueueWaitIdle(submit->queue_handle);
++      /* DroidDeck: with no implicit fencing the queue was drained to idle before every present,
++       * so the CPU could not run ahead of the GPU by even one frame: the frame time was CPU
++       * time plus GPU time in series instead of their maximum. On Lake that drain was 89% of
++       * the frame (17.6 ms of 19.8 ms), and the game's own fence waits showed it: 1558 fence
++       * waits totalling 5.95 s inside a 10 s window. Skip it by default. The present still
++       * happens in order, because the submit carrying wsi_memory_signal_submit_info is what
++       * hands the buffer to the server and it is ordered after the submitted work on the ring.
++       * That ordering is the design intent, not something this change proves: the drain was
++       * upstream's blunt way to be sure. DROIDDECK_VN_SYNC_PRESENT=1 restores it, so a title
++       * that tears or flickers with this default can be A/B'd against the old behaviour. */
++      static int sync_present = -1;
++      if (sync_present < 0)
++         sync_present = debug_get_bool_option("DROIDDECK_VN_SYNC_PRESENT", false);
++      if (sync_present) {
++         const int64_t start = os_time_get_nano();
++         /* Order the present after this frame's work without draining the whole queue.  The
++          * drain above is what the app's DROIDDECK_VN_SYNC_PRESENT=1 asks for, but it waits for
++          * the GPU to go idle, so the CPU cannot run ahead by even one frame and the frame time
++          * is CPU time plus GPU time in series: on Lake the per-window plateau was exactly
++          * cpu + present-wait (12.72 + 7.00 = 19.72 ms/frame) on every run.  The ring seqno of
++          * this submit is the same ordering the implicit-fencing path above relies on: the guest
++          * blocks until the host has executed through the submit that hands the buffer to the
++          * server, so the server cannot read an image the frame has not finished writing, but it
++          * does not wait for the GPU to idle.  Fall back to the drain when there is no seqno to
++          * wait on. */
++         if (submit->external_payload.ring_seqno_valid)
++            vn_ring_wait_seqno(dev->primary_ring, submit->external_payload.ring_seqno);
++         else
++            vn_QueueWaitIdle(submit->queue_handle);
++         present_wait_ns = os_time_get_nano() - start;
++      }
+    }
++
++   vn_dd_frame_stats(present_wait_ns);
+ }
+ 
+ static VkResult

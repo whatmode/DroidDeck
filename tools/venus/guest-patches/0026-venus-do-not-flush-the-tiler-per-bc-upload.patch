@@ -1,0 +1,96 @@
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_bc.c b/src/virtio/vulkan/vn_droiddeck_bc.c
+--- a/src/virtio/vulkan/vn_droiddeck_bc.c
++++ b/src/virtio/vulkan/vn_droiddeck_bc.c
+@@ -723,19 +723,66 @@
+    }
+ }
+ 
+-/* One barrier wide enough for everything: any writer of the buffers (host, transfer, shader) to any
+- * reader.  Coarse on purpose -- this runs once per upload, and a missed dependency here is a wrong
+- * picture rather than a slow frame. */
++/* DROIDDECK_VN_BC_COARSE_BARRIER=1 puts back the ALL_COMMANDS -> ALL_COMMANDS barrier the decode
++ * used to record around its dispatches, so the narrow scopes can be A/B'd on a device.  Stated as
++ * an option because the narrow scopes are the change that is meant to fix the frame collapse, and
++ * a fix that cannot be turned off cannot be shown to be the cause. */
++static bool
++bc_gpu_coarse_barrier(void)
++{
++   static int on = -1;
++   if (on < 0)
++      on = debug_get_bool_option("DROIDDECK_VN_BC_COARSE_BARRIER", false) ? 1 : 0;
++   return on != 0;
++}
++
++/* Barrier before the dispatches: the compressed source and the parameters are written by the host
++ * and by the copy recorded just above, and read by the shader.  Both scopes name those stages and
++ * no more.
++ *
++ * This used to be ALL_COMMANDS -> ALL_COMMANDS.  On a tile-based GPU that is not a cheap ordering
++ * hint: a dependency whose source scope includes the vertex/tiling stages forces the tiler to
++ * finish and flush before the dependency is satisfied.  The decode needs none of that -- the
++ * buffers involved are written by the host and by a transfer, and read by a compute shader -- so
++ * the wide scope buys a tiler flush per upload for nothing.
++ *
++ * The BC path records one pair of these per upload, and the device logs count 1,000-4,500 uploads
++ * in a single 10 s window while the program ran at 2-10 fps.  The per-window barrier count is not
++ * quoted here because the guest batches command buffers and the host ring reports what it saw,
++ * which does not line up with the upload count; the upload volume is the measured number. */
++static void
++bc_gpu_barrier_before_dispatch(VkCommandBuffer cmd)
++{
++   const VkMemoryBarrier mb = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
++      .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT,
++      .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
++   };
++   if (bc_gpu_coarse_barrier())
++      vn_CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT,
++                            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
++   else
++      vn_CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
++                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
++}
++
++/* Barrier after the dispatches: the shader writes the decoded image, and the caller's
++ * vkCmdCopyBufferToImage reads it as a transfer.  The destination stays in TRANSFER, so nothing
++ * here needs the graphics or tiling stages either. */
+ static void
+-bc_gpu_barrier(VkCommandBuffer cmd)
++bc_gpu_barrier_after_dispatch(VkCommandBuffer cmd)
+ {
+    const VkMemoryBarrier mb = {
+       .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+-      .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT,
+-      .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
++      .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
++      .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+    };
+-   vn_CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+-                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
++   if (bc_gpu_coarse_barrier())
++      vn_CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT,
++                            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
++   else
++      vn_CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                            0, 1, &mb, 0, NULL, 0, NULL);
+ }
+ 
+ static bool
+@@ -1136,7 +1183,7 @@
+    }
+ 
+    /* Pass two: record the dispatches and hand the caller the regions that read the result. */
+-   bc_gpu_barrier(cmd_handle);
++   bc_gpu_barrier_before_dispatch(cmd_handle);
+    vn_CmdBindPipeline(cmd_handle, VK_PIPELINE_BIND_POINT_COMPUTE, bc_gpu_dev.pipeline);
+ 
+    pidx = 0;
+@@ -1180,7 +1227,7 @@
+       }
+    }
+ 
+-   bc_gpu_barrier(cmd_handle);
++   bc_gpu_barrier_after_dispatch(cmd_handle);
+ 
+    chunk->used += bc_gpu_align_up(dst_cursor - chunk->used, bc_gpu_dev.align);
+    chunk->src_used += bc_gpu_align_up(src_cursor - chunk->src_used, bc_gpu_dev.align);

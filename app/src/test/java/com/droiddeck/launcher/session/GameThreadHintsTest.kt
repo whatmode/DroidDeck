@@ -32,4 +32,18 @@ class GameThreadHintsTest {
         assertFalse(GameThreadHints.holdsPace(105.0, 120.0))
         assertFalse(GameThreadHints.holdsPace(3.0, 120.0))    // headless or loading: boost
     }
+
+    @Test fun `the Odin 3 and Tensor are supported, other SoCs not`() {
+        assertTrue(GameThreadHints.supported("QTI", "CQ8725S"))
+        assertTrue(GameThreadHints.supported("Google", "Tensor G4"))
+        assertFalse(GameThreadHints.supported("QTI", "SM8650"))
+        assertFalse(GameThreadHints.supported("Mediatek", "MT6985"))
+    }
+
+    @Test fun `a game at the app's fps limit is held by it`() {
+        assertTrue(GameThreadHints.holdsLimit(10.2, 10))
+        assertTrue(GameThreadHints.holdsLimit(29.0, 30))
+        assertFalse(GameThreadHints.holdsLimit(7.5, 10))   // under the limit: the CPU holds it, boost
+        assertFalse(GameThreadHints.holdsLimit(10.0, 0))   // no limit
+    }
 }

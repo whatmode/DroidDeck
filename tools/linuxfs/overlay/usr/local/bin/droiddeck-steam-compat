@@ -527,9 +527,6 @@ class Helper:
             prior_native = state.get("native", ())
             native_choices = set(prior_native if isinstance(prior_native, (list, tuple, set)) else ())
             apps = sorted(set(installed) | set(picks) | set(prior_auto) | native_choices, key=COMPAT["app_order"])
-            overrides = COMPAT["requested_games"](
-                COMPAT["game_requests"](), catalog, [t["name"] for t in live])
-            apps = sorted(set(apps) | set(overrides), key=COMPAT["app_order"])
             current = dict(page.compat("many(%s)" % json.dumps(apps)) or {})
             current["0"] = top["selected"]
             native = COMPAT["native_targets"](self.steam_root, apps)
@@ -546,7 +543,7 @@ class Helper:
                         current[app] = ""
             changes, auto = COMPAT["plan_mapping"](
                 current, installed, [t["name"] for t in live], default,
-                COMPAT["followers"](state, current), native, picks, overrides,
+                COMPAT["followers"](state, current), native, picks,
                 prior_auto.keys(), native_choices)
             for app, tool in sorted(changes.items(), key=lambda item: COMPAT["app_order"](item[0])):
                 page.compat("set(%d, %s)" % (int(app), json.dumps(tool if tool is not None else "")))
@@ -629,7 +626,7 @@ def main():
         say("no devtools port for this session; the client's mapping is kept through config.vdf")
         return 0
     os.makedirs(COMPAT["COMPAT_DIR"], exist_ok=True)
-    watcher = Watcher([COMPAT["state_path"]("request.json"), COMPAT["state_path"]("games.json")] +
+    watcher = Watcher([COMPAT["state_path"]("request.json")] +
                       [os.path.join(lib, "steamapps", "libraryfolders.vdf") for lib in (steam_root, COMPAT["LIBRARY"] + "-sd")])
     steamos = os.environ.get("BL_STEAMDECK") == "1" and os.environ.get("BL_STEAM_UI") != "desktop"
     helper = Helper(steam_root, port, steamos)

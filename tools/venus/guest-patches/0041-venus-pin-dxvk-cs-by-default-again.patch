@@ -1,0 +1,17 @@
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_stats.c b/src/virtio/vulkan/vn_droiddeck_stats.c
+--- a/src/virtio/vulkan/vn_droiddeck_stats.c	2026-10-31 12:08:01.844811418 +0000
++++ b/src/virtio/vulkan/vn_droiddeck_stats.c	2026-10-31 12:08:02.405708248 +0000
+@@ -383,10 +383,11 @@
+ {
+    static const char *names = NULL;
+    if (!names) {
+-      /* 0040: off unless asked for -- with 0039 re-pinning it every second, Lake played worse */
++      /* 0041: on again by the user's choice (0040 had turned it off after a run that felt worse
++       * but whose bundle lacked this log); 0 turns it off */
+       names = os_get_option("DROIDDECK_VN_PIN_THREADS");
+       if (!names)
+-         names = "0";
++         names = "dxvk-cs";
+    }
+    if (!strcmp(names, "0") || !names[0])
+       return;

@@ -29,6 +29,10 @@ class SettingsResetTest {
         SessionPrefs.setTheme(app, "ocean")
         SessionPrefs.setNoXalia(app, false)
         SessionPrefs.setFpsLimit(app, SessionService.MODE_STEAM, 30)
+        SessionPrefs.setRefreshLimit(app, SessionService.MODE_STEAM, 90)
+        SessionPrefs.setOverlayLevel(app, SessionPrefs.OVERLAY_LEVEL_3)
+        SessionPrefs.setSustainedPerformance(app, true)
+        SessionPrefs.setGameThreadHints(app, false)
         SessionPrefs.setHdr(app, SessionService.MODE_DESKTOP, true)
         SessionPrefs.setResolutionChoice(app, SessionService.MODE_STEAM, "1280x800")
         SessionPrefs.setGuestHostname(app, "MyDeck")
@@ -37,11 +41,15 @@ class SettingsResetTest {
         FrameGen.set(app, FrameGen.Mode(FrameGen.ENGINE_WINFG, 3))
         prefs("steam_touch").edit().putBoolean("gyro", false).commit()
 
-        assertTrue(SettingsReset.resetAll(app, gameProfiles = false))
+        assertTrue(SettingsReset.resetAll(app))
 
         assertEquals("graphite", SessionPrefs.theme(app))
         assertTrue(SessionPrefs.noXalia(app))
         assertEquals(0, SessionPrefs.fpsLimit(app, SessionService.MODE_STEAM))
+        assertEquals(0, SessionPrefs.refreshLimit(app, SessionService.MODE_STEAM))
+        assertTrue((SessionPrefs.overlayLevel(app) > SessionPrefs.OVERLAY_OFF) == SessionPrefs.hudEnabled(app))
+        assertFalse(SessionPrefs.sustainedPerformance(app))
+        assertTrue(SessionPrefs.gameThreadHints(app))
         assertFalse(SessionPrefs.hdr(app, SessionService.MODE_DESKTOP))
         assertFalse(SessionPrefs.resolutionChosen(app, SessionService.MODE_STEAM))
         assertEquals(SessionPrefs.DEFAULT_GUEST_HOSTNAME, SessionPrefs.guestHostname(app))
@@ -64,7 +72,7 @@ class SettingsResetTest {
         SessionPrefs.setMicAsked(app)
         prefs("steam_touch").edit().putString("copiedLayout", "a:1,2").commit()
 
-        SettingsReset.resetAll(app, gameProfiles = false)
+        SettingsReset.resetAll(app)
 
         assertEquals("Foo", SessionPrefs.addedGameName(app, folder))
         assertEquals("$folder/foo.exe", SessionPrefs.addedGameExe(app, folder))
@@ -78,19 +86,10 @@ class SettingsResetTest {
         assertEquals("a:1,2", prefs("steam_touch").getString("copiedLayout", null))
     }
 
-    @Test fun gameTextureFilteringIsKeptUnlessGameProfilesAreReset() {
-        session.edit().putString("gameTextureFiltering", """{"440":{"anisotropy":16}}""").commit()
-        SettingsReset.resetAll(app, gameProfiles = false)
-        assertEquals(16, SessionPrefs.gameTextureFiltering(app, "440").anisotropy)
-
-        SettingsReset.resetAll(app, gameProfiles = true)
-        assertTrue(SessionPrefs.gameTextureFiltering(app).isEmpty())
-    }
-
     @Test fun perModeKeysAreSettings() {
         listOf("resolutionCap.steam", "displayResolution.desktop", "customRes.steam", "hdr.steam", "fpsLimit.desktop", "suspendPolicy.steam")
             .forEach { assertTrue(it, SettingsReset.isSessionSetting(it)) }
-        listOf("addedName:/x", "addedAppId:/x", "gpuAutoInstalled", "romsDir", "gameStorage", "micAsked", "gameTextureFiltering")
+        listOf("addedName:/x", "addedAppId:/x", "gpuAutoInstalled", "romsDir", "gameStorage", "micAsked", "gameTextureFiltering", "noSteamGames")
             .forEach { assertFalse(it, SettingsReset.isSessionSetting(it)) }
     }
 }

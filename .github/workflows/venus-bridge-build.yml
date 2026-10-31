@@ -1,0 +1,159 @@
+name: Venus bridge build
+
+on:
+  push:
+    branches: [venus-bridge]
+    paths:
+      - 'tools/venus/**'
+      - '.github/workflows/venus-bridge-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: venus-bridge-build
+  cancel-in-progress: true
+
+jobs:
+  server:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ninja-build pkg-config python3-pip python3-mako python3-yaml >/dev/null
+          pip install --break-system-packages -q 'meson>=1.4'
+      - name: Build the vtest server for Android
+        run: |
+          set -o pipefail
+          export NDK="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          echo "NDK $NDK"
+          bash tools/venus/build-server.sh out 2>&1 | tee /tmp/server.log
+      - name: Report a failed build as annotations
+        if: failure()
+        run: |
+          enc() { sed 's/%/%25/g' | cut -c1-300 | awk '{printf "%s%%0A", $0}'; }
+          echo "::error title=server tail::$(tail -60 /tmp/server.log | enc)"
+          echo "::error title=server meson info::$(sed -n '/== virglrenderer meson_options/,/^Running\|^The Meson/p' /tmp/server.log | head -80 | enc)"
+          echo "::error title=server errors::$(grep -nE 'ERROR|error:|Error|not found|undefined' /tmp/server.log | tail -30 | enc)"
+      - name: Package
+        run: |
+          tar -C out -czf venus-server-android-arm64.tar.gz venus-server
+          mv out/virglrenderer-src.tar.gz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: venus-server
+          path: |
+            venus-server-android-arm64.tar.gz
+            virglrenderer-src.tar.gz
+
+  guest:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ninja-build pkg-config bison flex python3-pip \
+            python3-mako python3-yaml python3-ply glslang-tools libdrm-dev libelf-dev zlib1g-dev libexpat1-dev \
+            libwayland-dev wayland-protocols libx11-dev libx11-xcb-dev libxext-dev libxfixes-dev libxcb-dri3-dev \
+            libxcb-present-dev libxcb-sync-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-xfixes0-dev libxshmfence-dev \
+            libxrandr-dev libxxf86vm-dev zip libglvnd-dev libxcb-glx0-dev libxcb-dri2-0-dev libwayland-egl-backend-dev patchelf >/dev/null
+          pip install --break-system-packages -q 'meson>=1.4'
+      - name: Check the driver's own environment file
+        # tools/venus/guest-env ships in the zip; driver-only pushes skip the APK build, which is
+        # where the unit tests otherwise run.
+        run: python3 -m unittest tools.tests.test_venus_guest_env
+      - name: Build the venus ICD for the Linux side
+        run: |
+          set -o pipefail
+          # A fixed work dir so the BC band check can reuse the checkout and build dir this step
+          # leaves behind (build-guest.sh honours VENUS_WORK).
+          export VENUS_WORK="$RUNNER_TEMP/venus"
+          echo "VENUS_WORK=$VENUS_WORK" >> "$GITHUB_ENV"
+          bash tools/venus/build-guest.sh out 2>&1 | tee /tmp/guest.log
+      - name: Report a failed build as annotations
+        if: failure()
+        run: |
+          enc() { sed 's/%/%25/g' | cut -c1-300 | awk '{printf "%s%%0A", $0}'; }
+          echo "::error title=guest tail::$(tail -45 /tmp/guest.log | enc)"
+          echo "::error title=guest errors::$(grep -nE 'ERROR|error:|not found|undefined' /tmp/guest.log | tail -30 | enc)"
+      - name: Show the venus vtest settings
+        run: |
+          enc() { sed 's/%/%25/g' | cut -c1-300 | awk '{printf "%s%%0A", $0}'; }
+          echo "::notice title=venus vtest::$(sed -n '/== venus vtest socket handling/,/^The Meson\|^Version/p' /tmp/guest.log | head -40 | enc)"
+      - name: Show the GL part build
+        if: always()
+        run: |
+          enc() { sed 's/%/%25/g' | cut -c1-300 | awk '{printf "%s%%0A", $0}'; }
+          [ -f out/gl-build.log ] || exit 0
+          echo "::notice title=GL part (start)::$(grep -nE "^== |Run-time dependency|Program |ERROR|error:|not found|WARNING" out/gl-build.log | head -70 | enc)"
+          echo "::notice title=GL part (end)::$(tail -60 out/gl-build.log | enc)"
+      - name: Check the BC band split against the driver's own decode code
+        # Runs before the artifact upload: the fast paths and the row-band split meet in
+        # bc_decode_task, and a mismatch there is the "map is cut in half" bug.
+        run: |
+          bash tools/venus/bc-band-test/run.sh "$VENUS_WORK/mesa" "$VENUS_WORK/build-mesa"
+      - name: Build SPIRV-Cross for the GPU BC decode check
+        # The shader that ships is SPIR-V; the check runs it on the host by translating it to C++
+        # with SPIRV-Cross, whose shader runtime is header-only. Only the CLI is built, at the
+        # revision source.env pins.
+        run: |
+          set -euo pipefail
+          . tools/venus/source.env
+          git clone -q "$SPIRV_CROSS_REPO" "$RUNNER_TEMP/spirv-cross"
+          git -C "$RUNNER_TEMP/spirv-cross" checkout -q "$SPIRV_CROSS_REF"
+          cmake -S "$RUNNER_TEMP/spirv-cross" -B "$RUNNER_TEMP/spirv-cross/build" \
+            -DCMAKE_BUILD_TYPE=Release -DSPIRV_CROSS_ENABLE_TESTS=OFF > /tmp/spirv-cross-cmake.log 2>&1 \
+            || { tail -30 /tmp/spirv-cross-cmake.log; exit 1; }
+          cmake --build "$RUNNER_TEMP/spirv-cross/build" --target spirv-cross -j"$(nproc)" \
+            > /tmp/spirv-cross-build.log 2>&1 || { tail -40 /tmp/spirv-cross-build.log; exit 1; }
+          git clone -q --branch "$GLM_REF" "$GLM_REPO" "$RUNNER_TEMP/glm"
+          echo "GLM_DIR=$RUNNER_TEMP/glm" >> "$GITHUB_ENV"
+          echo "SPIRV_CROSS_DIR=$RUNNER_TEMP/spirv-cross" >> "$GITHUB_ENV"
+      - name: Check the GPU BC decode shader against the driver's own decode code
+        # The shader and bc_decode_s3tc() are two implementations of one contract; a BC3 alpha
+        # index past the fifth reads zeros if the 48-bit field's 16-bit low word is mishandled,
+        # which is a plausible-looking wrong alpha rather than a crash. The check runs the SPIR-V
+        # that ships, translated by SPIRV-Cross, against the decoder extracted from the driver.
+        run: |
+          bash tools/venus/bc-gpu-test/run.sh "$VENUS_WORK/mesa"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: venus-guest
+          path: |
+            out/Venus-Bridge-guest-*.zip
+            out/mesa-virtio-src.tar.gz
+            out/mesa-virtio-gen.tar.gz
+
+  publish:
+    needs: [server, guest]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dl
+      - name: Publish as release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag=venus-bridge-latest
+          gh release view "$tag" >/dev/null 2>&1 \
+            || gh release create "$tag" --prerelease --target "$GITHUB_SHA" --title "Venus bridge (test)" \
+                 --notes "Venus Vulkan bridge: vtest server for Android and the venus ICD for the Linux side, from ${GITHUB_SHA::7}."
+          # The guest zip carries its build in its name now, so --clobber alone would leave every
+          # earlier build's zip in place. Two zips and a `Venus-Bridge-guest-*.zip` glob is how a
+          # tester installs a stale driver and reports the new one as unfixed, so keep exactly the
+          # one this run built.
+          for old in $(gh release view "$tag" --json assets -q '.assets[].name' | grep '^Venus-Bridge-guest-.*\.zip$'); do
+            [ -f "dl/venus-guest/$old" ] || gh release delete-asset "$tag" "$old" -y
+          done
+          gh release upload "$tag" dl/venus-server/*.tar.gz dl/venus-guest/*.zip dl/venus-guest/*.tar.gz --clobber

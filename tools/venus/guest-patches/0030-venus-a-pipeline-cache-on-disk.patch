@@ -1,0 +1,407 @@
+diff -ruN a/src/virtio/vulkan/meson.build b/src/virtio/vulkan/meson.build
+--- a/src/virtio/vulkan/meson.build	2026-10-30 22:44:12.969530539 +0000
++++ b/src/virtio/vulkan/meson.build	2026-10-30 22:42:56.158512187 +0000
+@@ -63,6 +63,7 @@
+   'vn_device_memory.c',
+   'vn_droiddeck_bc.c',
+   'vn_droiddeck_emu.c',
++  'vn_droiddeck_pcache.c',
+   'vn_droiddeck_stats.c',
+   'vn_feedback.c',
+   'vn_host_copy.c',
+diff -ruN a/src/virtio/vulkan/vn_device.c b/src/virtio/vulkan/vn_device.c
+--- a/src/virtio/vulkan/vn_device.c	2026-10-30 22:44:12.969658418 +0000
++++ b/src/virtio/vulkan/vn_device.c	2026-10-30 22:42:47.458434015 +0000
+@@ -10,6 +10,7 @@
+ 
+ #include "vn_device.h"
+ #include "vn_droiddeck_stats.h"
++#include "vn_droiddeck_pcache.h"
+ 
+ #include <string.h>
+ 
+@@ -657,6 +658,8 @@
+       vn_log(instance, "%s", physical_dev->base.vk.properties.driverInfo);
+    }
+ 
++   vn_dd_pcache_init(dev);
++
+    vn_tls_set_async_pipeline_create();
+ 
+    *pDevice = vn_device_to_handle(dev);
+@@ -675,6 +678,8 @@
+    if (!dev)
+       return;
+ 
++   vn_dd_pcache_fini(dev);
++
+    vn_image_reqs_cache_fini(dev);
+    vn_buffer_reqs_cache_fini(dev);
+ 
+diff -ruN a/src/virtio/vulkan/vn_device.h b/src/virtio/vulkan/vn_device.h
+--- a/src/virtio/vulkan/vn_device.h	2026-10-30 22:44:12.851629998 +0000
++++ b/src/virtio/vulkan/vn_device.h	2026-10-30 22:42:47.457200578 +0000
+@@ -44,6 +44,9 @@
+ 
+    struct vn_buffer_reqs_cache buffer_reqs_cache;
+    struct vn_image_reqs_cache image_reqs_cache;
++
++   /* DroidDeck: the device's own pipeline cache, kept on disk (vn_droiddeck_pcache.c) */
++   struct vn_dd_pcache *dd_pcache;
+ };
+ VK_DEFINE_HANDLE_CASTS(vn_device,
+                        base.vk.base,
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_pcache.c b/src/virtio/vulkan/vn_droiddeck_pcache.c
+--- a/src/virtio/vulkan/vn_droiddeck_pcache.c	1970-01-01 00:00:00.000000000 +0000
++++ b/src/virtio/vulkan/vn_droiddeck_pcache.c	2026-10-30 22:43:43.305380586 +0000
+@@ -0,0 +1,279 @@
++/*
++ * DroidDeck: a pipeline cache that outlives the program (see the header).
++ * SPDX-License-Identifier: MIT
++ */
++
++#include "vn_droiddeck_pcache.h"
++
++#include <errno.h>
++#include <inttypes.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++#include "util/os_time.h"
++#include "util/u_atomic.h"
++#include "util/u_debug.h"
++#include "vk_pipeline_cache.h"
++
++#include "vn_device.h"
++#include "vn_physical_device.h"
++
++#define PCACHE_MAX_BYTES (512u << 20)
++
++struct vn_dd_pcache {
++   VkPipelineCache cache;
++   char path[512];
++   uint32_t created;    /* pipelines made through the cache since the last save */
++   uint64_t total;      /* ... in this session */
++   size_t loaded_bytes;
++   size_t saved_bytes;  /* the cache's size at the last save: a hit adds nothing to save */
++   mtx_t lock;
++   cnd_t cond;
++   bool stop;
++   bool thread_started;
++   thrd_t thread;
++};
++
++static bool
++pcache_enabled(void)
++{
++   static int on = -1;
++   if (on < 0)
++      on = debug_get_bool_option("DROIDDECK_VN_PIPELINE_CACHE", true);
++   return on;
++}
++
++/* the program's name for the file: Wine's .exe, or the binary */
++static void
++pcache_program(char *out, size_t size)
++{
++   char buf[512] = "";
++   FILE *c = fopen("/proc/self/cmdline", "re");
++   size_t n = 0;
++   if (c) {
++      n = fread(buf, 1, sizeof(buf) - 1, c);
++      fclose(c);
++   }
++   buf[n] = 0;
++   const char *a0 = buf;
++   const char *a1 = n > strlen(buf) + 1 ? buf + strlen(buf) + 1 : "";
++   /* Wine starts games as "<loader> <C:\...\game.exe>": the .exe names the game */
++   const char *pick = a0;
++   if (*a1 && (strstr(a1, ".exe") || strstr(a1, ".EXE")))
++      pick = a1;
++   const char *base = pick;
++   for (const char *p = pick; *p; p++) {
++      if (*p == '/' || *p == '\\')
++         base = p + 1;
++   }
++   size_t len = 0;
++   for (const char *p = base; *p && len + 1 < size; p++)
++      out[len++] = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') ||
++                         *p == '.' || *p == '-' || *p == '_'
++                      ? *p
++                      : '_';
++   out[len] = 0;
++   if (!len)
++      snprintf(out, size, "program");
++}
++
++static bool
++pcache_dir(char *out, size_t size)
++{
++   const char *xdg = getenv("XDG_CACHE_HOME");
++   const char *home = getenv("HOME");
++   if (xdg && *xdg)
++      snprintf(out, size, "%s/droiddeck-venus", xdg);
++   else
++      snprintf(out, size, "%s/.cache/droiddeck-venus", home && *home ? home : "/root");
++   char parent[512];
++   snprintf(parent, sizeof(parent), "%s", out);
++   char *slash = strrchr(parent, '/');
++   if (slash) {
++      *slash = 0;
++      mkdir(parent, 0755);
++   }
++   return mkdir(out, 0755) == 0 || errno == EEXIST;
++}
++
++static void *
++pcache_read(const char *path, size_t *size)
++{
++   FILE *f = fopen(path, "rb");
++   if (!f)
++      return NULL;
++   void *data = NULL;
++   if (fseek(f, 0, SEEK_END) == 0) {
++      const long len = ftell(f);
++      if (len > (long)sizeof(struct vk_pipeline_cache_header) && len <= (long)PCACHE_MAX_BYTES &&
++          fseek(f, 0, SEEK_SET) == 0) {
++         data = malloc(len);
++         if (data && fread(data, 1, len, f) == (size_t)len) {
++            *size = len;
++         } else {
++            free(data);
++            data = NULL;
++         }
++      }
++   }
++   fclose(f);
++   return data;
++}
++
++/* written whole to a temporary file and renamed over the old one, so a game killed mid-save
++ * leaves the last good file */
++static bool
++pcache_write(const char *path, const void *data, size_t size)
++{
++   char tmp[600];
++   snprintf(tmp, sizeof(tmp), "%s.%d.tmp", path, (int)getpid());
++   FILE *f = fopen(tmp, "wb");
++   if (!f)
++      return false;
++   const bool ok = fwrite(data, 1, size, f) == size;
++   if (fclose(f) != 0 || !ok || rename(tmp, path) != 0) {
++      unlink(tmp);
++      return false;
++   }
++   return true;
++}
++
++static void
++pcache_save(struct vn_device *dev, struct vn_dd_pcache *pc, const char *why)
++{
++   const uint32_t created = p_atomic_xchg(&pc->created, 0);
++   if (!created)
++      return;
++   VkDevice device = vn_device_to_handle(dev);
++   const int64_t t0 = os_time_get_nano();
++   size_t size = 0;
++   if (vn_GetPipelineCacheData(device, pc->cache, &size, NULL) != VK_SUCCESS || !size ||
++       size > PCACHE_MAX_BYTES || size == pc->saved_bytes)
++      return;
++   void *data = malloc(size);
++   if (!data)
++      return;
++   VkResult r = vn_GetPipelineCacheData(device, pc->cache, &size, data);
++   if (r == VK_SUCCESS && pcache_write(pc->path, data, size) && (pc->saved_bytes = size))
++      vn_droiddeck_log("pipeline cache: saved %zu bytes (%u new pipelines, %" PRIu64
++                       " this session; %s) in %.0f ms",
++                       size, created, pc->total, why,
++                       (os_time_get_nano() - t0) / 1e6);
++   else
++      vn_droiddeck_log("pipeline cache: saving to %s failed (%d)", pc->path, r);
++   free(data);
++}
++
++static int
++pcache_thread(void *arg)
++{
++   struct vn_device *dev = arg;
++   struct vn_dd_pcache *pc = dev->dd_pcache;
++   const int64_t interval_s = debug_get_num_option("DROIDDECK_VN_PIPELINE_CACHE_SAVE_S", 20);
++   mtx_lock(&pc->lock);
++   while (!pc->stop) {
++      struct timespec ts;
++      timespec_get(&ts, TIME_UTC);
++      ts.tv_sec += interval_s > 0 ? interval_s : 20;
++      cnd_timedwait(&pc->cond, &pc->lock, &ts);
++      if (pc->stop)
++         break;
++      mtx_unlock(&pc->lock);
++      pcache_save(dev, pc, "periodic");
++      mtx_lock(&pc->lock);
++   }
++   mtx_unlock(&pc->lock);
++   return 0;
++}
++
++void
++vn_dd_pcache_init(struct vn_device *dev)
++{
++   dev->dd_pcache = NULL;
++   if (!pcache_enabled())
++      return;
++   struct vn_dd_pcache *pc = calloc(1, sizeof(*pc));
++   if (!pc)
++      return;
++   char dir[400], prog[96];
++   if (!pcache_dir(dir, sizeof(dir))) {
++      vn_droiddeck_log("pipeline cache: no directory %s (%s); off", dir, strerror(errno));
++      free(pc);
++      return;
++   }
++   pcache_program(prog, sizeof(prog));
++   const uint8_t *uuid = dev->physical_device->base.vk.properties.pipelineCacheUUID;
++   char uuid_hex[2 * VK_UUID_SIZE + 1];
++   for (int i = 0; i < VK_UUID_SIZE; i++)
++      snprintf(uuid_hex + 2 * i, 3, "%02x", uuid[i]);
++   snprintf(pc->path, sizeof(pc->path), "%s/%s-%s.bin", dir, prog, uuid_hex);
++
++   size_t size = 0;
++   void *data = pcache_read(pc->path, &size);
++   if (data) {
++      /* the header vn_GetPipelineCacheData wrote: data from another GPU or driver is dropped */
++      const struct vk_pipeline_cache_header *h = data;
++      if (h->header_size < sizeof(*h) || h->header_size > size ||
++          h->header_version != VK_PIPELINE_CACHE_HEADER_VERSION_ONE ||
++          memcmp(h->uuid, uuid, VK_UUID_SIZE)) {
++         vn_droiddeck_log("pipeline cache: %s is for another driver; starting empty", pc->path);
++         free(data);
++         data = NULL;
++         size = 0;
++      }
++   }
++   const VkPipelineCacheCreateInfo ci = {
++      .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
++      .initialDataSize = data ? size : 0,
++      .pInitialData = data,
++   };
++   VkResult r = vn_CreatePipelineCache(vn_device_to_handle(dev), &ci, NULL, &pc->cache);
++   free(data);
++   if (r != VK_SUCCESS) {
++      free(pc);
++      return;
++   }
++   pc->loaded_bytes = size;
++   pc->saved_bytes = size;
++   mtx_init(&pc->lock, mtx_plain);
++   cnd_init(&pc->cond);
++   dev->dd_pcache = pc;
++   pc->thread_started = thrd_create(&pc->thread, pcache_thread, dev) == thrd_success;
++   vn_droiddeck_log("pipeline cache: %s, %zu bytes loaded (DROIDDECK_VN_PIPELINE_CACHE=0 turns it off)",
++                    pc->path, size);
++}
++
++void
++vn_dd_pcache_fini(struct vn_device *dev)
++{
++   struct vn_dd_pcache *pc = dev->dd_pcache;
++   if (!pc)
++      return;
++   if (pc->thread_started) {
++      mtx_lock(&pc->lock);
++      pc->stop = true;
++      cnd_broadcast(&pc->cond);
++      mtx_unlock(&pc->lock);
++      thrd_join(pc->thread, NULL);
++   }
++   pcache_save(dev, pc, "device destroyed");
++   vn_DestroyPipelineCache(vn_device_to_handle(dev), pc->cache, NULL);
++   cnd_destroy(&pc->cond);
++   mtx_destroy(&pc->lock);
++   free(pc);
++   dev->dd_pcache = NULL;
++}
++
++VkPipelineCache
++vn_dd_pcache_for(struct vn_device *dev, VkPipelineCache app_cache, uint32_t count)
++{
++   struct vn_dd_pcache *pc = dev->dd_pcache;
++   if (app_cache != VK_NULL_HANDLE || !pc)
++      return app_cache;
++   p_atomic_add(&pc->created, count);
++   p_atomic_add(&pc->total, count);
++   return pc->cache;
++}
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_pcache.h b/src/virtio/vulkan/vn_droiddeck_pcache.h
+--- a/src/virtio/vulkan/vn_droiddeck_pcache.h	1970-01-01 00:00:00.000000000 +0000
++++ b/src/virtio/vulkan/vn_droiddeck_pcache.h	2026-10-30 22:41:53.179436654 +0000
+@@ -0,0 +1,36 @@
++/*
++ * DroidDeck: a pipeline cache that outlives the program.
++ *
++ * DXVK creates every pipeline with VK_NULL_HANDLE for the cache and counts on the driver keeping
++ * its own on disk. Mali's driver has none for Vulkan, so every session compiled every pipeline
++ * again, and the compiles ran on the server's main ring: the 2026-10-31-02 Lake bundle has
++ * vkCreateGraphicsPipelines taking up to 230 ms there, which every later command of the game
++ * (the frame, the present) waited behind -- the stutters left after 0027-0029.
++ *
++ * Each device gets one VkPipelineCache, loaded from
++ *   $XDG_CACHE_HOME (or $HOME/.cache)/droiddeck-venus/<program>-<pipelineCacheUUID>.bin
++ * and used for every pipeline the program creates without a cache of its own. A thread saves it
++ * when new pipelines were made (every DROIDDECK_VN_PIPELINE_CACHE_SAVE_S, default 20 s) and at
++ * vkDestroyDevice, so a game that is killed keeps what it compiled up to the last save. The next
++ * session's pipelines come from the cache instead of the compiler.
++ * DROIDDECK_VN_PIPELINE_CACHE=0 turns it off.
++ */
++#ifndef VN_DROIDDECK_PCACHE_H
++#define VN_DROIDDECK_PCACHE_H
++
++#include "vn_common.h"
++
++struct vn_device;
++struct vn_dd_pcache;
++
++/* after the device is made / before it goes */
++void
++vn_dd_pcache_init(struct vn_device *dev);
++void
++vn_dd_pcache_fini(struct vn_device *dev);
++
++/* the cache a pipeline create should use: the program's own, or the device's */
++VkPipelineCache
++vn_dd_pcache_for(struct vn_device *dev, VkPipelineCache app_cache, uint32_t count);
++
++#endif /* VN_DROIDDECK_PCACHE_H */
+diff -ruN a/src/virtio/vulkan/vn_pipeline.c b/src/virtio/vulkan/vn_pipeline.c
+--- a/src/virtio/vulkan/vn_pipeline.c	2026-10-30 22:44:12.847634230 +0000
++++ b/src/virtio/vulkan/vn_pipeline.c	2026-10-30 22:42:56.158139933 +0000
+@@ -9,6 +9,7 @@
+  */
+ 
+ #include "vn_pipeline.h"
++#include "vn_droiddeck_pcache.h"
+ 
+ #include <stdlib.h>
+ 
+@@ -1697,6 +1698,9 @@
+    bool want_sync = false;
+    VkResult result;
+ 
++   /* droiddeck: pipelines made without a cache go through the device's on-disk one */
++   pipelineCache = vn_dd_pcache_for(dev, pipelineCache, createInfoCount);
++
+    /* silence -Wmaybe-uninitialized false alarm on release build with gcc */
+    if (!createInfoCount)
+       return VK_SUCCESS;
+@@ -1793,6 +1797,9 @@
+    bool want_sync = false;
+    VkResult result;
+ 
++   /* droiddeck: pipelines made without a cache go through the device's on-disk one */
++   pipelineCache = vn_dd_pcache_for(dev, pipelineCache, createInfoCount);
++
+    memset(pPipelines, 0, sizeof(*pPipelines) * createInfoCount);
+ 
+    if (!vn_create_pipeline_handles(dev, VN_PIPELINE_TYPE_COMPUTE,

@@ -37,7 +37,6 @@ object SteamLiveShortcuts {
         """.trimIndent()
         val result = evaluate(context, js) ?: return
         Log.i(TAG, "live shortcuts: $result added")
-        if (result != "0") StoresState.logLine("Steam: $result shortcut(s) added to the running client")
     }
 
     fun ensure(context: Context, name: String, exe: String, dir: String, compat: Boolean, appId: Long? = null): Long? {

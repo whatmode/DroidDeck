@@ -35,7 +35,12 @@ import kotlin.math.abs
  * cores the governor kept at 2.2 GHz, slower than a 3.5 GHz mid core, and 23-25% of its frames fell
  * under 90 fps against 2-7% unboosted. A game with no frames (Factorio's benchmark, a loading screen)
  * or one falling behind the panel is boosted; one holding pace keeps what it has for [PACE_LEAVE_S]
- * seconds and is then let go.
+ * seconds and is then let go. A game held by the app's own fps limit holds pace the same way.
+ *
+ * Measured on the Odin 3 (CQ8725S) and turned on for Google's Tensor too: on the Pixel 9 Pro XL
+ * (2026-10-31) Lake's main thread was 63-73% busy, 30% of it on the A720s rather than the X4, and
+ * DXVK's command thread ran 60-95% on the A520s. Pixel's power HAL is ADPF's reference one. The
+ * log line names the thermal status, since Tensor caps its clocks within minutes of a game.
  */
 object GameThreadHints {
     private const val TAG = "GameThreadHints"
@@ -59,8 +64,9 @@ object GameThreadHints {
     @Synchronized
     fun start(context: Context): String {
         if (!SessionPrefs.gameThreadHints(context)) return "game thread hints: off"
-        // Measured on the Odin 3 (CQ8725S) only; another HAL may boost differently, or not at all.
-        if (Build.VERSION.SDK_INT < 31 || Build.SOC_MODEL != "CQ8725S") return "game thread hints: Odin 3 only"
+        // Measured on the Odin 3 (CQ8725S); Tensor's HAL is ADPF's reference one. Others may boost differently, or not at all.
+        if (Build.VERSION.SDK_INT < 31 || !supported(Build.SOC_MANUFACTURER, Build.SOC_MODEL))
+            return "game thread hints: Odin 3 and Tensor only (${Build.SOC_MANUFACTURER} ${Build.SOC_MODEL})"
         val hm = context.getSystemService(PerformanceHintManager::class.java)
             ?: return "game thread hints: no PerformanceHintManager"
         val pm = context.getSystemService(PowerManager::class.java)
@@ -68,6 +74,10 @@ object GameThreadHints {
         worker = Thread({ run(hm, pm) }, "game-thread-hints").apply { isDaemon = true; start() }
         return "game thread hints: watching"
     }
+
+    /** The SoCs whose power HAL was seen to act on a hint session: the Odin 3's, and Google's Tensor. */
+    internal fun supported(manufacturer: String, model: String): Boolean =
+        model == "CQ8725S" || manufacturer.equals("Google", ignoreCase = true) || model.startsWith("Tensor")
 
     /** At a session's end. */
     @Synchronized
@@ -90,7 +100,8 @@ object GameThreadHints {
                     frames.addLast(WaylandCompositor.gameFrameCount())
                     if (frames.size > PACE_WINDOW_S + 1) frames.removeFirst()
                     val fps = (frames.last() - frames.first()).toDouble() / (frames.size - 1).coerceAtLeast(1)
-                    val paced = frames.size > PACE_WINDOW_S && holdsPace(fps, SessionState.refreshHz.toDouble())
+                    val paced = frames.size > PACE_WINDOW_S &&
+                        (holdsPace(fps, SessionState.refreshHz.toDouble()) || holdsLimit(fps, SessionState.fpsLimit))
                     pacedFor = if (paced) pacedFor + 1 else 0
                     // Not SEVERE: the Odin 3 reports it once its skin reaches 50 C, a couple of minutes into any game.
                     val spare = pm.isPowerSaveMode || pm.currentThermalStatus >= PowerManager.THERMAL_STATUS_CRITICAL
@@ -105,7 +116,7 @@ object GameThreadHints {
                         boosted = if (session == null) emptySet() else next
                         Log.i(TAG, (if (session == null && next.isNotEmpty()) "no session for " else "boosting ") +
                             next.joinToString { "${readName("/proc/$it/comm")}/$it ${((busy[it] ?: 0.0) * 100).toInt()}%" }.ifEmpty { "nothing" } +
-                            " (game ${fps.toInt()} fps${if (paced) ", holding pace" else ""})")
+                            " (game ${fps.toInt()} fps${if (paced) ", holding pace" else ""}, thermal ${thermalName(pm.currentThermalStatus)})")
                     }
                 }
                 session?.reportActualWorkDuration(TARGET_NS * 3 / 2)
@@ -139,6 +150,21 @@ object GameThreadHints {
     // ponytail: a CPU-bound game that happens to run at ~60 fps on a 120 Hz panel reads as limited; narrow the band if that shows up
     internal fun holdsPace(fps: Double, refreshHz: Double): Boolean =
         fps >= 10 && refreshHz > 0 && (1..4).any { k -> abs(fps - refreshHz / k) < PACE_TOLERANCE * refreshHz / k }
+
+    /** A game at the app's own fps limit (within [PACE_TOLERANCE]) is held by it, not by the CPU. */
+    internal fun holdsLimit(fps: Double, limit: Int): Boolean =
+        limit > 0 && fps > 0 && abs(fps - limit) < PACE_TOLERANCE * limit + 0.5
+
+    private fun thermalName(status: Int) = when (status) {
+        PowerManager.THERMAL_STATUS_NONE -> "none"
+        PowerManager.THERMAL_STATUS_LIGHT -> "light"
+        PowerManager.THERMAL_STATUS_MODERATE -> "moderate"
+        PowerManager.THERMAL_STATUS_SEVERE -> "severe"
+        PowerManager.THERMAL_STATUS_CRITICAL -> "critical"
+        PowerManager.THERMAL_STATUS_EMERGENCY -> "emergency"
+        PowerManager.THERMAL_STATUS_SHUTDOWN -> "shutdown"
+        else -> status.toString()
+    }
 
     /**
      * The threads to boost next: those already boosted that are still above [LEAVE], then new ones

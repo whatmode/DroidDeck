@@ -1,0 +1,73 @@
+From 5dec7ce5c8245b6972fce53179f34227c69854a7 Mon Sep 17 00:00:00 2001
+From: droiddeck <ci@droiddeck>
+Date: Sat, 24 Oct 2026 10:55:37 +0000
+Subject: [PATCH] Log failed allocations, binds and queue submits
+
+---
+ src/venus/vkr_device_memory.c | 4 ++++
+ src/venus/vkr_image.c         | 2 ++
+ src/venus/vkr_queue.c         | 6 ++++++
+ 3 files changed, 12 insertions(+)
+
+diff --git a/src/venus/vkr_device_memory.c b/src/venus/vkr_device_memory.c
+index aea49c9..c56a45e 100644
+--- a/src/venus/vkr_device_memory.c
++++ b/src/venus/vkr_device_memory.c
+@@ -386,6 +386,10 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+ 
+    struct vkr_device_memory *mem = vkr_device_memory_create_and_add(ctx, args);
+    if (!mem) {
++      vkr_log("vkAllocateMemory -> %d: %llu bytes, type %u (flags 0x%x), import fd %d, "
++              "valid fd types 0x%x",
++              args->ret, (unsigned long long)alloc_info->allocationSize, mem_type_index,
++              property_flags, local_import_info.fd, valid_fd_types);
+       if (local_import_info.fd >= 0)
+          close(local_import_info.fd);
+       if (gbm_bo)
+diff --git a/src/venus/vkr_image.c b/src/venus/vkr_image.c
+index 1ae6bb3..b1c7dd8 100644
+--- a/src/venus/vkr_image.c
++++ b/src/venus/vkr_image.c
+@@ -136,6 +136,8 @@ vkr_dispatch_vkBindImageMemory2(UNUSED struct vn_dispatch_context *dispatch,
+ 
+    vn_replace_vkBindImageMemory2_args_handle(args);
+    args->ret = vk->BindImageMemory2(args->device, args->bindInfoCount, args->pBindInfos);
++   if (args->ret != VK_SUCCESS)
++      vkr_log("vkBindImageMemory2 -> %d (%u binds)", args->ret, args->bindInfoCount);
+ }
+ 
+ static void
+diff --git a/src/venus/vkr_queue.c b/src/venus/vkr_queue.c
+index 61b94be..71d7c43 100644
+--- a/src/venus/vkr_queue.c
++++ b/src/venus/vkr_queue.c
+@@ -379,6 +379,8 @@ vkr_dispatch_vkQueueSubmit(UNUSED struct vn_dispatch_context *dispatch,
+    args->ret =
+       vk->QueueSubmit(args->queue, args->submitCount, args->pSubmits, args->fence);
+    mtx_unlock(&queue->vk_mutex);
++   if (args->ret != VK_SUCCESS)
++      vkr_log("vkQueueSubmit -> %d (%u submits)", args->ret, args->submitCount);
+ }
+ 
+ static void
+@@ -395,6 +397,8 @@ vkr_dispatch_vkQueueBindSparse(UNUSED struct vn_dispatch_context *dispatch,
+    args->ret =
+       vk->QueueBindSparse(args->queue, args->bindInfoCount, args->pBindInfo, args->fence);
+    mtx_unlock(&queue->vk_mutex);
++   if (args->ret != VK_SUCCESS)
++      vkr_log("vkQueueBindSparse -> %d (%u binds)", args->ret, args->bindInfoCount);
+ }
+ 
+ static void
+@@ -420,6 +424,8 @@ vkr_dispatch_vkQueueSubmit2(UNUSED struct vn_dispatch_context *dispatch,
+    args->ret =
+       vk->QueueSubmit2(args->queue, args->submitCount, args->pSubmits, args->fence);
+    mtx_unlock(&queue->vk_mutex);
++   if (args->ret != VK_SUCCESS)
++      vkr_log("vkQueueSubmit2 -> %d (%u submits)", args->ret, args->submitCount);
+ }
+ 
+ static void
+-- 
+2.43.0
+

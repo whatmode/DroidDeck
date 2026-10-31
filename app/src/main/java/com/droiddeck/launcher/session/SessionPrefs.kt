@@ -5,7 +5,6 @@ import android.content.pm.ActivityInfo
 import androidx.annotation.StringRes
 import com.droiddeck.launcher.R
 import com.droiddeck.launcher.core.CpuAllocationDefaults
-import com.droiddeck.launcher.core.GameEnvironment
 import com.droiddeck.launcher.core.TextureFiltering
 import com.droiddeck.launcher.core.ZramSupport
 import com.droiddeck.launcher.gpu.Cardboard
@@ -13,8 +12,6 @@ import com.droiddeck.launcher.gpu.ScreenEffects
 import org.json.JSONObject
 
 object SessionPrefs {
-    data class GameTextureFiltering(val anisotropy: Int? = null, val lodBias: String? = null)
-
     const val SUSPEND_AUTO = "auto"
     const val SUSPEND_NATIVE = "native"
     const val SUSPEND_MANUAL = "manual"
@@ -139,7 +136,10 @@ object SessionPrefs {
     fun hudEnabled(context: Context): Boolean = prefs(context).getBoolean(hudKey(context), !mangoappSession(context))
 
     fun setHudEnabled(context: Context, on: Boolean) {
-        prefs(context).edit().putBoolean(hudKey(context), on).apply()
+        prefs(context).edit()
+            .putBoolean(hudKey(context), on)
+            .putInt("overlayLevel", if (on) OVERLAY_LEVEL_1 else OVERLAY_OFF)
+            .apply()
     }
 
     private fun hudKey(context: Context) = if (mangoappSession(context)) "hudDeck" else "hud"
@@ -361,6 +361,10 @@ object SessionPrefs {
 
     /** Whether the game's busiest threads are named to the power HAL for a boost (GameThreadHints). */
     fun gameThreadHints(context: Context): Boolean = prefs(context).getBoolean("gameThreadHints", true)
+
+    fun setGameThreadHints(context: Context, on: Boolean) {
+        prefs(context).edit().putBoolean("gameThreadHints", on).apply()
+    }
 
     fun prootNoSeccomp(context: Context): Boolean = prefs(context).getBoolean("prootNoSeccomp", false)
 
@@ -704,6 +708,78 @@ object SessionPrefs {
     fun fpsLimitChoices(context: Context): List<Pair<Int, String>> =
         fpsLimitChoices.map { (fps, label) -> fps to if (fps == 0) context.getString(R.string.frame_gen_off) else label }
 
+    /**
+     * The panel rate ceiling the session picks its display mode under, or 0 for "the panel's own".
+     * The Android peak_refresh_rate setting and the glasses' output rate still cap this, so it can
+     * only lower the rate, never raise it above what the system allows.
+     */
+    fun refreshLimit(context: Context, mode: String): Int = prefs(context).getInt("refreshLimit.$mode", 0)
+
+    fun setRefreshLimit(context: Context, mode: String, hz: Int) {
+        prefs(context).edit().putInt("refreshLimit.$mode", hz.coerceAtLeast(0)).apply()
+    }
+
+    /** Only the rates the session can actually ask for; 0 is the panel's own rate. */
+    val refreshLimitChoices = listOf(0, 40, 45, 60, 90, 120)
+
+    fun refreshLimitChoices(context: Context): List<Pair<Int, String>> =
+        refreshLimitChoices.map { hz -> hz to if (hz == 0) context.getString(R.string.refresh_panel) else "$hz Hz" }
+
+    /**
+     * The stricter of two ceilings, where 0 means "no ceiling of my own". Used to combine the
+     * user's refresh choice with the glasses' output rate without either one silently winning.
+     */
+    fun tightestRefreshLimit(a: Int, b: Int): Int = when {
+        a <= 0 -> b
+        b <= 0 -> a
+        else -> minOf(a, b)
+    }
+
+    /**
+     * What the performance HUD shows. OFF is no HUD, LEVEL_1 is the frame rate line the HUD has
+     * always drawn, and the higher levels add the driver-side numbers the log already carries.
+     */
+    const val OVERLAY_OFF = 0
+    const val OVERLAY_LEVEL_1 = 1
+    const val OVERLAY_LEVEL_2 = 2
+    const val OVERLAY_LEVEL_3 = 3
+
+    fun overlayLevel(context: Context): Int =
+        prefs(context).getInt("overlayLevel", if (hudEnabled(context)) OVERLAY_LEVEL_1 else OVERLAY_OFF)
+
+    fun setOverlayLevel(context: Context, level: Int) {
+        val clamped = level.coerceIn(OVERLAY_OFF, OVERLAY_LEVEL_3)
+        // hudEnabled is what the rest of the app (and older builds' prefs) already reads, so keep
+        // it in step rather than letting the two disagree after a level change.
+        prefs(context).edit()
+            .putInt("overlayLevel", clamped)
+            .putBoolean(hudKey(context), clamped > OVERLAY_OFF)
+            .apply()
+    }
+
+    val overlayLevelChoices = listOf(
+        OVERLAY_OFF to R.string.overlay_off,
+        OVERLAY_LEVEL_1 to R.string.overlay_level_1,
+        OVERLAY_LEVEL_2 to R.string.overlay_level_2,
+        OVERLAY_LEVEL_3 to R.string.overlay_level_3,
+    )
+
+    fun overlayLevelChoices(context: Context): List<Pair<Int, String>> =
+        overlayLevelChoices.map { (level, label) -> level to context.getString(label) }
+
+    /**
+     * Android's sustained performance mode: the platform holds the clocks it can sustain for the
+     * length of the window instead of boosting past them. It is the one power lever a plain app
+     * has (no permission), and on a phone that throttles it trades a high first minute for a
+     * flatter rest of the session.
+     */
+    fun sustainedPerformance(context: Context): Boolean =
+        prefs(context).getBoolean("sustainedPerformance", false)
+
+    fun setSustainedPerformance(context: Context, on: Boolean) {
+        prefs(context).edit().putBoolean("sustainedPerformance", on).apply()
+    }
+
     val upscalerChoices = listOf(
         0 to "Linear", 2 to "Nearest", 4 to "AMD FSR 1", 3 to "Snapdragon GSR",
         8 to "Snapdragon GSR (quality)", 7 to "NVIDIA NIS", 6 to "Sharpen only",
@@ -803,73 +879,23 @@ object SessionPrefs {
         publishGameEnvironment(context)
     }
 
-    fun gameTextureFiltering(context: Context, scope: String): GameTextureFiltering {
-        require(GameEnvironment.validScope(scope))
-        return gameTextureFiltering(context)[scope] ?: GameTextureFiltering()
+    /** App ids whose shortcut launches in Proton/FEX without the Steam client. */
+    fun noSteamGames(context: Context): Set<String> = runCatching {
+        JSONObject(prefs(context).getString("noSteamGames", null) ?: "{}")
+    }.getOrElse { JSONObject() }.let { json ->
+        buildSet { json.keys().forEach { if (json.optBoolean(it)) add(it) } }
     }
 
-    fun gameTextureFiltering(context: Context): Map<String, GameTextureFiltering> {
-        val json = runCatching {
-            JSONObject(prefs(context).getString("gameTextureFiltering", null) ?: "{}")
-        }.getOrElse { JSONObject() }
-        return buildMap {
-            json.keys().forEach { scope ->
-                if (!GameEnvironment.validScope(scope)) return@forEach
-                val entry = json.optJSONObject(scope) ?: return@forEach
-                val anisotropy = entry.optInt("anisotropy").takeIf {
-                    entry.has("anisotropy") && it in TextureFiltering.ANISOTROPY
-                }
-                val lodBias = entry.optString("lodBias").takeIf {
-                    entry.has("lodBias") && it in TextureFiltering.LOD_BIAS
-                }
-                if (anisotropy != null || lodBias != null) {
-                    put(scope, GameTextureFiltering(anisotropy, lodBias))
-                }
-            }
-        }
-    }
-
-    fun setGameTextureAnisotropy(context: Context, scope: String, value: Int?) {
-        require(value == null || value in TextureFiltering.ANISOTROPY)
-        updateGameTextureFiltering(context, scope) { it.copy(anisotropy = value) }
-    }
-
-    fun setGameTextureLodBias(context: Context, scope: String, choice: String?) {
-        require(choice == null || choice in TextureFiltering.LOD_BIAS)
-        updateGameTextureFiltering(context, scope) { it.copy(lodBias = choice) }
-    }
-
-    fun clearGameTextureFiltering(context: Context, scope: String) {
-        require(GameEnvironment.validScope(scope))
-        val choices = gameTextureFiltering(context).toMutableMap()
-        if (choices.remove(scope) == null) return
-        saveGameTextureFiltering(context, choices)
-        publishGameEnvironment(context)
-    }
-
-    private fun updateGameTextureFiltering(
-        context: Context,
-        scope: String,
-        change: (GameTextureFiltering) -> GameTextureFiltering,
-    ) {
-        require(GameEnvironment.validScope(scope))
-        val choices = gameTextureFiltering(context).toMutableMap()
-        val next = change(choices[scope] ?: GameTextureFiltering())
-        if (next.anisotropy == null && next.lodBias == null) choices.remove(scope) else choices[scope] = next
-        saveGameTextureFiltering(context, choices)
-        publishGameEnvironment(context)
-    }
-
-    private fun saveGameTextureFiltering(context: Context, choices: Map<String, GameTextureFiltering>) {
+    fun setNoSteam(context: Context, appId: String, on: Boolean) {
+        require(appId.matches(Regex("[1-9][0-9]*")))
+        val games = noSteamGames(context).toMutableSet()
+        if (on) games += appId else games -= appId
         val json = JSONObject()
-        choices.forEach { (id, choice) ->
-            json.put(id, JSONObject().apply {
-                choice.anisotropy?.let { put("anisotropy", it) }
-                choice.lodBias?.let { put("lodBias", it) }
-            })
-        }
-        prefs(context).edit().putString("gameTextureFiltering", json.toString()).apply()
+        games.sorted().forEach { json.put(it, true) }
+        prefs(context).edit().putString("noSteamGames", json.toString()).apply()
     }
+
+    fun noSteam(context: Context, appId: String): Boolean = appId in noSteamGames(context)
 
     private fun publishGameEnvironment(context: Context) {
         runCatching { GameEnvironmentStore.publish(context) }

@@ -1,0 +1,88 @@
+PanVK CSF: give compute jobs the shared TLS size, not their own stack size
+
+Command buffers use one TLS allocation, sized for the largest stack of any
+shader in them. A compute (or precomp, or GPU-prerast) job copies the shared
+descriptor's base pointer into its private TSD but left the TSD's TLS size
+word set to the job's own shader stack size. With packed TLS addressing --
+the default on Valhall v9 and later, so G615/G715 included -- the thread
+stack stride is derived from that size word. When jobs with different stack
+sizes run without an intervening barrier, the job with the smaller stride
+writes its stacks on top of the other job's, corrupting TLS.
+
+DXVK runs many small compute jobs (Unity's auto exposure and bloom among
+them) back to back, so it hits this on essentially every frame. The corrupt
+exposure reads back as NaN/Inf, tonemaps to white, and the temporal history
+then keeps the frame white.
+
+Copy word 0 (TLS size) of the shared descriptor along with the base pointer
+at all three CSF sites that dispatch a compute-style job.
+
+Ported from upstream Mesa 81db71cf ("panvk/csf: give compute jobs the TLS
+size of the shared allocation"), which fixes the same class of GPU page
+fault on Mali-G615. The third site is DroidDeck's own GPU-prerast launcher,
+which copies the same descriptor and needs the same fix.
+
+diff --git a/src/panfrost/vulkan/csf/panvk_vX_cmd_dispatch.c b/src/panfrost/vulkan/csf/panvk_vX_cmd_dispatch.c
+index 3586e17..5985d99 100644
+--- a/src/panfrost/vulkan/csf/panvk_vX_cmd_dispatch.c
++++ b/src/panfrost/vulkan/csf/panvk_vX_cmd_dispatch.c
+@@ -410,11 +410,13 @@ cmd_dispatch(struct panvk_cmd_buffer *cmdbuf, struct panvk_dispatch_info *info)
+ 
+    struct cs_builder *b = panvk_get_cs_builder(cmdbuf, PANVK_SUBQUEUE_COMPUTE);
+ 
+-   /* Copy the global TLS pointer to the per-job TSD. */
++   /* Copy the global TLS pointer and size to the per-job TSD. */
+    if (cs->info.tls_size) {
+       cs_move64_to(b, cs_scratch_reg64(b, 0), cmdbuf->state.tls.desc.gpu);
++      cs_load32_to(b, cs_scratch_reg32(b, 4), cs_scratch_reg64(b, 0), 0);
+       cs_load64_to(b, cs_scratch_reg64(b, 2), cs_scratch_reg64(b, 0), 8);
+       cs_move64_to(b, cs_scratch_reg64(b, 0), tsd);
++      cs_store32(b, cs_scratch_reg32(b, 4), cs_scratch_reg64(b, 0), 0);
+       cs_store64(b, cs_scratch_reg64(b, 2), cs_scratch_reg64(b, 0), 8);
+       cs_flush_stores(b);
+    }
+diff --git a/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c b/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
+index 1733fa3..bf780b4 100644
+--- a/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
++++ b/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
+@@ -3737,15 +3737,19 @@ gpu_prerast_launch_cs_desc(struct panvk_cmd_buffer *cmdbuf,
+                            uint64_t push_uniforms, uint64_t tsd,
+                            const struct panvk_dispatch_info *info)
+ {
+-   /* Same TLS pointer copy as cmd_dispatch(): the global TLS descriptor is
+-    * only filled at EndCommandBuffer, so copy its pointer on the GPU.
++   /* Same TLS pointer and size copy as cmd_dispatch(): the global TLS
++    * descriptor is only filled at EndCommandBuffer, so copy both words on the
++    * GPU. The size word sets the thread-stack stride, so a stale value here
++    * corrupts the shared stack allocation.
+     */
+    if (cs->info.tls_size) {
+       struct cs_builder *b =
+          panvk_get_cs_builder(cmdbuf, PANVK_SUBQUEUE_COMPUTE);
+       cs_move64_to(b, cs_scratch_reg64(b, 0), cmdbuf->state.tls.desc.gpu);
++      cs_load32_to(b, cs_scratch_reg32(b, 4), cs_scratch_reg64(b, 0), 0);
+       cs_load64_to(b, cs_scratch_reg64(b, 2), cs_scratch_reg64(b, 0), 8);
+       cs_move64_to(b, cs_scratch_reg64(b, 0), tsd);
++      cs_store32(b, cs_scratch_reg32(b, 4), cs_scratch_reg64(b, 0), 0);
+       cs_store64(b, cs_scratch_reg64(b, 2), cs_scratch_reg64(b, 0), 8);
+       cs_flush_stores(b);
+    }
+diff --git a/src/panfrost/vulkan/csf/panvk_vX_cmd_precomp.c b/src/panfrost/vulkan/csf/panvk_vX_cmd_precomp.c
+index a3be517..5dabf3f 100644
+--- a/src/panfrost/vulkan/csf/panvk_vX_cmd_precomp.c
++++ b/src/panfrost/vulkan/csf/panvk_vX_cmd_precomp.c
+@@ -64,11 +64,13 @@ panvk_per_arch(dispatch_precomp)(struct panvk_precomp_ctx *ctx,
+    const struct cs_tracing_ctx *tracing_ctx =
+       &cmdbuf->state.cs[PANVK_SUBQUEUE_COMPUTE].tracing;
+ 
+-   /* Copy the global TLS pointer to the per-job TSD. */
++   /* Copy the global TLS pointer and size to the per-job TSD. */
+    if (shader->info.tls_size) {
+       cs_move64_to(b, cs_scratch_reg64(b, 0), cmdbuf->state.tls.desc.gpu);
++      cs_load32_to(b, cs_scratch_reg32(b, 4), cs_scratch_reg64(b, 0), 0);
+       cs_load64_to(b, cs_scratch_reg64(b, 2), cs_scratch_reg64(b, 0), 8);
+       cs_move64_to(b, cs_scratch_reg64(b, 0), tsd);
++      cs_store32(b, cs_scratch_reg32(b, 4), cs_scratch_reg64(b, 0), 0);
+       cs_store64(b, cs_scratch_reg64(b, 2), cs_scratch_reg64(b, 0), 8);
+       cs_flush_stores(b);
+    }

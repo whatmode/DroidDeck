@@ -1,0 +1,42 @@
+diff -ruN a/src/virtio/vulkan/vn_descriptor_set.c b/src/virtio/vulkan/vn_descriptor_set.c
+--- a/src/virtio/vulkan/vn_descriptor_set.c
++++ b/src/virtio/vulkan/vn_descriptor_set.c
+@@ -18,6 +18,10 @@
+ #include "vn_device.h"
+ #include "vn_pipeline.h"
+ 
++/* droiddeck: log the first time the guest's own descriptor-pool accounting has to defer to the
++ * real pool (see vn_AllocateDescriptorSets) */
++static int dd_pool_fallback_logged;
++
+ void
+ vn_descriptor_set_layout_destroy(struct vn_device *dev,
+                                  struct vn_descriptor_set_layout *layout)
+@@ -679,11 +683,25 @@ vn_AllocateDescriptorSets(VkDevice device,
+          pool->last_layout = VK_NULL_HANDLE;
+       }
+ 
++      /* droiddeck: the shadow accounting below is the guest's guess at the real pool's room,
++       * and a wrong guess is not permission to refuse an allocation. It has no idea that the
++       * host pool was reset, or that another ring is allocating from the same pool, so it can
++       * report a full pool while the real one still has room. When it does, stop trusting it:
++       * the pool moves to VN_ASYNC_SET_ALLOC_NONE, which makes this and every later allocation
++       * from the pool synchronous and answered by the real driver. A real failure then comes
++       * back from that call and is returned as it is. DXVK retries a VK_ERROR_OUT_OF_POOL_MEMORY
++       * it is given, so a false one is a reset/recreate storm, not a lost set. */
+       if (pool->current_state != VN_ASYNC_SET_ALLOC_NONE &&
+           !vn_descriptor_pool_alloc_descriptors(
+              pool, layout, last_binding_descriptor_count)) {
+-         result = VK_ERROR_OUT_OF_POOL_MEMORY;
+-         goto fail;
++         if (pool->last_layout != VK_NULL_HANDLE) {
++            vn_descriptor_set_layout_unref(dev, pool->last_layout);
++            pool->last_layout = VK_NULL_HANDLE;
++         }
++         pool->current_state = VN_ASYNC_SET_ALLOC_NONE;
++         if (!p_atomic_xchg(&dd_pool_fallback_logged, 1))
++            vn_droiddeck_log("descriptor pools: the guest's accounting said a pool was full; "
++                             "deferring to the real pool (synchronous from here)");
+       }
+ 
+       struct vn_descriptor_set *set =

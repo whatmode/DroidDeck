@@ -147,16 +147,21 @@ def win_components(compat, app_id):
         return ""
 
 
-def apply_config(env, config, app_id, fixes=None):
+def apply_config(env, config, fixes=None, app_id=None):
     if config.get("version") != 1:
         raise ValueError("unsupported environment configuration")
     result = env.copy()
     entries = dict(config.get("shared", {}))
+    # Variables set for this one game in DroidDeck (its game card), over the shared ones.
+    own = (config.get("games") or {}).get(app_id) if app_id else None
+    if isinstance(own, dict):
+        entries.update(own)
+        if own:
+            print("droiddeck-game-env: game %s variables: %s" % (app_id, " ".join("%s=%s" % kv for kv in own.items())), file=sys.stderr)
     for name, value in (fixes or {}).items():
         if name == "WINEDLLOVERRIDES" and entries.get(name, env.get(name)):
             value = entries.get(name, env.get(name)) + ";" + value
         entries[name] = value
-    entries.update(config.get("games", {}).get(app_id, {}))
     for name, value in entries.items():
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
             raise ValueError("invalid environment name")
@@ -166,10 +171,7 @@ def apply_config(env, config, app_id, fixes=None):
             result[name] = value
         else:
             raise ValueError("invalid environment value")
-    game_dxvk = config.get("dxvkConfigGames", {})
-    if not isinstance(game_dxvk, dict):
-        raise ValueError("invalid game dxvk configuration")
-    dxvk = game_dxvk.get(app_id, config.get("dxvkConfig"))
+    dxvk = config.get("dxvkConfig")
     if dxvk is not None:
         if not isinstance(dxvk, str) or "\0" in dxvk or len(dxvk) > 8192:
             raise ValueError("invalid dxvk configuration")
@@ -179,12 +181,10 @@ def apply_config(env, config, app_id, fixes=None):
     return result
 
 
-def sync_config(config, app_id):
-    games = config.get("games", {})
+def sync_config(config):
     return {
         "version": config.get("version"),
         "shared": {name: value for name, value in config.get("shared", {}).items() if name in SYNC_KEYS},
-        "games": {app_id: {name: value for name, value in games.get(app_id, {}).items() if name in SYNC_KEYS}},
     }
 
 
@@ -296,19 +296,94 @@ def with_ffmpeg(env):
 PROTON_DEFAULT_DEBUG = "+timestamp,+pid,+tid,+seh,+unwind,+threadname,+debugstr,+loaddll,+mscoree"
 
 
-def with_mali_video(env):
+def with_mali_video(env, exists=os.path.exists):
     """PanVK (Mali over kbase) draws D3D11 NV12 textures white, which blanks Unity's video player
     (Lake's menu). VK_LAYER_DROIDDECK_noycbcr reports YCbCr formats as unsupported, so games use
     their ordinary texture path for video. DROIDDECK_HIDE_YCBCR=0 keeps them."""
-    if os.path.exists("/dev/mali0") and not os.path.exists("/dev/kgsl-3d0"):
+    if exists("/dev/mali0") and not exists("/dev/kgsl-3d0"):
         env.setdefault("DROIDDECK_HIDE_YCBCR", "1")
-        # D3D11 leaves compute shared memory undefined, but desktop drivers hand it out zeroed and
-        # games rely on that (Unity's auto exposure: one garbage read and the picture stays white).
-        # Mali does not zero it, so DXVK does. DROIDDECK_DXVK_ZERO_WG=0 turns it off.
-        own = env.get("DXVK_CONFIG", "")
-        if env.get("DROIDDECK_DXVK_ZERO_WG") != "0" and "zeroWorkgroupMemory" not in own:
-            own = own.strip().rstrip(";").strip()
-            env["DXVK_CONFIG"] = (own + "; " if own else "") + "d3d11.zeroWorkgroupMemory = True"
+        if env.get("BL_VENUS_SINGLE") == "1" or env.get("BL_DRIVER_GL"):
+            # The Venus bridge (Android's own Mali driver does the GPU work): the PanVK
+            # workarounds below do not apply. Its games' Xwayland has neither DRI3 nor Present,
+            # so DXVK's frames must go through gamescope's WSI layer (as Steam's UI does); the
+            # bridge driver's X11 path would copy every frame by the CPU. The memory layer
+            # would take device-local memory away from games (the bridge server gives them
+            # native GPU memory instead).
+            env.setdefault("ENABLE_GAMESCOPE_WSI", "1")
+            print("droiddeck-game-env: Venus bridge: gamescope's WSI layer kept, PanVK's memory layer off",
+                  file=sys.stderr)
+            return env
+        print("droiddeck-game-env: Mali without the bridge: PanVK workarounds (WSI layer and memory layer)",
+              file=sys.stderr)
+        # GPU atomics on PanVK's IO-coherent memory raise GPU_SHAREABILITY_FAULT and reset the
+        # GPU; VK_LAYER_DROIDDECK_malimem keeps DXVK's GPU resources out of it.
+        # DROIDDECK_MALI_MEMORY=0 turns it off.
+        env.setdefault("DROIDDECK_MALI_MEMORY", "1")
+        # Through gamescope's WSI layer DXVK games present white on Mali (Lake); presenting
+        # through Xwayland renders. DISABLE_GAMESCOPE_WSI=0 keeps the layer.
+        env.setdefault("DISABLE_GAMESCOPE_WSI", "1")
+    return env
+
+
+def with_hide_exts(env):
+    """VK_LAYER_DROIDDECK_hideext hides the device extensions named in DROIDDECK_HIDE_EXTS so
+    DXVK falls back to its non-extension path. The layer manifest is gated on
+    DROIDDECK_HIDE_EXTS_ENABLE, which the loader compares by value, so the tester sets only
+    DROIDDECK_HIDE_EXTS and the flag follows. An empty or absent value disables the layer."""
+    if env.get("DROIDDECK_HIDE_EXTS"):
+        env.setdefault("DROIDDECK_HIDE_EXTS_ENABLE", "1")
+    return env
+
+
+ENV_ARGUMENT = re.compile(r"([A-Z][A-Z0-9_]*)=(.+)")
+
+
+def lift_environment_arguments(command, env):
+    """Steam appends a game's launch options after its executable, so `NAME=value` typed there
+    reaches the game as an argument, where nothing reads it. Proton, DXVK, gamescope and the
+    Vulkan layers all read their knobs from the environment, so move those tokens into it and
+    say so. This is what a tester means by `NAME=value` in the launch options, and silently
+    dropping it turns a diagnostic launch into a no-op that still looks like a real result.
+    The arguments themselves are left in place: a game may take one of its own."""
+    lifted = []
+    for token in command[3:]:
+        match = ENV_ARGUMENT.fullmatch(token)
+        if not match or match.group(1) in env:
+            continue
+        env[match.group(1)] = match.group(2)
+        lifted.append(token)
+    if lifted:
+        print("droiddeck-game-env: launch options were set as arguments and nothing reads them there; "
+              "moved into the environment: %s" % " ".join(lifted), file=sys.stderr)
+    return env
+
+
+LOG_DIRS_KEPT = 30
+
+
+def with_log_dir(command, env):
+    """With PROTON_LOG=1, give every Proton start its own log folder. Proton deletes
+    steam-<appid>.log each time it starts, so a helper Proton starts right after a crash
+    wiped the log of the crash itself."""
+    if env.get("PROTON_LOG") != "1" or env.get("PROTON_LOG_DIR"):
+        return env
+    import time
+    base = Path(env.get("HOME") or "/root") / "droiddeck-proton-logs"
+    verb = command[1] if len(command) > 1 else "run"
+    name = "%s-%s-%d" % (time.strftime("%Y%m%d-%H%M%S"), re.sub(r"[^A-Za-z0-9]", "", verb)[:24] or "run", os.getpid())
+    folder = base / name
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "command.txt").write_text(" ".join(command) + "\n")
+        old = sorted((d for d in base.iterdir() if d.is_dir()), key=lambda d: d.name)
+        for stale in old[:-LOG_DIRS_KEPT]:
+            for f in stale.iterdir():
+                f.unlink()
+            stale.rmdir()
+    except OSError as error:
+        print("droiddeck-game-env: no per-launch log folder (%s)" % error, file=sys.stderr)
+        return env
+    env["PROTON_LOG_DIR"] = str(folder)
     return env
 
 
@@ -324,6 +399,31 @@ def with_media_debug(env):
     return env
 
 
+PRECOMPILE = "/usr/local/bin/droiddeck-shader-precompile"
+
+
+def with_precompiled_shaders(command, env, app_id, run=None):
+    """On the Venus bridge, compile the game's recorded shaders before it starts, with progress
+    on screen (droiddeck-shader-precompile). When every recorded pipeline is in the bridge
+    driver's cache, the driver is told not to replay them again in the background."""
+    if not app_id or len(command) < 3:
+        return env
+    if not (env.get("BL_VENUS_SINGLE") == "1" or env.get("BL_DRIVER_GL")):
+        return env
+    if env.get("DROIDDECK_VN_PRECOMPILE", "1") == "0":
+        return env
+    game = os.path.splitext(os.path.basename(command[2].replace("\\", "/")))[0] or "the game"
+    try:
+        if run is None:
+            run = runpy.run_path(PRECOMPILE)["run"]
+        if run(app_id, game, env) == 0:
+            env["DROIDDECK_VN_PRECOMPILE_DONE"] = "1"
+    except Exception as error:  # a launch must not fail because shaders were not compiled ahead
+        print("droiddeck-game-env: shader precompile failed (%s); the game compiles as it goes" % error,
+              file=sys.stderr)
+    return env
+
+
 def main():
     command = sys.argv[1:]
     if not command:
@@ -332,8 +432,8 @@ def main():
     mic_enabled = env.get("BL_MIC_ENABLED")
     mark_install_scripts(command, env)
     app_id = game_id(env)
+    waiting = len(command) > 1 and command[1] == "waitforexitandrun"
     if app_id:
-        waiting = len(command) > 1 and command[1] == "waitforexitandrun"
         fixes = {}
         if waiting:
             command = skip_red_launcher(command)
@@ -350,20 +450,26 @@ def main():
             with path.open(encoding="utf-8") as source:
                 config = json.load(source)
             if waiting:
-                env = apply_config(env, config, app_id, fixes)
+                env = apply_config(env, config, fixes, app_id)
             else:
-                env = apply_config(env, sync_config(config, app_id), app_id)
+                env = apply_config(env, sync_config(config))
         except FileNotFoundError:
             if waiting:
-                env = apply_config(env, {"version": 1}, app_id, fixes)
+                env = apply_config(env, {"version": 1}, fixes)
         except (OSError, ValueError, TypeError, AttributeError):
             print("droiddeck-game-env: invalid configuration; using inherited environment", file=sys.stderr)
     if mic_enabled == "0":
         env["BANNER_AUDIO_DIRECT_MIC"] = "0"
+    if waiting:
+        env = lift_environment_arguments(command, env)
     env = force_ssbs(command, env)
     env = with_ffmpeg(env)
     env = with_media_debug(env)
+    env = with_log_dir(command, env)
     env = with_mali_video(env)
+    env = with_hide_exts(env)
+    if waiting:
+        env = with_precompiled_shaders(command, env, app_id)
     sync = load_sync()
     launch, launch_env = select_sync(command, env, sync)
     if launch[0] != command[0]:

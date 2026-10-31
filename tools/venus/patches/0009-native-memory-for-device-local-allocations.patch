@@ -1,0 +1,335 @@
+diff --git a/src/venus/vkr_buffer.c b/src/venus/vkr_buffer.c
+index 9e466f8..08dc1ad 100644
+--- a/src/venus/vkr_buffer.c
++++ b/src/venus/vkr_buffer.c
+@@ -57,6 +57,7 @@ vkr_dispatch_vkGetBufferMemoryRequirements(
+ 
+    vn_replace_vkGetBufferMemoryRequirements_args_handle(args);
+    vk->GetBufferMemoryRequirements(args->device, args->buffer, args->pMemoryRequirements);
++   vkr_physical_device_add_memory_aliases(dev->physical_device, &args->pMemoryRequirements->memoryTypeBits);
+ }
+ 
+ static void
+@@ -69,6 +70,7 @@ vkr_dispatch_vkGetBufferMemoryRequirements2(
+ 
+    vn_replace_vkGetBufferMemoryRequirements2_args_handle(args);
+    vk->GetBufferMemoryRequirements2(args->device, args->pInfo, args->pMemoryRequirements);
++   vkr_physical_device_add_memory_aliases(dev->physical_device, &args->pMemoryRequirements->memoryRequirements.memoryTypeBits);
+ }
+ 
+ static void
+@@ -142,6 +144,7 @@ vkr_dispatch_vkGetDeviceBufferMemoryRequirements(
+    vn_replace_vkGetDeviceBufferMemoryRequirements_args_handle(args);
+    vk->GetDeviceBufferMemoryRequirements(args->device, args->pInfo,
+                                          args->pMemoryRequirements);
++   vkr_physical_device_add_memory_aliases(dev->physical_device, &args->pMemoryRequirements->memoryRequirements.memoryTypeBits);
+ }
+ 
+ void
+diff --git a/src/venus/vkr_device_memory.c b/src/venus/vkr_device_memory.c
+index c56a45e..6bf555b 100644
+--- a/src/venus/vkr_device_memory.c
++++ b/src/venus/vkr_device_memory.c
+@@ -10,6 +10,8 @@
+ #include "vkr_device_memory_gen.h"
+ #include "vkr_physical_device.h"
+ 
++#include <time.h>
++
+ static bool
+ vkr_get_fd_info_from_resource_info(struct vkr_context *ctx,
+                                    const VkImportMemoryResourceInfoMESA *res_info,
+@@ -269,6 +271,58 @@ vkr_gbm_get_fd_info_from_allocation_info(UNUSED struct vkr_physical_device *phys
+ 
+ #endif /* ENABLE_MINIGBM_ALLOCATION */
+ 
++/* DroidDeck: what allocations the guest makes and where they come from, every 10 s in the
++ * server log while it changes (0 native alias, 1 dma-heap, 2 other)
++ */
++static mtx_t vkr_dd_memory_stats_lock;
++
++static void
++vkr_dd_memory_stats_init(void)
++{
++   mtx_init(&vkr_dd_memory_stats_lock, mtx_plain);
++}
++
++static void
++vkr_dd_memory_stats(int kind, VkDeviceSize size)
++{
++   static const char *const names[3] = { "native device-local", "dma-heap", "other" };
++   static once_flag once = ONCE_FLAG_INIT;
++   static uint64_t count[3], bytes[3], total_count[3], total_bytes[3], last_ns;
++   call_once(&once, vkr_dd_memory_stats_init);
++   mtx_lock(&vkr_dd_memory_stats_lock);
++   count[kind]++;
++   bytes[kind] += size;
++   total_count[kind]++;
++   total_bytes[kind] += size;
++   struct timespec ts;
++   clock_gettime(CLOCK_MONOTONIC, &ts);
++   const uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
++   if (!last_ns)
++      last_ns = now;
++   static uint64_t interval_ns;
++   if (!interval_ns) {
++      /* VKR_MEMORY_STATS_MS: how often (default 10 s; tests use less) */
++      const char *env = getenv("VKR_MEMORY_STATS_MS");
++      interval_ns = (env && atoi(env) > 0 ? (uint64_t)atoi(env) : 10000ull) * 1000000ull;
++   }
++   if (now - last_ns >= interval_ns) {
++      char line[512];
++      int n = snprintf(line, sizeof(line), "allocations in %.1f s:",
++                       (double)(now - last_ns) / 1e9);
++      for (int i = 0; i < 3; i++)
++         n += snprintf(line + n, sizeof(line) - (size_t)n,
++                       " %s %llu (%.1f MiB, total %llu, %.1f MiB)", names[i],
++                       (unsigned long long)count[i], (double)bytes[i] / 1048576.0,
++                       (unsigned long long)total_count[i],
++                       (double)total_bytes[i] / 1048576.0);
++      vkr_log("%s", line);
++      memset(count, 0, sizeof(count));
++      memset(bytes, 0, sizeof(bytes));
++      last_ns = now;
++   }
++   mtx_unlock(&vkr_dd_memory_stats_lock);
++}
++
+ static void
+ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+                               struct vn_command_vkAllocateMemory *args)
+@@ -279,12 +333,33 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+    struct vkr_physical_device *physical_dev = dev->physical_device;
+ 
+    VkMemoryAllocateInfo *alloc_info = (VkMemoryAllocateInfo *)args->pAllocateInfo;
+-   const uint32_t mem_type_index = alloc_info->memoryTypeIndex;
++   uint32_t mem_type_index = alloc_info->memoryTypeIndex;
+    if (unlikely(mem_type_index >= physical_dev->memory_properties.memoryTypeCount)) {
+       args->ret = VK_ERROR_UNKNOWN;
+       return;
+    }
+ 
++   /* DroidDeck: a device-local alias type (vkr_physical_device_init_memory_aliases) is
++    * allocated natively from its host type. Memory the guest exports or imports needs the
++    * host type's path (dma-heap), so it gets that instead.
++    */
++   bool native = false;
++   uint32_t property_flags =
++      physical_dev->memory_properties.memoryTypes[mem_type_index].propertyFlags;
++   if (mem_type_index >= physical_dev->host_memory_type_count) {
++      const uint32_t host_index =
++         physical_dev->alias_host_type[mem_type_index - physical_dev->host_memory_type_count];
++      native = !vkr_find_struct(alloc_info->pNext,
++                                VK_STRUCTURE_TYPE_IMPORT_MEMORY_RESOURCE_INFO_MESA) &&
++               !vkr_find_struct(alloc_info->pNext,
++                                VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO) &&
++               !vkr_find_struct(alloc_info->pNext, VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR);
++      mem_type_index = host_index;
++      alloc_info->memoryTypeIndex = host_index;
++      if (!native)
++         property_flags = physical_dev->memory_properties.memoryTypes[host_index].propertyFlags;
++   }
++
+    /* translate VkImportMemoryResourceInfoMESA into VkImportMemoryFdInfoKHR in place */
+    VkImportMemoryFdInfoKHR local_import_info = { .fd = -1 };
+    VkImportMemoryResourceInfoMESA *res_info = NULL;
+@@ -311,8 +386,6 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+     * Skip forcing external if a valid VkImportMemoryResourceInfoMESA is provided, since
+     * the mapping will be directly set up from the existing virgl resource.
+     */
+-   const uint32_t property_flags =
+-      physical_dev->memory_properties.memoryTypes[mem_type_index].propertyFlags;
+    uint32_t valid_fd_types = 0;
+    int udmabuf_fd = -1;
+    void *gbm_bo = NULL;
+@@ -404,6 +477,8 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+    mem->gbm_bo = gbm_bo;
+    mem->allocation_size = alloc_info->allocationSize;
+    mem->memory_type_index = mem_type_index;
++
++   vkr_dd_memory_stats(native ? 0 : udmabuf_fd >= 0 ? 1 : 2, alloc_info->allocationSize);
+ }
+ 
+ static void
+diff --git a/src/venus/vkr_image.c b/src/venus/vkr_image.c
+index b1c7dd8..414f326 100644
+--- a/src/venus/vkr_image.c
++++ b/src/venus/vkr_image.c
+@@ -73,6 +73,7 @@ vkr_dispatch_vkGetImageMemoryRequirements(
+ 
+    vn_replace_vkGetImageMemoryRequirements_args_handle(args);
+    vk->GetImageMemoryRequirements(args->device, args->image, args->pMemoryRequirements);
++   vkr_physical_device_add_memory_aliases(dev->physical_device, &args->pMemoryRequirements->memoryTypeBits);
+ }
+ 
+ static void
+@@ -85,6 +86,7 @@ vkr_dispatch_vkGetImageMemoryRequirements2(
+ 
+    vn_replace_vkGetImageMemoryRequirements2_args_handle(args);
+    vk->GetImageMemoryRequirements2(args->device, args->pInfo, args->pMemoryRequirements);
++   vkr_physical_device_add_memory_aliases(dev->physical_device, &args->pMemoryRequirements->memoryRequirements.memoryTypeBits);
+ }
+ 
+ static void
+@@ -246,6 +248,7 @@ vkr_dispatch_vkGetDeviceImageMemoryRequirements(
+    vn_replace_vkGetDeviceImageMemoryRequirements_args_handle(args);
+    vk->GetDeviceImageMemoryRequirements(args->device, args->pInfo,
+                                         args->pMemoryRequirements);
++   vkr_physical_device_add_memory_aliases(dev->physical_device, &args->pMemoryRequirements->memoryRequirements.memoryTypeBits);
+ }
+ 
+ static void
+diff --git a/src/venus/vkr_physical_device.c b/src/venus/vkr_physical_device.c
+index b417ff9..dc71d9d 100644
+--- a/src/venus/vkr_physical_device.c
++++ b/src/venus/vkr_physical_device.c
+@@ -196,6 +196,92 @@ vkr_physical_device_init_id_properties(struct vkr_physical_device *physical_dev)
+    vk->GetPhysicalDeviceProperties2(handle, &props2);
+ }
+ 
++static const char *
++vkr_memory_flags_str(VkMemoryPropertyFlags flags, char *buf, size_t size)
++{
++   static const struct {
++      VkMemoryPropertyFlags bit;
++      const char *name;
++   } names[] = {
++      { VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, "device-local" },
++      { VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, "host-visible" },
++      { VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, "coherent" },
++      { VK_MEMORY_PROPERTY_HOST_CACHED_BIT, "cached" },
++      { VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT, "lazy" },
++      { VK_MEMORY_PROPERTY_PROTECTED_BIT, "protected" },
++   };
++   buf[0] = '\0';
++   for (size_t i = 0; i < ARRAY_SIZE(names); i++) {
++      if (flags & names[i].bit)
++         snprintf(buf + strlen(buf), size - strlen(buf), "%s%s", buf[0] ? "|" : "",
++                  names[i].name);
++   }
++   if (!buf[0])
++      snprintf(buf, size, "0x%x", flags);
++   return buf;
++}
++
++/* DroidDeck: when host-visible memory has to come from a dma-heap (Android), every image and
++ * buffer the guest puts in such a type becomes an imported dma_buf: an ioctl, an import and
++ * no native image layout or compression for the driver. Drivers like Mali offer no
++ * device-local type without host-visible, so everything the guest allocates takes that path.
++ * Offer a DEVICE_LOCAL-only alias of the first device-local host-visible type: the guest
++ * never maps it, so it is allocated by the driver directly. VKR_NATIVE_MEMORY=0 turns it
++ * off, =1 turns it on without a dma-heap (to test it).
++ */
++static void
++vkr_physical_device_init_memory_aliases(struct vkr_physical_device *physical_dev)
++{
++   VkPhysicalDeviceMemoryProperties *props = &physical_dev->memory_properties;
++   physical_dev->host_memory_type_count = props->memoryTypeCount;
++   physical_dev->alias_memory_type_count = 0;
++
++   char buf[96];
++   for (uint32_t i = 0; i < props->memoryTypeCount; i++)
++      vkr_log("memory type %u: heap %u (%llu MiB), %s", i, props->memoryTypes[i].heapIndex,
++              (unsigned long long)(props->memoryHeaps[props->memoryTypes[i].heapIndex].size >>
++                                   20),
++              vkr_memory_flags_str(props->memoryTypes[i].propertyFlags, buf, sizeof(buf)));
++
++   const char *env = getenv("VKR_NATIVE_MEMORY");
++   bool enable = physical_dev->udmabuf_dev_fd >= 0;
++   if (env && env[0])
++      enable = strcmp(env, "0") != 0;
++   if (!enable) {
++      vkr_log("native device-local memory types: off%s", env && env[0] ? " (VKR_NATIVE_MEMORY)" : "");
++      return;
++   }
++
++   const VkMemoryPropertyFlags want =
++      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
++   for (uint32_t i = 0; i < props->memoryTypeCount; i++) {
++      const VkMemoryPropertyFlags flags = props->memoryTypes[i].propertyFlags;
++      if ((flags & want) != want || (flags & VK_MEMORY_PROPERTY_PROTECTED_BIT))
++         continue;
++      bool has_plain = false;
++      for (uint32_t j = 0; j < props->memoryTypeCount; j++) {
++         const VkMemoryPropertyFlags f = props->memoryTypes[j].propertyFlags;
++         if (props->memoryTypes[j].heapIndex == props->memoryTypes[i].heapIndex &&
++             f == VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
++            has_plain = true;
++      }
++      if (has_plain || props->memoryTypeCount >= VK_MAX_MEMORY_TYPES)
++         break;
++
++      const uint32_t alias = props->memoryTypeCount++;
++      props->memoryTypes[alias] = (VkMemoryType){
++         .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
++         .heapIndex = props->memoryTypes[i].heapIndex,
++      };
++      physical_dev->alias_host_type[physical_dev->alias_memory_type_count++] = i;
++      vkr_log("memory type %u: device-local only, native allocations of host type %u", alias,
++              i);
++      break;
++   }
++   if (!physical_dev->alias_memory_type_count)
++      vkr_log("native device-local memory types: none needed");
++}
++
+ static void
+ vkr_physical_device_init_memory_properties(struct vkr_physical_device *physical_dev)
+ {
+@@ -277,6 +363,8 @@ vkr_physical_device_init_memory_properties(struct vkr_physical_device *physical_
+        physical_dev->EXT_external_memory_dma_buf && physical_dev->udmabuf_dev_fd < 0)
+       physical_dev->udmabuf_dev_fd = vkr_android_dma_heap_fd();
+ #endif
++
++   vkr_physical_device_init_memory_aliases(physical_dev);
+ }
+ 
+ static void
+@@ -723,6 +811,8 @@ vkr_dispatch_vkGetPhysicalDeviceMemoryProperties2(
+       vn_replace_vkGetPhysicalDeviceMemoryProperties2_args_handle(args);
+       vk->GetPhysicalDeviceMemoryProperties2(args->physicalDevice,
+                                              args->pMemoryProperties);
++      /* heaps are unchanged; the types include the aliases */
++      args->pMemoryProperties->memoryProperties = physical_dev->memory_properties;
+    }
+ }
+ 
+diff --git a/src/venus/vkr_physical_device.h b/src/venus/vkr_physical_device.h
+index b0b6691..dc7beb6 100644
+--- a/src/venus/vkr_physical_device.h
++++ b/src/venus/vkr_physical_device.h
+@@ -34,6 +34,16 @@ struct vkr_physical_device {
+    void *gbm_device;
+    int udmabuf_dev_fd;
+ 
++   /* DroidDeck: memory types after host_memory_type_count are DEVICE_LOCAL-only aliases of
++    * host-visible types (alias_host_type[i] is the host type of type host_count + i). Memory
++    * of an alias type is a plain driver allocation: no dma-heap buffer, no import, so the
++    * driver can use its native layout/compression for images. See
++    * vkr_physical_device_init_memory_aliases.
++    */
++   uint32_t host_memory_type_count;
++   uint32_t alias_memory_type_count;
++   uint32_t alias_host_type[VK_MAX_MEMORY_TYPES];
++
+    VkQueueFamilyProperties *queue_family_properties;
+    uint32_t queue_family_property_count;
+ 
+@@ -44,6 +54,17 @@ VKR_DEFINE_OBJECT_CAST(physical_device, VK_OBJECT_TYPE_PHYSICAL_DEVICE, VkPhysic
+ void
+ vkr_context_init_physical_device_dispatch(struct vkr_context *ctx);
+ 
++/* add the alias types of the host types in *bits (memory requirements replies) */
++static inline void
++vkr_physical_device_add_memory_aliases(const struct vkr_physical_device *physical_dev,
++                                       uint32_t *bits)
++{
++   for (uint32_t i = 0; i < physical_dev->alias_memory_type_count; i++) {
++      if (*bits & (1u << physical_dev->alias_host_type[i]))
++         *bits |= 1u << (physical_dev->host_memory_type_count + i);
++   }
++}
++
+ void
+ vkr_physical_device_destroy(struct vkr_context *ctx,
+                             struct vkr_physical_device *physical_dev);

@@ -1,0 +1,93 @@
+diff -ru a/src/glx/glxext.c b/src/glx/glxext.c
+--- a/src/glx/glxext.c
++++ b/src/glx/glxext.c
+@@ -80,6 +80,73 @@
+            dpy ? DisplayString(dpy) : "?", msg);
+ }
+ 
++/* DroidDeck: a crash of a GL program shows where it was (Steam's client died at exit with
++ * "free(): invalid size"): call stack on stderr, then the handler that was there before.
++ * Installed when GLX is first set up; DROIDDECK_GLX_CRASH_STACKS=0 turns it off. */
++#include <execinfo.h>
++#include <signal.h>
++static struct sigaction droiddeck_old_sa[32];
++
++static void
++droiddeck_crash(int sig, siginfo_t *info, void *uctx)
++{
++   char head[160];
++   int n = snprintf(head, sizeof(head), "==== droiddeck glx: pid %d got signal %d (%s), address %p; stack:\n",
++                    (int)getpid(), sig, sig == SIGSEGV ? "SIGSEGV" : sig == SIGABRT ? "SIGABRT" : sig == SIGBUS ? "SIGBUS" : "?",
++                    info ? info->si_addr : NULL);
++   if (write(2, head, n) < 0) {}
++   void *frames[48];
++   int count = backtrace(frames, 48);
++   backtrace_symbols_fd(frames, count, 2);
++   struct sigaction *old = &droiddeck_old_sa[sig];
++   if ((old->sa_flags & SA_SIGINFO) && old->sa_sigaction) {
++      old->sa_sigaction(sig, info, uctx);
++      return;
++   }
++   sigaction(sig, old, NULL);
++   if (old->sa_handler != SIG_IGN && old->sa_handler != SIG_DFL && old->sa_handler)
++      old->sa_handler(sig);
++   else
++      raise(sig);
++}
++
++static void
++droiddeck_install_crash_stacks(bool again)
++{
++   static bool done;
++   if (done && !again)
++      return;
++   done = true;
++   if (!debug_get_bool_option("DROIDDECK_GLX_CRASH_STACKS", true))
++      return;
++   /* again: the program put its own handlers in since (Steam's crash reporter); ours goes in
++    * front, chaining to them, for the shutdown that follows */
++   if (again) {
++      struct sigaction cur;
++      if (sigaction(SIGABRT, NULL, &cur) == 0 && (cur.sa_flags & SA_SIGINFO) && cur.sa_sigaction == droiddeck_crash)
++         return;
++      fprintf(stderr, "droiddeck glx[%d]: crash stacks set up again at shutdown\n", (int)getpid());
++   }
++   void *warm[2];
++   backtrace(warm, 2); /* loads the unwinder now, not inside the handler */
++   int sigs[] = { SIGSEGV, SIGABRT, SIGBUS };
++   for (unsigned i = 0; i < ARRAY_SIZE(sigs); i++) {
++      struct sigaction sa;
++      memset(&sa, 0, sizeof(sa));
++      sa.sa_sigaction = droiddeck_crash;
++      sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
++      sigemptyset(&sa.sa_mask);
++      sigaction(sigs[i], &sa, &droiddeck_old_sa[sigs[i]]);
++   }
++}
++
++/* and once more when the library goes away at exit */
++static void __attribute__((destructor))
++droiddeck_crash_stacks_at_exit(void)
++{
++   droiddeck_install_crash_stacks(true);
++}
++
+ void
+ glx_message(int level, const char *f, ...)
+ {
+@@ -318,6 +385,7 @@
+ static int
+ __glXCloseDisplay(Display * dpy, XExtCodes * codes)
+ {
++   droiddeck_install_crash_stacks(true);
+    struct glx_display *priv, **prev;
+ 
+    _XLockMutex(_Xglobal_lock);
+@@ -1054,6 +1122,7 @@
+    _XUnlockMutex(_Xglobal_lock);
+ 
+    droiddeck_glx_log(dpy, "setting up GLX (%s Xlib display)", thread_safe ? "thread-safe" : "NOT thread-safe, used anyway:");
++   droiddeck_install_crash_stacks(false);
+ 
+    dpyPriv = calloc(1, sizeof *dpyPriv);
+    if (!dpyPriv)

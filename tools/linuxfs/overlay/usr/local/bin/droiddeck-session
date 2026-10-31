@@ -108,10 +108,38 @@ if [ -n "${BL_VK_DRIVER:-}" ]; then
     export VK_DRIVER_FILES="$BL_VK_DRIVER"
     export VK_ICD_FILENAMES="$BL_VK_DRIVER"
     echo "== vulkan driver: imported $bl_icd_lib (via $BL_VK_DRIVER)"
+    # A PanVK test build named -importclear-<mask> imports dma-bufs without those MEM_IMPORT
+    # flags. The mali-gl GL stack (Xwayland, Steam's window) reads the same variable, so set it
+    # for the whole session: otherwise only the Vulkan side imports buffers the new way.
+    case $bl_icd_lib in
+      *-importclear-0x[0-9a-fA-F]*)
+        bl_mask=${bl_icd_lib##*-importclear-}; bl_mask=${bl_mask%%[!0-9a-fA-Fx]*}
+        export PANVK_KBASE_IMPORT_CLEAR=${PANVK_KBASE_IMPORT_CLEAR:-$bl_mask}
+        echo "== vulkan driver: PANVK_KBASE_IMPORT_CLEAR=$PANVK_KBASE_IMPORT_CLEAR for the whole session"
+        unset bl_mask ;;
+    esac
   else
     echo "== vulkan driver: IGNORING $BL_VK_DRIVER (manifest or ${bl_icd_lib:-library} unreadable); using the runtime's own"
   fi
   unset bl_icd_lib
+fi
+# Venus bridge: the selected driver forwards Vulkan to Android's driver through the vtest
+# socket. Log what it reports, so a first test shows whether the bridge answers at all.
+if [ -n "${BL_VENUS:-}" ]; then
+  bl_venus_state="NOT running"; [ "$BL_VENUS" = 1 ] && bl_venus_state=up
+  echo "== venus bridge: server $bl_venus_state, socket $( [ -S /tmp/.virgl_test ] && echo present || echo MISSING )"
+  if command -v vulkaninfo >/dev/null 2>&1; then
+    ( timeout 30 vulkaninfo --summary 2>&1 | sed 's/^/== venus vulkaninfo: /' | head -40 ) || true
+  fi
+  # With the bridge, Android's driver reads the window buffers Mesa's GL driver draws (Steam,
+  # Xwayland). Mesa imports every buffer with BASE_MEM_IMPORT_SHARED (outer shareable); if
+  # Android's driver maps the same pages with another shareability, the GPU's L2 sees one
+  # cache line both ways and stops with exception 0x88 (GPU_SHAREABILITY_FAULT), which resets
+  # the GPU and takes SurfaceFlinger down. Import without it. ~/.droiddeck-import-shared keeps it.
+  if [ "$BL_VENUS" = 1 ] && [ ! -e "$HOME/.droiddeck-import-shared" ]; then
+    export PANVK_KBASE_IMPORT_CLEAR=${PANVK_KBASE_IMPORT_CLEAR:-0x40000}
+  fi
+  echo "== venus bridge: Mesa dma-buf imports clear ${PANVK_KBASE_IMPORT_CLEAR:-nothing}"
 fi
 export GAMESCOPE_FORCE_VULKAN_REALTIME=${BL_GAMESCOPE_REALTIME:-0}
 
@@ -139,6 +167,60 @@ mali_gl_setup() {
   fi
   [ -x "$dir/bin/Xwayland" ] && [ -x "$dir/bin/gamescope" ] && [ -d "$dir/lib" ] || {
     echo "== mali-gl: not installed ($dir), stock stack"; return 1; }
+  # Venus bridge, one GPU driver: Android's Mali driver does all GPU work. GL (Steam's client,
+  # its UI through ANGLE) runs on Zink, whose Vulkan goes over the bridge like gamescope's, and
+  # Xwayland keeps windows in shared memory (-shm, no glamor) instead of drawing them with
+  # Mesa's Panfrost. Two drivers on the same buffers stopped the GPU with exception 0x88
+  # (shareability fault). Only the patched gamescope (and its Xwayland, without glamor) is used
+  # from mali-gl. ~/.droiddeck-venus-mixed (or BL_VENUS_GL=panfrost) goes back to Panfrost GL.
+  if [ "${BL_VENUS:-0}" = 1 ] && [ "${BL_VENUS_GL:-zink}" = zink ] && [ ! -e "$HOME/.droiddeck-venus-mixed" ]; then
+    local wrap=$HOME/.cache/droiddeck/Xwayland-shm
+    mkdir -p "${wrap%/*}"
+    # Without glamor Xwayland's GLX needs a software GL provider (swrast_dri.so) to list GL
+    # visuals; mali-gl ships only Panfrost, so its Xwayland offered none and Steam's client
+    # died on "glXChooseVisual failed". The system Xwayland finds the rootfs Mesa's provider;
+    # mali-gl's Xwayland is only the fallback, pointed at the rootfs drivers.
+    # -verbose 3 logs the GLX provider it settles on.
+    {
+      echo '#!/bin/sh'
+      echo 'if [ -x /usr/bin/Xwayland ]; then exec /usr/bin/Xwayland "$@" -shm -verbose 3; fi'
+      printf 'LIBGL_DRIVERS_PATH=/usr/lib/dri LD_LIBRARY_PATH=%s/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} exec %s/bin/Xwayland "$@" -shm -verbose 3\n' "$dir" "$dir"
+    } > "$wrap"
+    echo "== venus bridge: Xwayland $( [ -x /usr/bin/Xwayland ] && echo "/usr/bin/Xwayland (rootfs)" || echo "$dir/bin/Xwayland (mali-gl, rootfs GL drivers)"), -shm"
+    chmod 755 "$wrap"
+    export WLR_XWAYLAND=$wrap
+    export MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink
+    BL_GAMESCOPE_BIN=$dir/bin/gamescope
+    BL_MALI_GL_ACTIVE=1
+    export BL_VENUS_SINGLE=1
+    # Mali may give a client's swapchain a compressed layout whose row pitch reads as 0, which
+    # wlroots refuses ("invalid stride 0 for plane 0") by dropping the client (Steam).
+    export GAMESCOPE_DMABUF_LINEAR_ONLY=${GAMESCOPE_DMABUF_LINEAR_ONLY:-1}
+    # Steam disables Kopper for its webhelper; without it Zink needs DRI3 (see the preload).
+    export BL_WEBHELPER_KOPPER=${BL_WEBHELPER_KOPPER:-1}
+    # The gamescope WSI layer falls back to a plain X11 swapchain for a window it cannot hand
+    # to gamescope directly (another window over it: Steam's menus over Big Picture). Without
+    # DRI3 that swapchain never comes up and the webhelper sat in vkCreateSwapchainKHR until
+    # Steam killed it. Always hand windows to gamescope.
+    export GAMESCOPE_WSI_FORCE_BYPASS=${GAMESCOPE_WSI_FORCE_BYPASS:-1}
+    # Thread-safe Xlib in the webhelper (see the preload): "Fatal IO error 11 on X server".
+    export BL_WEBHELPER_XTHREADS=${BL_WEBHELPER_XTHREADS:-1}
+    # Name the real cause behind "Fatal IO error 11 on X server" (see the preload's xcbtrace.c).
+    export BL_XCB_TRACE=${BL_XCB_TRACE:-1}
+    # The updated client exits on "glXChooseVisual failed" while a separate GL program (glprobe)
+    # and its own update UI find visuals: report the GL state from inside the exiting client.
+    export BL_STEAM_GLX_REPORT=${BL_STEAM_GLX_REPORT:-1}
+    # How each steamwebhelper process ends (signal or exit, with call stacks; procwatch.c).
+    export BL_WEBHELPER_WATCH=${BL_WEBHELPER_WATCH:-1}
+    # GL from the selected driver's own Mesa (its gl/ part, set up by the app from gl/env).
+    if [ -n "${BL_DRIVER_GL:-}" ] && [ -f "$BL_DRIVER_GL/gl.json" ]; then
+      echo "== driver GL part: $BL_DRIVER_GL (glvnd vendor ${__GLX_VENDOR_LIBRARY_NAME:-?}, Mesa $(sed -n 's/.*"mesa": *"\([^"]*\)".*/\1/p' "$BL_DRIVER_GL/gl.json"))"
+    else
+      echo "== driver GL part: none, GL from the system's Mesa"
+    fi
+    echo "== mali-gl: venus single driver ($(cat "$dir/VERSION" 2>/dev/null)): gamescope $BL_GAMESCOPE_BIN, Xwayland -shm, GL on Zink over the bridge"
+    return 0
+  fi
   export WLR_XWAYLAND=$dir/bin/Xwayland
   export LD_LIBRARY_PATH=$dir/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
   export GBM_BACKENDS_PATH=$dir/lib/gbm LIBGL_DRIVERS_PATH=$dir/lib/dri
@@ -256,6 +338,15 @@ if [ -z "${BL_INSIDE:-}" ]; then
   fi
   if [ "$mode" = steam ]; then
     export gamescope_cursor_composite=2
+  fi
+  if [ "${BL_VENUS:-0}" = 1 ]; then
+    # Through the Venus bridge, Android's Mali driver imports the X windows' buffers and only
+    # accepts linear rows that are a multiple of 64 bytes (android-vulkan.txt's pitch probe);
+    # mali-gl lays a 1602-wide XR24 window out at 6408 bytes. Keep both the X screen (the
+    # output size, which Steam's window takes) and the nested size a multiple of 16 pixels.
+    [ $(( width % 16 )) -ne 0 ] && width=$(( width / 16 * 16 ))
+    [ $(( nested % 16 )) -ne 0 ] && nested=$(( nested / 16 * 16 ))
+    echo "== gamescope: venus bridge, ${width}x${height} output, ${nested} nested (multiples of 16 px)"
   fi
   mali_gl_setup || true
   args=(--backend wayland --expose-wayland -f -W "$width" -H "$height" -w "$nested" -h "$height")
@@ -851,7 +942,17 @@ BUSCONF
         # gl+nowsi, vulkan+nowsi, gl and vulkan all died identically; keep one variant while the
         # scale factor is tested (the death follows "ThreadSetForceDeviceScaleFactors 1 * 1.49").
         _bl_mali_variants=(gl)
-        _bl_mali_idx=$(cat "$HOME/.droiddeck-mali-cef-auto" 2>/dev/null || echo 0)
+        # One driver over the Venus bridge. GPU drawing first: ANGLE on GL over Zink (died with
+        # "Fatal IO error 11 on X server", now traced by BL_XCB_TRACE), then ANGLE on Vulkan
+        # (a null VkQueue tripped the gamescope WSI layer; the guest driver now logs the queue
+        # lookup and returns the queue when only its flags differ), then the CPU. Its own
+        # position file, so earlier positions do not carry over.
+        _bl_auto_file=$HOME/.droiddeck-mali-cef-auto
+        if [ "${BL_VENUS_SINGLE:-0}" = 1 ]; then
+          _bl_mali_variants=(gl vulkan cpu)
+          _bl_auto_file=$HOME/.droiddeck-venus-cef-gpu3
+        fi
+        _bl_mali_idx=$(cat "$_bl_auto_file" 2>/dev/null || echo 0)
         case "$_bl_mali_idx" in ''|*[!0-9]*) _bl_mali_idx=0 ;; esac
         _bl_mali_idx=$((_bl_mali_idx % ${#_bl_mali_variants[@]}))
         _bl_mali_cef=${_bl_mali_variants[$_bl_mali_idx]}
@@ -871,12 +972,31 @@ BUSCONF
         _bl_mali_scale_args=(-forcedesktopscaling "${BL_MALI_SCALE:-1}")
         echo "== steam: Mali GPU, UI scale pinned to ${BL_MALI_SCALE:-1}x (webhelper: $BL_WEBHELPER_ARGS)"
       fi
+      # Steam drops the webhelper's own output; keep it (Mesa/Zink errors, Chromium's crash
+      # report) in Steam's log folder, which the logs zip carries.
+      if [ "${BL_VENUS_SINGLE:-0}" = 1 ]; then
+        export BL_WEBHELPER_STDERR=$steam_root/logs/webhelper_stderr.txt
+        # Kept across starts (each webhelper writes a dated header), so the logs zip of a later
+        # session still holds what an earlier start's webhelper said; trimmed to its last 3 MB.
+        mkdir -p "$steam_root/logs"
+        if [ "$(stat -c %s "$BL_WEBHELPER_STDERR" 2>/dev/null || echo 0)" -gt 4194304 ]; then
+          tail -c 3145728 "$BL_WEBHELPER_STDERR" > "$BL_WEBHELPER_STDERR.new" && mv "$BL_WEBHELPER_STDERR.new" "$BL_WEBHELPER_STDERR"
+        fi
+        echo "==== session start $(date '+%F %T'), Steam UI variant $_bl_mali_cef" >> "$BL_WEBHELPER_STDERR"
+      fi
       case "${_bl_mali_cef%%+*}" in
         cpu)
           _bl_cef=(-cef-disable-gpu)
+          # Without the GPU, Chromium falls back to ANGLE on SwiftShader (Vulkan), whose queue
+          # request trips the gamescope WSI layer (null VkQueue, vkroots.h:129) and kills the
+          # webhelper. No software rasterizer: CEF composites on the CPU without it.
+          [ "${BL_VENUS_SINGLE:-0}" = 1 ] && export BL_WEBHELPER_ARGS="${BL_WEBHELPER_ARGS:---no-zygote --in-process-gpu -AudioServiceOutOfProcess} --disable-software-rasterizer"
           echo "== steam: Mali GPU, CEF draws in software (-cef-disable-gpu)" ;;
         vulkan)
           _bl_cef=(-cef-force-gpu -cef-use-gl=angle -cef-use-angle=vulkan)
+          # Steam does not hand -cef-use-angle to the webhelper's GPU thread (its log showed
+          # ANGLE's GL renderer); pass Chromium's own switches through the webhelper preload.
+          [ "${BL_VENUS_SINGLE:-0}" = 1 ] && export BL_WEBHELPER_ARGS="${BL_WEBHELPER_ARGS:---no-zygote --in-process-gpu -AudioServiceOutOfProcess} --use-gl=angle --use-angle=vulkan"
           echo "== steam: Mali GPU, CEF draws through ANGLE on Vulkan (PanVK directly)" ;;
         *)
           _bl_cef=(-cef-force-gpu -cef-use-gl=angle -cef-use-angle=gl)
@@ -1217,7 +1337,10 @@ BUSCONF
         echo "== steam: client branch on disk was '$(cat "$steam_beta" 2>/dev/null)', set to '$steam_channel' to match -clientbeta"
         echo "$steam_channel" > "$steam_beta"
       fi
-      if [ -z "${_bl_counted:-}" ] && [ -z "${BL_DESKTOP:-}" ]; then
+      # A Steam UI variant that fails (GPU drawing over the Venus bridge, while it is being
+      # brought up) is a graphics problem, not a broken client: do not count it toward
+      # re-downloading the client, which costs minutes and also updates Steam.
+      if [ -z "${_bl_counted:-}" ] && [ -z "${BL_DESKTOP:-}" ] && [ "${BL_VENUS_SINGLE:-0}" != 1 ]; then
         echo start >> "$steam_root/package/droiddeck-unconfirmed"
         _bl_counted=1
       fi
@@ -1229,6 +1352,16 @@ BUSCONF
         fi
       fi
       step "starting the Steam client${BL_STEAM_UI:+ ($BL_STEAM_UI UI)}"
+      # Venus bridge: what GL an X11 client gets here (GLX fbconfigs and contexts, EGL), the
+      # way Steam's client asks for it. The updated client exits on "glXChooseVisual failed".
+      if [ "${BL_VENUS_SINGLE:-0}" = 1 ] && [ -z "${_bl_glprobed:-}" ] && [ -x /opt/mali-gl/bin/glprobe ]; then
+        _bl_glprobed=1
+        LIBGL_DEBUG=verbose MESA_DEBUG=1 timeout 40 /opt/mali-gl/bin/glprobe 2>&1 \
+          | grep -v "FORMAT_NOT_SUPPORTED" | head -80 | sed 's/^/== glprobe: /' || true
+        # X extensions against SteamOS' Xwayland, the bridge's Vulkan device against all DXVK
+        # requires, and its queues: every known gap in one log.
+        timeout 90 droiddeck-venus-probe x11 vulkan 2>&1 | head -120 | sed 's/^/== probe: /' || true
+      fi
       desktop_ui_pid=
       if [ "${BL_STEAM_UI:-}" = desktop ]; then
         /usr/local/bin/droiddeck-steam-desktop-ui &
@@ -1242,7 +1375,7 @@ BUSCONF
       if [ "${BL_BOOT_WATCH:-1}" != 0 ]; then
         (
           _bw_logs="$steam_root/logs"
-          declare -A _bw_off=() _bw_seen=() _bw_name=() _bw_gl=()
+          declare -A _bw_off=() _bw_seen=() _bw_name=() _bw_gl=() _bw_snap=()
           for _bw_f in cef_log.txt webhelper.txt webhelper_js.txt console_log.txt steamui_html.txt; do
             _bw_off[$_bw_f]=$(stat -c %s "$_bw_logs/$_bw_f" 2>/dev/null || echo 0)
           done
@@ -1270,7 +1403,13 @@ BUSCONF
             _bw_mem=$(awk '/^MemAvailable/ {printf "%d", $2/1024}' /proc/meminfo)
             echo "== boot +${_bw_t}s: free ${_bw_mem}M |${_bw_desc:- no Steam processes}"
             for _bw_p in $_bw_prev; do
-              case " $_bw_now " in *" $_bw_p "*) ;; *) echo "== boot +${_bw_t}s: process $_bw_p (${_bw_name[$_bw_p]:-?}) exited" ;; esac
+              case " $_bw_now " in *" $_bw_p "*) ;; *)
+                echo "== boot +${_bw_t}s: process $_bw_p (${_bw_name[$_bw_p]:-?}) exited"
+                # What its threads were waiting on at the last look before it went (a webhelper
+                # that hangs gets killed by Steam ~10 s later, without an error of its own).
+                [ -n "${_bw_snap[$_bw_p]:-}" ] && printf '%s\n' "${_bw_snap[$_bw_p]}" | sed "s/^/== boot +${_bw_t}s:   last threads of $_bw_p: /"
+                unset "_bw_snap[$_bw_p]" ;;
+              esac
             done
             _bw_prev=$_bw_now
             # Which GL/EGL/Mesa libraries each Steam process really mapped (mali-gl: is
@@ -1307,7 +1446,15 @@ BUSCONF
       fi
       steam_started=$SECONDS
       _bl_html_from=$(stat -c %s "$steam_root/logs/steamui_html.txt" 2>/dev/null || echo 0)
-      "${steam_client[@]}" "${_bl_ui[@]}" "${_bl_cdp[@]}" "${_bl_lang[@]}" -clientbeta "$steam_channel" \
+      # Venus bridge: Steam's own glXChooseVisual call, seen and rescued by the GL audit library
+      # (tools/linuxfs/audit/glxaudit.c; only the client's main process audits, every other
+      # program it starts unloads it again). Added to any LD_AUDIT already set.
+      _bl_audit=()
+      if [ "${BL_VENUS_SINGLE:-0}" = 1 ] && [ "${BL_STEAM_GLX_AUDIT:-1}" = 1 ] && [ -f /usr/local/lib/libblglxaudit.so ]; then
+        # LIBGL_DEBUG: Mesa's loader messages from the first GLX call on, not only from a retry.
+        _bl_audit=(env "LD_AUDIT=${LD_AUDIT:+$LD_AUDIT:}/usr/local/lib/libblglxaudit.so" LIBGL_DEBUG=verbose)
+      fi
+      "${_bl_audit[@]}" "${steam_client[@]}" "${_bl_ui[@]}" "${_bl_cdp[@]}" "${_bl_lang[@]}" -clientbeta "$steam_channel" \
         -no-cef-sandbox -cef-ozone-platform=x11 "${_bl_cef[@]}" "${_bl_mali_scale_args[@]}" "$@"
       rc=$?
       steam_ran=$((SECONDS - steam_started))
@@ -1325,7 +1472,7 @@ BUSCONF
         [ "$(stat -c %s "$_bl_html" 2>/dev/null || echo 0)" -lt "${_bl_html_from:-0}" ] && _bl_html_from=0
         if tail -c +$((${_bl_html_from:-0} + 1)) "$_bl_html" 2>/dev/null | grep -aq "Restart webhelper process"; then
           _bl_next=$(((_bl_mali_idx + 1) % ${#_bl_mali_variants[@]}))
-          echo "$_bl_next" > "$HOME/.droiddeck-mali-cef-auto"
+          echo "$_bl_next" > "${_bl_auto_file:-$HOME/.droiddeck-mali-cef-auto}"
           echo "== steam: Mali UI variant $_bl_mali_cef failed (Steam restarted its webhelper); next start tries ${_bl_mali_variants[$_bl_next]}"
         else
           echo "== steam: Mali UI variant $_bl_mali_cef: no webhelper restart this run; keeping it"

@@ -1,0 +1,75 @@
+diff --git a/src/gallium/drivers/zink/zink_kopper.c b/src/gallium/drivers/zink/zink_kopper.c
+index ea88f06..5e9f511 100644
+--- a/src/gallium/drivers/zink/zink_kopper.c
++++ b/src/gallium/drivers/zink/zink_kopper.c
+@@ -250,6 +250,24 @@ zink_kopper_deinit_displaytarget(struct zink_screen *screen, struct kopper_displ
+    cdt->surface = VK_NULL_HANDLE;
+ }
+ 
++
++/* DroidDeck: why a window's swapchain is made again. Each new swapchain starts with blank
++ * images, which shows as flicker; Steam's UI flickered and its window got a new swapchain
++ * every few seconds. First 40 times, then every 200th. */
++#include <stdio.h>
++#include "util/u_debug.h"
++static void
++droiddeck_kopper_note(const char *why, unsigned w, unsigned h, int mode)
++{
++   static unsigned count;
++   unsigned n = ++count;
++   if (n <= 40 || n % 200 == 0)
++      fprintf(stderr, "droiddeck kopper: new swapchain #%u: %s (%ux%u, present mode %d)\n", n, why, w, h, mode);
++}
++
++static VkResult
++update_swapchain(struct zink_screen *screen, struct kopper_displaytarget *cdt, unsigned w, unsigned h);
++
+ static struct kopper_swapchain *
+ kopper_CreateSwapchain(struct zink_screen *screen, struct kopper_displaytarget *cdt, unsigned w, unsigned h, VkResult *result)
+ {
+@@ -597,6 +615,8 @@ kopper_acquire(struct zink_screen *screen, struct zink_resource *res, uint64_t t
+       ret = VKSCR(AcquireNextImageKHR)(screen->dev, cdt->swapchain->swapchain, timeout, acquire, VK_NULL_HANDLE, &res->obj->dt_idx);
+       if (ret != VK_SUCCESS && ret != VK_SUBOPTIMAL_KHR) {
+          if (ret == VK_ERROR_OUT_OF_DATE_KHR) {
++            droiddeck_kopper_note("vkAcquireNextImageKHR said VK_ERROR_OUT_OF_DATE_KHR", res->base.b.width0,
++                                  res->base.b.height0, cdt->present_mode);
+             res->obj->new_dt = true;
+             continue;
+          }
+@@ -778,8 +798,11 @@ kopper_present(void *data, void *gdata, int thread_idx)
+    swapchain->last_present = cpi->image;
+    if (cpi->indefinite_acquire)
+       p_atomic_dec(&swapchain->num_acquires);
+-   if (error2 == VK_SUBOPTIMAL_KHR && cdt->swapchain == swapchain)
++   if (error2 == VK_SUBOPTIMAL_KHR && cdt->swapchain == swapchain) {
++      droiddeck_kopper_note("vkQueuePresentKHR said VK_SUBOPTIMAL_KHR", cpi->res->base.b.width0,
++                            cpi->res->base.b.height0, cdt->present_mode);
+       cpi->res->obj->new_dt = true;
++   }
+ 
+    /* it's illegal to destroy semaphores if they're in use by a cmdbuf.
+     * but what does "in use" actually mean?
+@@ -1188,10 +1211,23 @@ zink_kopper_set_swap_interval(struct pipe_screen *pscreen, struct pipe_resource
+    struct kopper_displaytarget *cdt = res->obj->dt;
+    VkPresentModeKHR old_present_mode = cdt->present_mode;
+ 
++   /* DroidDeck: under gamescope, which composites and paces every frame itself, a swap
++    * interval only switches the present mode, and each switch made a new swapchain (blank
++    * first images): Steam's compositor switched vsync on and off over and over and its UI
++    * flickered. DROIDDECK_KOPPER_KEEP_PRESENT_MODE=1 keeps the window's first present mode. */
++   if (debug_get_bool_option("DROIDDECK_KOPPER_KEEP_PRESENT_MODE", false)) {
++      static unsigned kept;
++      if (++kept <= 5)
++         fprintf(stderr, "droiddeck kopper: swap interval %d asked, present mode %d kept\n", interval, old_present_mode);
++      return;
++   }
++
+    zink_kopper_set_present_mode_for_interval(cdt, interval);
+ 
+    if (old_present_mode == cdt->present_mode)
+       return;
++   droiddeck_kopper_note(interval ? "swap interval changed (vsync on)" : "swap interval changed (vsync off)",
++                         cdt->caps.currentExtent.width, cdt->caps.currentExtent.height, cdt->present_mode);
+    VkResult ret = update_swapchain(screen, cdt, cdt->caps.currentExtent.width, cdt->caps.currentExtent.height);
+    if (ret == VK_SUCCESS)
+       return;

@@ -1,0 +1,15 @@
+{
+  "file_format_version": "1.0.0",
+  "layer": {
+    "name": "VK_LAYER_DROIDDECK_gputype",
+    "type": "GLOBAL",
+    "library_path": "/tmp/glx/libgputype.so",
+    "api_version": "1.4.0",
+    "implementation_version": "1",
+    "description": "Test only: CPU device reported as an integrated GPU",
+    "functions": {
+      "vkGetInstanceProcAddr": "gputype_GetInstanceProcAddr",
+      "vkGetDeviceProcAddr": "gputype_GetDeviceProcAddr"
+    }
+  }
+}

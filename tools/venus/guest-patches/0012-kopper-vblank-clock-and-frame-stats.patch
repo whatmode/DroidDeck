@@ -1,0 +1,335 @@
+diff -ru a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper.c
+--- a/src/gallium/frontends/dri/kopper.c
++++ b/src/gallium/frontends/dri/kopper.c
+@@ -888,7 +888,8 @@
+    int x, y;
+    unsigned w, h;
+    uint64_t order;
+-   struct pipe_resource *tex;
++   struct pipe_resource *tex;  /* its frame copy */
++   struct pipe_resource *back; /* its back buffer, when it has no copy yet */
+    int64_t swap;
+ };
+ struct droiddeck_group {
+@@ -911,6 +912,7 @@
+       for (unsigned i = 0; i < DROIDDECK_MEMBERS; i++)
+          if (droiddeck_groups[g].m[i].win == win) {
+             pipe_resource_reference(&droiddeck_groups[g].m[i].tex, NULL);
++            pipe_resource_reference(&droiddeck_groups[g].m[i].back, NULL);
+             memset(&droiddeck_groups[g].m[i], 0, sizeof(droiddeck_groups[g].m[i]));
+          }
+    simple_mtx_unlock(&droiddeck_group_lock);
+@@ -926,6 +928,20 @@
+ /* droiddeck: keep this window's latest frame in a texture of its own while its toplevel has
+  * other GL windows: when one of them shows (Steam's menu opens over a still main view) the
+  * shared swapchain needs every window's picture, and a presented swapchain image is gone. */
++static bool
++droiddeck_group_has_others(uint32_t win, uint32_t top)
++{
++   bool others = false;
++   simple_mtx_lock(&droiddeck_group_lock);
++   for (unsigned g = 0; g < ARRAY_SIZE(droiddeck_groups); g++)
++      if (droiddeck_groups[g].top == top)
++         for (unsigned i = 0; i < DROIDDECK_MEMBERS; i++)
++            if (droiddeck_groups[g].m[i].win && droiddeck_groups[g].m[i].win != win)
++               others = true;
++   simple_mtx_unlock(&droiddeck_group_lock);
++   return others;
++}
++
+ static void
+ droiddeck_copy_frame(struct dri_drawable *drawable, struct pipe_context *pipe, struct pipe_resource *ptex)
+ {
+@@ -974,7 +990,7 @@
+       const char *e = getenv("DROIDDECK_KOPPER_COMPOSITE");
+       enabled = !(e && e[0] == '0');
+    }
+-   if (!enabled || !drawable->is_window || !drawable->droiddeck_top || !drawable->droiddeck_copy ||
++   if (!enabled || !drawable->is_window || !drawable->droiddeck_top ||
+        drawable->info.bos.sType != VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR)
+       return false;
+    VkXcbSurfaceCreateInfoKHR *xcb = (VkXcbSurfaceCreateInfoKHR *)&drawable->info.bos;
+@@ -1026,14 +1042,17 @@
+    self->h = drawable->droiddeck_h;
+    self->order = drawable->droiddeck_order;
+    self->swap = now;
+-   pipe_resource_reference(&self->tex, drawable->droiddeck_copy);
++   if (drawable->droiddeck_copy)
++      pipe_resource_reference(&self->tex, drawable->droiddeck_copy);
++   pipe_resource_reference(&self->back, ptex);
+ 
+    unsigned n = 0;
+    bool top_drawn = false;
+    struct droiddeck_member *primary = NULL;
+    for (unsigned i = 0; i < DROIDDECK_MEMBERS; i++) {
+       struct droiddeck_member *m = &grp->m[i];
+-      if (!m->win || !m->tex || m->tex->screen != pscreen)
++      struct pipe_resource *pic = m->tex ? m->tex : m->back;
++      if (!m->win || !pic || pic->screen != pscreen)
+          continue;
+       /* the toplevel drawn by GL itself has its own swapchain: X allows one per window */
+       top_drawn |= m->win == top;
+@@ -1066,15 +1085,28 @@
+       simple_mtx_unlock(&droiddeck_group_lock);
+       return true;
+    }
++   /* a member without a frame copy yet (it has not drawn since another window came up): no
++    * composing until it draws (its back buffer is a swapchain image it no longer holds; reading
++    * it crashed in zink) */
++   for (unsigned i = 0; i < DROIDDECK_MEMBERS; i++) {
++      if (grp->m[i].win && !grp->m[i].tex && grp->m[i].win != win) {
++         simple_mtx_unlock(&droiddeck_group_lock);
++         return false;
++      }
++   }
+    struct droiddeck_member list[DROIDDECK_MEMBERS];
+    unsigned count = 0;
+    for (unsigned i = 0; i < DROIDDECK_MEMBERS; i++) {
+       struct droiddeck_member *m = &grp->m[i];
+-      if (!m->win || !m->tex || m->tex->screen != pscreen)
++      struct pipe_resource *pic = m->tex ? m->tex : m->back;
++      if (!m->win || !pic || pic->screen != pscreen)
+          continue;
+       list[count] = *m;
+       list[count].tex = NULL;
++      list[count].back = NULL;
+       pipe_resource_reference(&list[count].tex, m->tex);
++      if (!m->tex)
++         pipe_resource_reference(&list[count].back, m->back);
+       count++;
+    }
+    if (!grp->info.bos.sType) {
+@@ -1147,7 +1179,7 @@
+          qsort(list, count, sizeof(list[0]), droiddeck_member_cmp);
+          for (unsigned i = 0; i < count; i++) {
+             struct droiddeck_member *m = &list[i];
+-            if (!m->w || !m->h)
++            if (!m->w || !m->h || !m->tex)
+                continue;
+             int x0 = MAX2(m->x, 0), y0 = MAX2(m->y, 0);
+             int x1 = MIN3(m->x + (int)m->w, (int)cw, m->x + (int)m->tex->width0);
+@@ -1179,14 +1211,77 @@
+          done = true;
+       }
+    }
+-   for (unsigned i = 0; i < count; i++)
++   for (unsigned i = 0; i < count; i++) {
+       pipe_resource_reference(&list[i].tex, NULL);
++      pipe_resource_reference(&list[i].back, NULL);
++   }
+    return done;
+ }
+ 
++/* droiddeck: frame rate of this process's GL windows, every 10 s in the log (to tune Steam's
++ * UI at the panel's 120 Hz): swaps per second, the longest gap between two, and how long a
++ * swap itself took at most. */
++static __thread int64_t droiddeck_flush_ns;
++static __thread int droiddeck_kind; /* 0 presented, 1 composed, 2 hidden */
++
++static void
++droiddeck_frame_stats(int64_t start, int64_t end)
++{
++   static simple_mtx_t lock = SIMPLE_MTX_INITIALIZER;
++   static int64_t since, last;
++   static unsigned swaps, kinds[3], slow;
++   static int64_t gap, cost, flush_max, flush_sum, rest_max, rest_sum;
++   simple_mtx_lock(&lock);
++   if (!since)
++      since = start;
++   int k = droiddeck_kind;
++   if (k == 0 || k == 1) {
++      if (last && start - last > gap)
++         gap = start - last;
++      last = end;
++   }
++   if (end - start > cost)
++      cost = end - start;
++   int64_t fl = droiddeck_flush_ns, rest = end - start - droiddeck_flush_ns;
++   flush_sum += fl;
++   rest_sum += rest;
++   if (fl > flush_max) flush_max = fl;
++   if (rest > rest_max) rest_max = rest;
++   if (end - start > 8000000) slow++;
++   if (k >= 0 && k < 3) kinds[k]++;
++   swaps++;
++   if (end - since >= 10000000000ll) {
++      static unsigned reports;
++      double secs = (end - since) / 1e9;
++      if (++reports <= 60)
++         fprintf(stderr, "droiddeck kopper: frames over %.0f s: shown %.1f/s, composed %.1f/s, hidden %.1f/s; "
++                 "longest gap between shown %.1f ms; swap: flush avg %.2f max %.1f ms, present avg %.2f max %.1f ms, "
++                 "%u swaps over 8 ms\n", secs, kinds[0] / secs, kinds[1] / secs, kinds[2] / secs, gap / 1e6,
++                 flush_sum / 1e6 / swaps, flush_max / 1e6, rest_sum / 1e6 / swaps, rest_max / 1e6, slow);
++      since = end;
++      swaps = slow = 0;
++      memset(kinds, 0, sizeof(kinds));
++      gap = cost = flush_max = flush_sum = rest_max = rest_sum = 0;
++   }
++   simple_mtx_unlock(&lock);
++}
++
++static int64_t
++droiddeck_swap(struct dri_drawable *drawable, uint32_t flush_flags, int nrects, const int *rects);
++
+ int64_t
+ kopperSwapBuffersWithDamage(struct dri_drawable *drawable, uint32_t flush_flags, int nrects, const int *rects)
+ {
++   int64_t t0 = os_time_get_nano();
++   int64_t ret = droiddeck_swap(drawable, flush_flags, nrects, rects);
++   if (drawable->is_window)
++      droiddeck_frame_stats(t0, os_time_get_nano());
++   return ret;
++}
++
++static int64_t
++droiddeck_swap(struct dri_drawable *drawable, uint32_t flush_flags, int nrects, const int *rects)
++{
+    struct dri_context *ctx = dri_get_current();
+    struct pipe_resource *ptex;
+ 
+@@ -1207,10 +1302,12 @@
+    _mesa_glthread_finish(ctx->st->ctx);
+ 
+    /* droiddeck: the frame's copy, before the flush that ends it (that flush puts the image in
+-    * the present layout and signals its present): the GL commands go to the pipe first */
++    * the present layout and signals its present): the GL commands go to the pipe first.
++    * (Made inside that flush instead, Steam's UI got slower: back to this.) */
++   int64_t dd_t0 = os_time_get_nano();
+    if (drawable->is_window && drawable->info.bos.sType == VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR &&
+        !drawable->droiddeck_hidden && drawable->droiddeck_top &&
+-       droiddeck_others_in_top(((VkXcbSurfaceCreateInfoKHR *)&drawable->info.bos)->window, drawable->droiddeck_top)) {
++       droiddeck_group_has_others(((VkXcbSurfaceCreateInfoKHR *)&drawable->info.bos)->window, drawable->droiddeck_top)) {
+       st_context_flush(ctx->st, 0, NULL, NULL, NULL);
+       droiddeck_copy_frame(drawable, ctx->st->pipe, ptex);
+    }
+@@ -1220,6 +1317,8 @@
+    dri_flush(ctx, drawable,
+              __DRI2_FLUSH_DRAWABLE | __DRI2_FLUSH_CONTEXT | flush_flags,
+              __DRI2_THROTTLE_SWAPBUFFER);
++   droiddeck_flush_ns = os_time_get_nano() - dd_t0;
++   droiddeck_kind = 0;
+ 
+    struct pipe_box stack_boxes[64];
+    if (nrects > ARRAY_SIZE(stack_boxes))
+@@ -1237,6 +1336,7 @@
+       droiddeck_group_leave(((VkXcbSurfaceCreateInfoKHR *)&drawable->info.bos)->window);
+    if (!dd_hidden && droiddeck_composite(drawable, ctx->st->pipe, ptex)) {
+       /* its frame went into the toplevel's shared swapchain */
++      droiddeck_kind = 1;
+       zink_kopper_discard(drawable->screen->base.screen, ctx->st->pipe, ptex);
+       drawable->droiddeck_discarding = true;
+       drawable->lastStamp++;
+@@ -1244,6 +1344,7 @@
+       return 0;
+    }
+    if (dd_hidden) {
++      droiddeck_kind = 2;
+       zink_kopper_discard(drawable->screen->base.screen, ctx->st->pipe, ptex);
+       drawable->droiddeck_discarding = true;
+       drawable->lastStamp++;
+@@ -1336,6 +1437,95 @@
+    *height = drawable->h;
+ }
+ 
++/* droiddeck: vblank counts and times for GLX_OML_sync_control / GLX_SGI_video_sync from a
++ * clock at the X screen's refresh. Under gamescope a GL window presents straight to it, so
++ * Xwayland never shows it and its Present vblank events come from an idle timer (about once
++ * a second): glXGetSyncValuesOML blocked Chromium's GPU thread and its frame clock (Steam's
++ * UI) had no vsync to follow. Refresh from RandR (Xwayland's mode is gamescope's rate),
++ * looked at every 2 s; DROIDDECK_GLX_REFRESH=<Hz> sets it, DROIDDECK_GLX_REAL_MSC=1 keeps
++ * the X server's counts. */
++#include <dlfcn.h>
++struct droiddeck_randr_info_reply { uint8_t response_type, set_of_rotations; uint16_t sequence; uint32_t length;
++                                    uint32_t root, timestamp, config_timestamp; uint16_t n_sizes, size_id, rotation, rate; };
++typedef struct { unsigned int sequence; } droiddeck_randr_cookie;
++
++static unsigned
++droiddeck_refresh_hz(xcb_connection_t *conn, xcb_window_t win)
++{
++   static int fixed = -1;
++   if (fixed < 0) {
++      const char *e = getenv("DROIDDECK_GLX_REFRESH");
++      fixed = e ? atoi(e) : 0;
++   }
++   if (fixed > 0)
++      return fixed;
++   static simple_mtx_t lock = SIMPLE_MTX_INITIALIZER;
++   static unsigned hz;
++   static int64_t checked;
++   static droiddeck_randr_cookie (*get_info)(xcb_connection_t *, xcb_window_t);
++   static struct droiddeck_randr_info_reply *(*get_info_reply)(xcb_connection_t *, droiddeck_randr_cookie, void **);
++   static bool tried;
++   int64_t now = os_time_get_nano();
++   simple_mtx_lock(&lock);
++   if (!tried) {
++      tried = true;
++      void *lib = dlopen("libxcb-randr.so.0", RTLD_NOW | RTLD_LOCAL);
++      if (lib) {
++         get_info = (droiddeck_randr_cookie (*)(xcb_connection_t *, xcb_window_t))dlsym(lib, "xcb_randr_get_screen_info");
++         get_info_reply = (struct droiddeck_randr_info_reply *(*)(xcb_connection_t *, droiddeck_randr_cookie, void **))
++            dlsym(lib, "xcb_randr_get_screen_info_reply");
++      }
++   }
++   if ((!hz || now - checked > 2000000000ll) && get_info && get_info_reply) {
++      checked = now;
++      unsigned old = hz;
++      struct droiddeck_randr_info_reply *r = get_info_reply(conn, get_info(conn, win), NULL);
++      if (r && r->rate >= 24 && r->rate <= 360)
++         hz = r->rate;
++      free(r);
++      if (hz != old)
++         fprintf(stderr, "droiddeck kopper: vblank clock at %u Hz (the X screen's refresh)\n", hz);
++   }
++   unsigned out = hz ? hz : 60;
++   simple_mtx_unlock(&lock);
++   return out;
++}
++
++static bool
++droiddeck_sync_values(struct dri_drawable *drawable, xcb_connection_t *conn, int64_t target_msc,
++                      int64_t divisor, int64_t remainder, int64_t *ust, int64_t *msc, int64_t *sbc)
++{
++   /* Off by default: with this clock Chromium drew at the panel's 120 Hz and the bridge fell
++    * behind until Steam's UI stalled for seconds. DROIDDECK_GLX_FAKE_MSC=1 turns it on. */
++   static int real = -1;
++   if (real < 0)
++      real = !debug_get_bool_option("DROIDDECK_GLX_FAKE_MSC", false);
++   if (real)
++      return false;
++   uint32_t win = ((VkXcbSurfaceCreateInfoKHR *)&drawable->info.bos)->window;
++   int64_t period = 1000000ll / droiddeck_refresh_hz(conn, win); /* microseconds */
++   int64_t now = os_time_get_nano() / 1000;
++   int64_t cur = now / period;
++   int64_t want = cur;
++   if (target_msc > cur)
++      want = target_msc;
++   else if (divisor > 0) {
++      want = cur - cur % divisor + remainder;
++      if (want <= cur)
++         want += divisor;
++   }
++   if (want > cur) {
++      int64_t wait = want * period - now;
++      if (wait > 0 && wait < 1000000)
++         os_time_sleep(wait);
++      cur = want;
++   }
++   *ust = cur * period;
++   *msc = cur;
++   *sbc = drawable->lastStamp;
++   return true;
++}
++
+ int
+ kopperGetSyncValues(struct dri_drawable *drawable, int64_t target_msc, int64_t divisor,
+                     int64_t remainder, int64_t *ust, int64_t *msc, int64_t *sbc)
+@@ -1348,6 +1538,9 @@
+    VkXcbSurfaceCreateInfoKHR *xcb = (VkXcbSurfaceCreateInfoKHR *)&info->bos;
+    xcb_connection_t *conn = xcb->connection;
+ 
++   if (droiddeck_sync_values(drawable, conn, target_msc, divisor, remainder, ust, msc, sbc))
++      return 1;
++
+    xcb_void_cookie_t cookie =
+       xcb_present_notify_msc(conn, xcb->window, 0, target_msc, divisor, remainder);
+ 

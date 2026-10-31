@@ -1,0 +1,56 @@
+pan/bi: treat TLS stores as helper-generating in the helper analysis
+
+The helper-invocation analysis tracks which SSA values need helper threads
+alive. It does not follow values through memory, so a value that is stored
+into a thread-local variable and loaded back later is treated as if it never
+required helpers: the store is an ordinary message instruction, and the load
+is a fresh definition. A shader that spills a derivative-derived value (or
+keeps it in a TLS variable across the point where helpers would otherwise be
+terminated) can therefore have helpers killed too early and read incorrect
+values back.
+
+Fix it the conservative way: any store into the thread-local segment counts
+as requiring helpers, so its sources join the dependency set. This matches
+the common nir_opt_load_skip_helpers behaviour that Kraid relies on.
+
+DXVK hits this with the same class of spilling shaders as the forced-TLS
+access hint: a value that should be helper-dependent survives in storage and
+comes back wrong, which reads as NaN/Inf in the lighting/exposure path and
+tonemaps to a white frame.
+
+Ported from upstream Mesa 45ea3ed8 ("pan/bi: handle tls-stores in helper
+analysis"), which is not in the pinned Mesa tree.
+
+diff --git a/src/panfrost/compiler/bifrost/bi_helper_invocations.c b/src/panfrost/compiler/bifrost/bi_helper_invocations.c
+--- a/src/panfrost/compiler/bifrost/bi_helper_invocations.c
++++ b/src/panfrost/compiler/bifrost/bi_helper_invocations.c
+@@ -1,5 +1,6 @@
+ /*
+  * Copyright (C) 2019-2021 Collabora, Ltd.
++ * Copyright (C) 2026 Arm Ltd.
+  * SPDX-License-Identifier: MIT
+  */
+
+@@ -237,6 +238,13 @@ bi_helper_block_update(BITSET_WORD *deps, bi_block *block)
+    return progress;
+ }
+
++static bool
++bi_is_tls_store(const bi_instr *I)
++{
++   return bi_get_opcode_props(I)->message == BIFROST_MESSAGE_STORE &&
++          I->seg == BI_SEG_TL;
++}
++
+ void
+ bi_analyze_helper_requirements(bi_context *ctx)
+ {
+@@ -246,7 +254,7 @@ bi_analyze_helper_requirements(bi_context *ctx)
+     * derivatives and the sources of conditional branch instructions */
+
+    bi_foreach_instr_global(ctx, I) {
+-      if (bi_instr_uses_helpers(I)) {
++      if (bi_instr_uses_helpers(I) || bi_is_tls_store(I)) {
+          bi_foreach_ssa_src(I, s)
+             BITSET_SET(deps, I->src[s].value);
+       } else {

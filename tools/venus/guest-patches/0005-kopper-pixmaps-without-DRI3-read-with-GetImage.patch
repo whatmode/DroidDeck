@@ -1,0 +1,62 @@
+diff --git a/src/gallium/frontends/dri/kopper.c b/src/gallium/frontends/dri/kopper.c
+index c3d2d88..51a9ae2 100644
+--- a/src/gallium/frontends/dri/kopper.c
++++ b/src/gallium/frontends/dri/kopper.c
+@@ -21,6 +21,7 @@
+  * DEALINGS IN THE SOFTWARE.
+  */
+ 
++#include <stdio.h>
+ #include "mesa_interface.h"
+ #include "git_sha1.h"
+ #include "util/format/u_format.h"
+@@ -125,6 +126,27 @@ pipe_format_to_fourcc(enum pipe_format format)
+    }
+ }
+ 
++/* DroidDeck: a pixmap is shared as a dma-buf only over DRI3. An X server without it (Xwayland
++ * -shm, no GPU drawing of its own) gets the request anyway and xcb closes the whole connection
++ * ("extension not supported"): Steam's web UI composites its windows through
++ * texture-from-pixmap and died on it. Without DRI3, pixmaps go the software way: their
++ * contents read with GetImage (drisw_update_tex_buffer). */
++static bool
++kopper_pixmap_dri3(const struct dri_drawable *drawable)
++{
++   if (drawable->info.bos.sType != VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR)
++      return false;
++   const VkXcbSurfaceCreateInfoKHR *xcb = (const VkXcbSurfaceCreateInfoKHR *)&drawable->info.bos;
++   const xcb_query_extension_reply_t *ext = xcb_get_extension_data(xcb->connection, &xcb_dri3_id);
++   bool present = ext && ext->present;
++   static bool told;
++   if (!present && !told) {
++      told = true;
++      fprintf(stderr, "droiddeck kopper: X server without DRI3, pixmaps read with GetImage\n");
++   }
++   return present;
++}
++
+ /** kopper_get_pixmap_buffer
+  *
+  * Get the DRM object for a pixmap from the X server and
+@@ -321,7 +343,8 @@ XXX do this once swapinterval is hooked up
+             drawable->window_valid = !!drawable->textures[statts[i]];
+          }
+ #ifdef VK_USE_PLATFORM_XCB_KHR
+-         else if (is_pixmap && statts[i] == ST_ATTACHMENT_FRONT_LEFT && !screen->is_sw) {
++         else if (is_pixmap && statts[i] == ST_ATTACHMENT_FRONT_LEFT && !screen->is_sw &&
++                  kopper_pixmap_dri3(drawable)) {
+             drawable->textures[statts[i]] = kopper_get_pixmap_buffer(drawable, format);
+             if (drawable->textures[statts[i]])
+                dri_image_fence_sync(ctx, drawable->image);
+@@ -451,7 +474,10 @@ kopper_update_tex_buffer(struct dri_drawable *drawable,
+                          struct pipe_resource *res)
+ {
+    struct dri_screen *screen = drawable->screen;
+-   if (screen->has_dmabuf || drawable->is_window || drawable->info.bos.sType != VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR)
++   if (drawable->is_window || drawable->info.bos.sType != VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR)
++      return;
++   /* DroidDeck: the dma-buf path needs DRI3 (see kopper_pixmap_dri3). */
++   if (screen->has_dmabuf && kopper_pixmap_dri3(drawable))
+       return;
+    drisw_update_tex_buffer(drawable, ctx, res);
+ }

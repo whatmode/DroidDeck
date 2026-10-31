@@ -2,7 +2,6 @@ package com.droiddeck.launcher.frontend
 
 import com.droiddeck.launcher.session.GameStorage
 import com.droiddeck.launcher.session.SessionPrefs
-import com.droiddeck.launcher.stores.StoreGameSidecar
 import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -35,8 +34,6 @@ class GamesFolderMigrationTest {
         val beta = File(pc, "Beta"); exe(pc, "Beta/Beta.exe"); val pick = exe(pc, "Beta/bin/Beta64.exe")
         val gone = File(pc, "Gone"); exe(pc, "Gone/Gone.exe")
         exe(pc, "steamapps/common/Installed/Installed.exe")
-        val store = File(pc, "Store"); exe(pc, "Store/Store.exe")
-        StoreGameSidecar.file(store).writeText("""{"store":"gog","id":"1","title":"Store Game","exe":"Store.exe"}""")
         File(pc, "Notes").mkdirs()
         SessionPrefs.setAddedGamesDirs(app, listOf(pc.path))
         SessionPrefs.setAddedGameExe(app, beta.path, pick.path)

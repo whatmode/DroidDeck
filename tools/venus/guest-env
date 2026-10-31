@@ -1,0 +1,110 @@
+# DroidDeck venus-bridge guest driver: the environment this driver needs.
+#
+# The app reads this when the driver is selected and adds it to the session after its own
+# defaults and before the user's droiddeck-env, so a line here is the driver's own setting and
+# nothing on the phone has to be edited to change it. One NAME=value per line; "#" starts a
+# comment.
+#
+# This file is the ONLY place a driver knob is stated. The APK sets no driver knob of its own --
+# it used to add DROIDDECK_VN_SYNC_PRESENT itself, and that line is gone -- so changing one of the
+# settings below means shipping a driver, never an APK build.
+#
+# A line in the user's droiddeck-env file is applied after this one and wins, which is deliberate:
+# every on-device A/B here is an edit to that file (DROIDDECK_VN_SYNC_PRESENT=0 restores the fast
+# path, DROIDDECK_VN_EMULATE_BC=0 disables the decode), so a knob the user's file could not
+# override would leave shipping another driver as the only way to test it.
+#
+# Present ordering (guest-patches/0021). The queue drain before every present is skipped and the
+# present is ordered by this submit's ring seqno instead: a wait for the host to execute through
+# the submit, not for the GPU to go idle. =1 is the ordered present; =0 is the fast path with no
+# ordering at all.
+DROIDDECK_VN_SYNC_PRESENT=1
+#
+# BC textures are decoded on the GPU (guest-patches/0024). On by default; stated so the zip
+# records which decode it carries.
+DROIDDECK_VN_BC_GPU=1
+#
+# ---- Diagnostics. Uncomment one line, push, and CI builds a driver that carries it, so the test
+# ---- is a driver install and not an edit on the device.
+#
+# The test that decides the frame collapse: BC emulation off. The textures that needed decoding
+# stay empty, so the picture is wrong on purpose; the "frames:" line is the measurement (back to
+# ~50 fps means the BC path is the collapse).
+#DROIDDECK_VN_EMULATE_BC=0
+#
+# The pacing lever: uncap the nested refresh from the session's 60 Hz to the panel's 120 Hz.
+# Steam's UI can overrun at 120 Hz ("Fatal IO error 11").
+#BL_MALI_REFRESH=120
+#
+# The other end of the present A/B: no ordering before the present.
+#DROIDDECK_VN_SYNC_PRESENT=0
+#
+# BC7 on the GPU. Off by default: BC7 is 1.4% of the compressed bytes, so it cannot move the
+# frame rate, and the black-texture reports came after it shipped on.
+#DROIDDECK_VN_BC7_GPU=1
+#
+# The A/B for the frame collapse (guest-patches/0026). The BC decode's two dispatches are ordered
+# with scopes that name only the stages that touch the buffers (host/transfer -> compute, compute
+# -> transfer). =1 puts back the ALL_COMMANDS -> ALL_COMMANDS barrier it used to record, which on a
+# tile-based GPU flushes the tiler per upload. Back to ~50 fps with this unset and 2-10 fps with it
+# set means the tiler flush was the collapse.
+#DROIDDECK_VN_BC_COARSE_BARRIER=1
+#
+# The A/B for the descriptor-pool round trips (guest-patches/0027). A pool the guest's accounting
+# calls full is refused on the spot, as upstream venus does; =1 puts back 0023's synchronous
+# allocation from the real pool, which the real pool refused too, ~60 times a frame in Lake, each
+# one a wait for the server to run everything queued before it.
+#DROIDDECK_VN_POOL_DEFER=1
+#
+# The BC decode's buffers in the server's native device-local memory (0027). =0 puts them back in
+# the first device-local type, which is host-visible dma-heap memory the server allocates and maps.
+#DROIDDECK_VN_BC_NATIVE=0
+#
+# How much the BC decode keeps pooled for reuse, in MiB (0027; default 384).
+#DROIDDECK_VN_BC_POOL_MB=384
+#
+# The game-session reports (0027): GPU busy from timestamps around each submission, this
+# program's threads' CPU use, and the descriptor-pool outcomes, every 10 s. =0 turns them off.
+#DROIDDECK_VN_STATS=0
+#
+# Games' textures and render targets in the server's native device-local memory (0028), instead of
+# the host-visible dma-heap type DXVK takes first. =0 offers the host-visible types again.
+#DROIDDECK_VN_IMAGE_NATIVE=0
+#
+# The command ring the game writes into, in KiB (0029; default 4096, was 128). A bigger ring lets the
+# game keep recording while the server is stuck on a slow call. 128 restores the old size.
+#DROIDDECK_VN_RING_KB=128
+#
+# The driver's own pipeline cache, kept on disk per game (0030): a pipeline compiled once is loaded
+# from ~/.cache/droiddeck-venus next time instead of compiled on the server's main ring. =0 turns
+# it off.
+#DROIDDECK_VN_PIPELINE_CACHE=0
+#
+# Compile the game's pipelines Steam has recorded before the game meets them (0032): the first
+# launch after the recordings change runs fossilize_replay in the background into the game's
+# pipeline cache. =0 turns it off.
+#DROIDDECK_VN_PRECOMPILE=0
+#
+# DXVK's tiler mode (0034): DXVK is told the GPU's own driver ID when it is a tiler (Mali), so it
+# records render passes with load/store ops fitted to a tiler instead of a desktop GPU's. =0 hides
+# it again (DXVK sees venus).
+#DROIDDECK_VN_DXVK_TILER=0
+#
+# How long of every 10 s report the GPU time is measured render pass by render pass (0035), in ms
+# (default 2000). 0 turns it off.
+#DROIDDECK_VN_PASS_STATS_MS=0
+#
+# Big GPU memory blocks (this many MiB and more, default 32) made ahead on a side ring after the
+# first of their kind (0036), so DXVK growing a heap does not stall the game for 60-100 ms. 0 turns
+# it off.
+#DROIDDECK_VN_SPARE_MB=0
+#
+# Which cores the program's busiest threads run on and the CPU clocks and caps, every 10 s (0037).
+# =0 turns it off.
+#DROIDDECK_VN_CPU_PLACE=0
+#
+# Threads kept off the slowest cluster (0038/0039), comma-separated, e.g. dxvk-cs (DXVK's command
+# thread, which otherwise runs mostly on the A520s). Default dxvk-cs again since 0041 (off in 0040
+# only), re-pinned within a second when Android puts it back. 0 turns it off. Needs
+# DROIDDECK_VN_CPU_PLACE.
+#DROIDDECK_VN_PIN_THREADS=0

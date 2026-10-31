@@ -1,0 +1,143 @@
+From 23619d2263999543cdb11427800f39e46c149ba2 Mon Sep 17 00:00:00 2001
+From: droiddeck <ci@droiddeck>
+Date: Sat, 24 Oct 2026 11:42:30 +0000
+Subject: [PATCH] vtest: import dma-bufs as blob resources
+
+---
+ vtest/vtest.h          |  1 +
+ vtest/vtest_protocol.h |  6 ++++
+ vtest/vtest_renderer.c | 76 ++++++++++++++++++++++++++++++++++++++++++
+ vtest/vtest_server.c   |  1 +
+ 4 files changed, 84 insertions(+)
+
+diff --git a/vtest/vtest.h b/vtest/vtest.h
+index ae42762..748b6e4 100644
+--- a/vtest/vtest.h
++++ b/vtest/vtest.h
+@@ -88,6 +88,7 @@ int vtest_get_param(uint32_t length_dw);
+ int vtest_get_capset(uint32_t length_dw);
+ int vtest_context_init(uint32_t length_dw);
+ int vtest_resource_create_blob(uint32_t length_dw);
++int vtest_resource_import_dmabuf(uint32_t length_dw);
+ 
+ int vtest_sync_create(uint32_t length_dw);
+ int vtest_sync_unref(uint32_t length_dw);
+diff --git a/vtest/vtest_protocol.h b/vtest/vtest_protocol.h
+index 0869f0d..67e5f7c 100644
+--- a/vtest/vtest_protocol.h
++++ b/vtest/vtest_protocol.h
+@@ -77,6 +77,12 @@
+ #define VCMD_SYNC_WRITE 22
+ #define VCMD_SYNC_WAIT 23
+ #define VCMD_SUBMIT_CMD2 24
++/* DroidDeck: import a dma-buf as a blob resource. Payload: size lo, size hi; then the
++ * dma-buf travels as SCM_RIGHTS on one extra byte. Reply: the resource id, 0 on failure. */
++#define VCMD_RESOURCE_IMPORT_DMABUF 25
++#define VCMD_RES_IMPORT_DMABUF_SIZE 2
++#define VCMD_RES_IMPORT_DMABUF_SIZE_LO 0
++#define VCMD_RES_IMPORT_DMABUF_SIZE_HI 1
+ 
+ #define VCMD_RES_CREATE_SIZE 10
+ #define VCMD_RES_CREATE_RES_HANDLE 0 /* must be 0 since protocol version 3 */
+diff --git a/vtest/vtest_renderer.c b/vtest/vtest_renderer.c
+index a4450f6..c8a6e4f 100644
+--- a/vtest/vtest_renderer.c
++++ b/vtest/vtest_renderer.c
+@@ -1239,6 +1239,82 @@ int vtest_resource_create_blob(UNUSED uint32_t length_dw)
+    return 0;
+ }
+ 
++static int vtest_receive_fd(int socket_fd)
++{
++   char c;
++   char buf[CMSG_SPACE(sizeof(int))];
++   struct iovec iovec = { .iov_base = &c, .iov_len = sizeof(c) };
++   struct msghdr msgh = { 0 };
++   msgh.msg_iov = &iovec;
++   msgh.msg_iovlen = 1;
++   msgh.msg_control = buf;
++   msgh.msg_controllen = sizeof(buf);
++
++   if (recvmsg(socket_fd, &msgh, MSG_CMSG_CLOEXEC) != 1)
++      return -1;
++   struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msgh);
++   if (!cmsg || cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS ||
++       cmsg->cmsg_len != CMSG_LEN(sizeof(int)))
++      return -1;
++   return *((int *)CMSG_DATA(cmsg));
++}
++
++/* A buffer another process made (a window an X client drew) handed to the renderer, so the
++ * guest can import it into Vulkan: the guest's vkAllocateMemory names the resource and the
++ * renderer imports the dma-buf into the host driver. */
++int vtest_resource_import_dmabuf(UNUSED uint32_t length_dw)
++{
++   struct vtest_context *ctx = vtest_get_current_context();
++   uint32_t buf[VCMD_RES_IMPORT_DMABUF_SIZE];
++   uint32_t resp_buf[VTEST_HDR_SIZE + 1];
++   struct virgl_renderer_resource_import_blob_args args;
++   struct vtest_resource *res = NULL;
++   int ret;
++
++   ret = ctx->input->read(ctx->input, buf, sizeof(buf));
++   if (ret != sizeof(buf))
++      return -1;
++
++   int fd = vtest_receive_fd(ctx->input->data.fd);
++   if (fd < 0)
++      return report_failed_call("vtest_receive_fd", -EINVAL);
++
++   uint64_t size = buf[VCMD_RES_IMPORT_DMABUF_SIZE_LO] |
++                   (uint64_t)buf[VCMD_RES_IMPORT_DMABUF_SIZE_HI] << 32;
++   uint32_t res_id = 0;
++
++   res = vtest_new_resource(0);
++   if (res) {
++      memset(&args, 0, sizeof(args));
++      args.res_handle = res->res_id;
++      args.blob_mem = VIRGL_RENDERER_BLOB_MEM_HOST3D;
++      args.fd_type = VIRGL_RENDERER_BLOB_FD_TYPE_DMABUF;
++      args.fd = fd;
++      args.size = size;
++      ret = virgl_renderer_resource_import_blob(&args);
++      if (ret) {
++         fprintf(stderr, "vtest: importing dma-buf (%llu bytes) failed: %d\n",
++                 (unsigned long long)size, ret);
++         close(fd);
++         list_add(&res->head, &renderer.free_resources);
++         res = NULL;
++      } else {
++         /* the resource owns the fd now */
++         virgl_renderer_ctx_attach_resource(ctx->ctx_id, res->res_id);
++         util_hash_table_set(ctx->resource_table, intptr_to_pointer(res->res_id), res);
++         res_id = res->res_id;
++      }
++   } else {
++      close(fd);
++   }
++
++   resp_buf[VTEST_CMD_LEN] = 1;
++   resp_buf[VTEST_CMD_ID] = VCMD_RESOURCE_IMPORT_DMABUF;
++   resp_buf[VTEST_CMD_DATA_START] = res_id;
++   ret = vtest_block_write(ctx->out_fd, resp_buf, sizeof(resp_buf));
++   return ret < 0 ? ret : 0;
++}
++
+ int vtest_resource_unref(UNUSED uint32_t length_dw)
+ {
+    struct vtest_context *ctx = vtest_get_current_context();
+diff --git a/vtest/vtest_server.c b/vtest/vtest_server.c
+index 3173323..4959c4e 100644
+--- a/vtest/vtest_server.c
++++ b/vtest/vtest_server.c
+@@ -703,6 +703,7 @@ static const struct vtest_command {
+    HANDLER(SYNC_WRITE,              sync_write,            true ),
+    HANDLER(SYNC_WAIT,               sync_wait,             true ),
+    HANDLER(SUBMIT_CMD2,             submit_cmd2,           true ),
++   HANDLER(RESOURCE_IMPORT_DMABUF,  resource_import_dmabuf, true ),
+ };
+ 
+ static int vtest_client_dispatch_commands(struct vtest_client *client)
+-- 
+2.43.0
+

@@ -29,6 +29,21 @@ public class LinuxVulkanDriverManager {
     public static final String LIB_NAME = "libvulkan_freedreno.so";
     public static final String ICD_NAME = "icd.json";
     public static final String META_NAME = "meta.json";
+    /**
+     * A driver's GL part (Zink and Mesa's GLX/EGL from the same Mesa as the Vulkan driver): the
+     * zip's gl/ folder, kept as is. Its gl.json marks it; its env file says what the session sets
+     * when the driver is selected, so GL changes ship in the driver, not in the app.
+     */
+    public static final String GL_DIR = "gl";
+    public static final String GL_MARKER = "gl.json";
+    public static final String GL_ENV = "env";
+    /**
+     * The driver's own env file at the zip root: one NAME=value per line, read when the driver is
+     * selected. It is what lets a driver carry its settings, so a knob that used to live in the
+     * APK or in the user's droiddeck-env changes by shipping a driver. Read before the GL part's
+     * env file, so the GL part can override a line here.
+     */
+    public static final String ENV_NAME = "env";
     /** Used when a zip's own ICD manifest states no api_version. */
     private static final String API_DEFAULT = "1.1.274";
     /** The zip's own ICD manifests, whose api_version the generated one carries over. */
@@ -43,7 +58,7 @@ public class LinuxVulkanDriverManager {
      * Ported from SPLATPLAYS/DroidDeck (51bd995).
      */
     private static final List<String> LIB_PREFIXES = Collections.unmodifiableList(Arrays.asList(
-            "libvulkan_freedreno", "libvulkan_panvk", "libvulkan_panfrost", "libvulkan_lvp"));
+            "libvulkan_freedreno", "libvulkan_panvk", "libvulkan_panfrost", "libvulkan_lvp", "libvulkan_virtio"));
 
     public static boolean isRuntimeDriverName(String name) {
         if (name == null || !name.endsWith(".so")) return false;
@@ -79,6 +94,104 @@ public class LinuxVulkanDriverManager {
         if (id == null || id.isEmpty() || id.contains("/") || id.contains("..")) return false;
         File dir = getDriverDir(id);
         return new File(dir, LIB_NAME).isFile() && new File(dir, ICD_NAME).isFile();
+    }
+
+    static boolean isSafeFileName(String name) {
+        return name != null && !name.equals(".") && !name.equals("..") && name.matches("[A-Za-z0-9._+-]+");
+    }
+
+    /** The driver's GL part, or null when it has none. */
+    public File getGlDir(String id) {
+        if (!isInstalled(id)) return null;
+        File gl = new File(getDriverDir(id), GL_DIR);
+        return new File(gl, GL_MARKER).isFile() ? gl : null;
+    }
+
+    /** What the session adds to its environment for the driver's GL part (empty without one). */
+    public List<String> glEnvironment(String id, List<String> current) {
+        File gl = getGlDir(id);
+        if (gl == null) return new ArrayList<>();
+        File env = new File(gl, GL_ENV);
+        String text = env.isFile() ? FileUtils.readString(env) : null;
+        return parseGlEnv(text, gl.getAbsolutePath(), current);
+    }
+
+    /**
+     * What the session adds to its environment for the driver itself, from the env file at the
+     * driver's root (empty without one). Read before {@link #glEnvironment}, so a line in the GL
+     * part's own env file still wins.
+     */
+    public List<String> driverEnvironment(String id, List<String> current) {
+        if (!isInstalled(id)) return new ArrayList<>();
+        File env = new File(getDriverDir(id), ENV_NAME);
+        String text = env.isFile() ? FileUtils.readString(env) : null;
+        return parseGlEnv(text, getDriverDir(id).getAbsolutePath(), current);
+    }
+
+    /**
+     * Add the driver's own settings to {@code guest}. The driver is the part that knows what it
+     * was built around, so its line replaces an earlier one of the same name that the app set.
+     *
+     * <p>The driver's two env files are read in order: the root {@code env}, then {@code gl/env}
+     * (Zink and Mesa's GLX/EGL from the same build), so a line in the GL part wins over the same
+     * line in the root file. A {@code NAME+=value} line in the GL part appends to what the root
+     * file produced, so both survive instead of the later one replacing the earlier.
+     *
+     * <p>The session applies these after the app's own lines and before the user's
+     * {@code droiddeck-env} and the agent, so a line in the user's file still overrides a knob the
+     * driver states. That is deliberate: every A/B this project runs on the device is an edit to
+     * that file, and a driver knob that nothing can override would leave shipping another driver
+     * as the only way to test it.
+     *
+     * @return the entries added, for the session log.
+     */
+    public List<String> applyDriverEnvironment(String id, List<String> guest) {
+        List<String> root = driverEnvironment(id, guest);
+        List<String> withRoot = new ArrayList<>(guest);
+        withRoot.addAll(root);
+        List<String> gl = glEnvironment(id, withRoot);
+        List<String> all = new ArrayList<>(root.size() + gl.size());
+        all.addAll(root);
+        all.addAll(gl);
+        guest.addAll(all);
+        return all;
+    }
+
+    /**
+     * A GL part's env file: one KEY=VALUE per line ("#" starts a comment), KEY+=VALUE to append
+     * to the variable with ":" (LD_LIBRARY_PATH), "@GL@" for the GL part's folder. Returns
+     * KEY=VALUE entries to add after {@code current} (later entries win).
+     */
+    static List<String> parseGlEnv(String text, String glPath, List<String> current) {
+        ArrayList<String> out = new ArrayList<>();
+        if (text == null) return out;
+        for (String raw : text.split("\n")) {
+            String line = raw.trim();
+            if (line.isEmpty() || line.startsWith("#")) continue;
+            int eq = line.indexOf('=');
+            if (eq <= 0) continue;
+            boolean append = line.charAt(eq - 1) == '+';
+            String key = line.substring(0, append ? eq - 1 : eq);
+            if (!key.matches("[A-Za-z_][A-Za-z0-9_]*")) continue;
+            String value = line.substring(eq + 1).replace("@GL@", glPath);
+            if (append) {
+                String before = lastValue(out, key);
+                if (before == null) before = lastValue(current, key);
+                if (before != null && !before.isEmpty()) value = before + ":" + value;
+            }
+            out.add(key + "=" + value);
+        }
+        return out;
+    }
+
+    private static String lastValue(List<String> env, String key) {
+        if (env == null) return null;
+        String prefix = key + "=";
+        for (int i = env.size() - 1; i >= 0; i--) {
+            String e = env.get(i);
+            if (e != null && e.startsWith(prefix)) return e.substring(prefix.length());
+        }
+        return null;
     }
 
     public String getIcdPath(String id) {
@@ -141,6 +254,18 @@ public class LinuxVulkanDriverManager {
                     if (entry.isDirectory()) continue;
                     String base = new File(entry.getName()).getName();
                     if (base.isEmpty()) continue;
+                    String path = entry.getName().replace('\\', '/');
+                    if (path.startsWith(GL_DIR + "/")) {
+                        // Flat folder of plain file names only.
+                        if (path.equals(GL_DIR + "/" + base) && isSafeFileName(base)) {
+                            File gl = new File(tmpDir, GL_DIR);
+                            if (!gl.isDirectory() && !gl.mkdirs()) throw new IOException("cannot create " + gl);
+                            Files.copy(zis, new File(gl, base).toPath(), StandardCopyOption.REPLACE_EXISTING);
+                        } else {
+                            Log.w(TAG, "skipping " + path + " in the driver's GL part");
+                        }
+                        continue;
+                    }
                     if (isRuntimeDriverName(base)) {
                         if (soName != null) Log.w(TAG, "zip has several Vulkan driver libraries; using the first (" + soName + ")");
                         else {
@@ -158,6 +283,10 @@ public class LinuxVulkanDriverManager {
                         } catch (Exception e) {
                             Log.w(TAG, "meta.json unreadable, ignoring: " + e.getMessage());
                         }
+                    } else if (path.equals(ENV_NAME) && isSafeFileName(base)) {
+                        // The driver's own environment. Kept verbatim: it is read back at session
+                        // start (driverEnvironment) and is how a driver carries its settings.
+                        Files.copy(zis, new File(tmpDir, ENV_NAME).toPath(), StandardCopyOption.REPLACE_EXISTING);
                     }
                 }
             }
@@ -227,6 +356,8 @@ public class LinuxVulkanDriverManager {
             meta.put("libc", "glibc");
             meta.put("minGlibc", minGlibc);
             meta.put("sourceLibraryName", soName);
+            String backend = zipMeta != null ? zipMeta.optString("backend", "") : "";
+            if (!backend.isEmpty()) meta.put("backend", backend);
             meta.put("apiVersion", apiVersion != null ? apiVersion : API_DEFAULT);
             meta.put("importedAt", System.currentTimeMillis());
             if (!FileUtils.writeString(new File(tmpDir, META_NAME), meta.toString(2))) throw new IOException("cannot write meta.json");
