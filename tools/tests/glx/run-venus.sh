@@ -215,12 +215,14 @@ else
   cp "$(ls /tmp/rec/*.foz | head -1)" $G/fozpipelinesv6/steamapprun_pipeline_cache.r/steamapp_pipeline_cache.foz 2>/dev/null
   cp $FZR /tmp/fzhome/.local/share/Steam/steamrtarm64/fossilize_replay
   before=$(wc -l < $L)
-  env HOME=/tmp/fzhome STEAM_COMPAT_CLIENT_INSTALL_PATH= MESA_SHADER_CACHE_DIR= MESA_GLSL_CACHE_DIR=$G BL_LAUNCH_DIR=/tmp/fzlaunch \
+  # STEAM_COMPAT_CLIENT_INSTALL_PATH is cleared so the script finds this fossilize_replay; the
+  # driver's log is named outright, or it would look for a Steam log dir under this HOME
+  env HOME=/tmp/fzhome STEAM_COMPAT_CLIENT_INSTALL_PATH= DROIDDECK_VK_LOG=$L MESA_SHADER_CACHE_DIR= MESA_GLSL_CACHE_DIR=$G BL_LAUNCH_DIR=/tmp/fzlaunch \
     timeout 300 python3 -c "import runpy,sys; m=runpy.run_path('tools/linuxfs/overlay/usr/local/bin/droiddeck-shader-precompile'); sys.exit(m['run']('1118240','vkstats'))" > $OUT/fz-pre.txt 2>&1; FZRC=$?
   cat $OUT/fz-pre.txt | tail -4 | cut -c1-300
   grep -v "^$" $G/droiddeck-venus/precompile.log 2>/dev/null | tail -6 | cut -c1-300
   tail -n +$((before + 1)) $L | grep -E "pipeline cache|precompile|emulated for" | cut -c1-220 | tail -6
-  env HOME=/tmp/fzhome STEAM_COMPAT_CLIENT_INSTALL_PATH= MESA_SHADER_CACHE_DIR= MESA_GLSL_CACHE_DIR=$G DROIDDECK_VN_PRECOMPILE_DONE=1 \
+  env HOME=/tmp/fzhome STEAM_COMPAT_CLIENT_INSTALL_PATH= DROIDDECK_VK_LOG=$L MESA_SHADER_CACHE_DIR= MESA_GLSL_CACHE_DIR=$G DROIDDECK_VN_PRECOMPILE_DONE=1 \
     timeout 60 $OUT/vkstats 0.1 $OUT/pc.spv > $OUT/fz-game.txt 2>&1
   tail -n +$((before + 1)) $L | grep "vkstats" | grep -E "pipeline cache|precompile" | cut -c1-220 | tail -3
   # its own annotation: the report chunks run out before this section
