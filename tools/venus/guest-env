@@ -103,6 +103,7 @@ DROIDDECK_VN_BC_GPU=1
 # =0 turns it off.
 #DROIDDECK_VN_CPU_PLACE=0
 #
-# Threads kept off the slowest cluster (0038), comma-separated; default dxvk-cs (DXVK's command
-# thread, which otherwise runs mostly on the A520s). 0 turns it off. Needs DROIDDECK_VN_CPU_PLACE.
-#DROIDDECK_VN_PIN_THREADS=0
+# Threads kept off the slowest cluster (0038/0039), comma-separated, e.g. dxvk-cs (DXVK's command
+# thread, which otherwise runs mostly on the A520s). Off by default since 0040: re-pinned every
+# second, Lake played worse. Needs DROIDDECK_VN_CPU_PLACE.
+#DROIDDECK_VN_PIN_THREADS=dxvk-cs

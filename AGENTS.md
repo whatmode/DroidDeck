@@ -2303,3 +2303,11 @@ between cpusets resets its affinity to the cpuset's CPUs; Android moves the app'
 the 0037 sampler thread checks the pinned threads once a second and pins them again, and each
 report logs `pinned <name>[tid]: its CPUs were put back N times ... and pinned again`. Checked with
 a stand-alone build that resets the affinity from outside.
+
+## The 2026-10-31-11 bundle (0039): worse, and no driver log; 0040
+
+The user reported Lake played worse with 0039 (dxvk-cs re-pinned every second). The bundle had no
+droiddeck_vulkan.txt: the app's SessionArtifacts leaves out Steam logs of 8 MiB or more, and the
+driver only started the file over past 4 MiB when a process opened it, so one session could take it
+over the limit. 0040: DROIDDECK_VN_PIN_THREADS defaults to 0 (the 0038/0039 code stays for
+asking), and the log starts over past 1 MiB.

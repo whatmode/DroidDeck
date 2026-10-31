@@ -1,0 +1,29 @@
+diff -ruN a/src/virtio/vulkan/vn_common.c b/src/virtio/vulkan/vn_common.c
+--- a/src/virtio/vulkan/vn_common.c	2026-10-31 11:55:56.474127768 +0000
++++ b/src/virtio/vulkan/vn_common.c	2026-10-31 11:55:58.782191920 +0000
+@@ -142,7 +142,9 @@
+       snprintf(path, sizeof(path), "%s/droiddeck_vulkan.txt", dir);
+    }
+    struct stat st;
+-   bool big = stat(path, &st) == 0 && st.st_size > 4 * 1024 * 1024;
++   /* started over past 1 MiB (was 4): a game session adds several MiB, and the app leaves out Steam
++    * logs over 8 MiB, so on 2026-10-31-11 the file was missing from the bundle */
++   bool big = stat(path, &st) == 0 && st.st_size > 1024 * 1024;
+    vn_dd_file = fopen(path, big ? "w" : "a");
+    /* the program: its command line's first two words (Wine: the .exe) */
+    FILE *c = fopen("/proc/self/cmdline", "r");
+diff -ruN a/src/virtio/vulkan/vn_droiddeck_stats.c b/src/virtio/vulkan/vn_droiddeck_stats.c
+--- a/src/virtio/vulkan/vn_droiddeck_stats.c	2026-10-31 11:55:56.474035628 +0000
++++ b/src/virtio/vulkan/vn_droiddeck_stats.c	2026-10-31 11:55:58.782153932 +0000
+@@ -383,9 +383,10 @@
+ {
+    static const char *names = NULL;
+    if (!names) {
++      /* 0040: off unless asked for -- with 0039 re-pinning it every second, Lake played worse */
+       names = os_get_option("DROIDDECK_VN_PIN_THREADS");
+       if (!names)
+-         names = "dxvk-cs";
++         names = "0";
+    }
+    if (!strcmp(names, "0") || !names[0])
+       return;
