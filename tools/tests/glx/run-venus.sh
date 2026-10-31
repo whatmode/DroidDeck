@@ -141,6 +141,11 @@ grep -q "gpu over .*as the union of [1-9][0-9]* timed" $OUT/statslog-default.txt
   || { echo "FAIL GPU busy measured by timestamps"; grep "gpu" $OUT/statslog-default.txt | head -3; }
 grep -q "ring: 4096 KiB" $OUT/statslog-default.txt && echo "PASS the 4 MiB command ring" || { echo "FAIL the 4 MiB command ring"; grep "ring:" $OUT/statslog-default.txt | head -2; }
 grep -q "cpu over .*this program" $OUT/statslog-default.txt && echo "PASS this program's CPU use by thread" || echo "FAIL this program's CPU use by thread"
+# 0037: which cores the busiest threads ran on, and the clocks
+grep -E "cpu cores:|cpu placement" $OUT/statslog-default.txt | tail -2 | cut -c1-300
+grep -q "cpu cores: cpu [0-9]" $OUT/statslog-default.txt \
+  && grep -q "cpu placement over .*vkstats\[[0-9]*\] running in [0-9]*% of samples:.*(allowed [0-9]" $OUT/statslog-default.txt \
+  && echo "PASS the busiest threads' cores and clocks" || echo "FAIL the busiest threads' cores and clocks"
 grep "wait stack" $OUT/statslog-default.txt | grep -q "in thread 'vkstats'.* vn_[A-Za-z_]*+0x" \
   && echo "PASS wait stacks name the thread and the driver's functions" \
   || { echo "FAIL wait stacks name the thread and the driver's functions"; grep "wait stack" $OUT/statslog-default.txt | head -2 | cut -c1-300; }

@@ -2255,3 +2255,18 @@ most, a kind whose allocation fails is not retried; spares are freed at vkDestro
 `spare memory: N served at once, M missed ..., K made ahead on a side ring (avg, max ms) ...`.
 CI: vkmem (alias server) allocates three 64 MiB device-local-only blocks 0.5 s apart and draws
 into the third; the check wants 2 served at once and the right pixels.
+
+## The 2026-10-31-07 bundle (0036 on the device), and 0037: cores and clocks
+
+0036 worked (27 blocks served at once, 6 first-of-a-kind misses, made on the side ring in ~59 ms
+avg). In-game hitches no longer line up with any driver wait; the frame rate alternates between
+~10 fps (main thread ~73% of a core, GPU 60-67% busy: the game's CPU side, x86 under emulation)
+and ~15 fps (GPU 80-90% busy: shadow map 15-17 ms, G-buffer 13-16 ms). Remaining main-ring
+allocations at area loads are dedicated/small ones 0036 does not cover.
+
+0037 (`vn_droiddeck_stats.c`): `cpu cores:` once (clusters from /proc/cpuinfo CPU part and
+cpuinfo_max_freq, whether cpufreq is readable, /proc/self/cpuset) and every 10 s `cpu placement`:
+for the program's four busiest threads of the last report, the share of 20 Hz samples in state R
+and on which core type, the allowed CPUs (sched_getaffinity), and per cluster the average clock
+and the lowest cap seen (scaling_max_freq below cpuinfo_max_freq = thermal or power cap).
+DROIDDECK_VN_CPU_PLACE=0 turns it off.

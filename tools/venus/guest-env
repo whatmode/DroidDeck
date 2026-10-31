@@ -98,3 +98,7 @@ DROIDDECK_VN_BC_GPU=1
 # first of their kind (0036), so DXVK growing a heap does not stall the game for 60-100 ms. 0 turns
 # it off.
 #DROIDDECK_VN_SPARE_MB=0
+#
+# Which cores the program's busiest threads run on and the CPU clocks and caps, every 10 s (0037).
+# =0 turns it off.
+#DROIDDECK_VN_CPU_PLACE=0
