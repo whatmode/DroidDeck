@@ -2159,3 +2159,18 @@ launch; its log tail is printed (`precompile: last run: ...`). `DROIDDECK_VN_PRE
 off. Open question this build answers: whether fossilize_replay through the bridge compiles at all
 (Steam's own replays did 3000 pipelines in 13 s, which is too fast) -- the replay's own
 `pipeline cache: saved ... (N new pipelines)` lines and `precompile.log` will say.
+
+## 0033: precompile the whole library while Steam is open
+
+The user asked for shaders compiled before launch, as on a Steam Deck. A driver is only loaded into
+Vulkan programs, but the Steam client's UI process (`steamwebhelper`, Zink) is one from the moment
+Steam opens. Its first device (no Steam shader dir set, `steamwebhelper` in its cmdline) starts a
+thread that walks `~/.local/share/Steam/steamapps/shadercache/*/fozpipelinesv6` and runs 0032's
+per-game replay for each game whose recorded databases changed since its last complete run, one
+game after another, waiting for each. One Steam process does it (`shadercache/droiddeck-precompile.pid`
+with a live-pid check). A game started meanwhile finds its replay's `started` marker with a live
+pid, does not start a second one, and merges what the replay saves. Log lines:
+`precompile: going through the library`, `precompile: <dir> finished in N s (exit E)`,
+`precompile: the library is done (G game(s) ..., R replayed)`. Same switch:
+`DROIDDECK_VN_PRECOMPILE=0`. CI: a copy of `vkstats` named `steamwebhelper` with two fake games
+in a fake library must leave both games' `.done` markers.
